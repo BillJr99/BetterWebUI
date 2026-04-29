@@ -184,7 +184,7 @@ label small { font-weight: 400; }
 /* ---------- Sidebar ---------- */
 
 #sidebar {
-  width: 320px;
+  width: 360px;
   flex-shrink: 0;
   background: var(--parchment-soft);
   border-right: 1px solid var(--parchment-edge);
@@ -239,16 +239,20 @@ label small { font-weight: 400; }
   background: var(--parchment-soft);
 }
 .tab {
-  flex: 1;
+  flex: 1 1 0;
+  min-width: 0;
   border: 0;
   background: transparent;
-  padding: 11px 4px;
+  padding: 10px 2px;
   border-radius: 0;
-  font-size: 13px;
-  letter-spacing: 0.04em;
+  font-size: 12px;
+  letter-spacing: 0.01em;
   color: var(--ink-faint);
   border-bottom: 2px solid transparent;
   font-weight: 500;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  overflow: hidden;
 }
 .tab:hover { background: transparent; color: var(--ink-soft); }
 .tab.active {
@@ -992,6 +996,36 @@ ul.plain-list li:last-child { border-bottom: 0; }
   align-self: center;
 }
 .download-link:hover { background: var(--parchment-pale); color: var(--accent); }
+
+/* ---------- Toasts ---------- */
+
+#toast-root {
+  position: fixed;
+  top: 18px;
+  right: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 200;
+  pointer-events: none;
+}
+.toast {
+  pointer-events: auto;
+  background: var(--ink);
+  color: var(--parchment-light);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  padding: 10px 14px;
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-lg);
+  opacity: 0;
+  transform: translateY(-6px);
+  transition: opacity 0.2s ease, transform 0.2s ease;
+  max-width: 360px;
+}
+.toast.visible { opacity: 1; transform: translateY(0); }
+.toast.warn { background: var(--accent); }
+.toast.good { background: var(--moss); }
 
 /* ---------- Responsive ---------- */
 

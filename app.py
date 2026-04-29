@@ -1663,10 +1663,26 @@ class ChatRequest(BaseModel):
     title: Optional[str] = None
 
 
+# Roles OpenAI/OpenWebUI's chat completions API accepts. Anything else is a
+# UI-only annotation we created on the client and must NOT be forwarded.
+_VALID_ROLES = {"system", "user", "assistant", "function", "tool", "developer"}
+
+
 def to_openai_messages(history: list, system_prompt: str) -> list:
     out = [{"role": "system", "content": system_prompt}]
     for m in history:
         role = m.get("role", "user")
+        if role not in _VALID_ROLES:
+            # "system-event" and similar UI-only messages are dropped here.
+            continue
+        # "tool" messages without a tool_call_id will also be rejected; if
+        # they're our pure-UI tool displays (no tool_call_id), demote them
+        # into a synthetic user message so the model still sees the result.
+        if role == "tool" and not m.get("tool_call_id"):
+            role = "user"
+            content = f"[Tool result]\n{m.get('content', '')}"
+            out.append({"role": role, "content": content})
+            continue
         content = m.get("content", "")
         attachments = m.get("attachments") or []
         if attachments and role == "user":
@@ -1704,7 +1720,13 @@ async def chat(req: ChatRequest):
         await queue.put({"event": event, "data": data})
 
     async def run_loop() -> None:
-        history = list(req.messages)
+        # Defensive intake filter: never let UI-only roles ("system-event",
+        # ad-hoc tool displays without tool_call_id) enter the canonical
+        # history that we persist and feed back to the model.
+        history = [
+            m for m in req.messages
+            if isinstance(m, dict) and m.get("role") in {"user", "assistant"}
+        ]
         system_prompt = build_system_prompt(cfg, prompts)
         try:
             for _step in range(8):  # safety cap on tool iterations
