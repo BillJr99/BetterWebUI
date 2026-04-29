@@ -1,0 +1,29 @@
+# Python virtualenv (created by start.sh / start.bat on first run)
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+
+# User data — settings (with API key), conversations, uploaded files, etc.
+# These are personal to each install and should never be committed.
+data/config.json
+data/conversations.json
+data/workspaces.json
+data/mcp_servers.json
+data/cli_tools.json
+data/system_prompts.json
+data/uploads/
+data/generated/
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*~
+
+# Logs / runtime
+*.log

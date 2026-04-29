@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>BetterWebUI — a thoughtful AI workspace</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;0,600;0,700;1,400;1,500&family=JetBrains+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css"
+      integrity="sha384-nB0miv6/jRmo5UMMR1wu3Gz6NLsoTkbqJghGIsx//Rlm+ZU03BU6SQNC66uf4l5+"
+      crossorigin="anonymous"
+    />
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body>
+    <aside id="sidebar">
+      <div class="sidebar-header">
+        <h1 class="brand">
+          <span class="brand-mark">§</span>
+          <span class="brand-name">BetterWebUI</span>
+        </h1>
+        <p class="brand-subtitle">A thoughtful workspace for AI</p>
+        <button id="new-chat-btn" class="primary">Begin a new chat</button>
+      </div>
+
+      <nav class="tabs" role="tablist">
+        <button class="tab active" data-tab="chats">Chats</button>
+        <button class="tab" data-tab="workspaces">Workspaces</button>
+        <button class="tab" data-tab="skills">Skills</button>
+        <button class="tab" data-tab="prompts">Prompts</button>
+        <button class="tab" data-tab="tools">Tools</button>
+        <button class="tab" data-tab="settings">Settings</button>
+      </nav>
+
+      <section id="tab-chats" class="tab-panel active">
+        <ul id="conversation-list"></ul>
+      </section>
+
+      <section id="tab-workspaces" class="tab-panel">
+        <div class="panel-actions">
+          <button id="new-workspace-btn">+ New workspace</button>
+        </div>
+        <p class="hint">
+          A workspace bundles a system prompt, chosen skills, MCP servers,
+          CLI shortcuts, and persistent files into a saved configuration
+          you can return to.
+        </p>
+        <ul id="workspace-list"></ul>
+      </section>
+
+      <section id="tab-skills" class="tab-panel">
+        <div class="panel-actions">
+          <button id="new-skill-btn">+ New skill</button>
+          <label class="upload-label">
+            Upload .md
+            <input id="upload-skill" type="file" accept=".md" hidden />
+          </label>
+        </div>
+        <p class="hint">
+          Skills are short markdown briefs telling the assistant <em>how</em>
+          to do something. The assistant loads one when the request matches.
+        </p>
+        <ul id="skill-list"></ul>
+      </section>
+
+      <section id="tab-prompts" class="tab-panel">
+        <div class="panel-actions">
+          <button id="new-prompt-btn">+ New prompt</button>
+        </div>
+        <p class="hint">
+          System prompts shape the assistant's role and tone. Pick the one
+          to use as the active voice.
+        </p>
+        <ul id="prompt-list"></ul>
+      </section>
+
+      <section id="tab-tools" class="tab-panel">
+        <h2>MCP servers</h2>
+        <div class="panel-actions">
+          <button id="mcp-from-registry-btn" class="primary">+ Add from registry</button>
+          <button id="mcp-custom-btn">+ Custom</button>
+        </div>
+        <p class="hint">
+          MCP servers extend the assistant with new tools — file systems,
+          GitHub, web fetch, search, memory. Some require Node.js or
+          Python's <code>uv</code> to be installed.
+        </p>
+        <ul id="mcp-server-list"></ul>
+
+        <h2>CLI shortcuts</h2>
+        <div class="panel-actions">
+          <button id="cli-from-registry-btn" class="primary">+ Add from registry</button>
+          <button id="cli-custom-btn">+ Custom</button>
+        </div>
+        <p class="hint">
+          Named command-line tools the assistant knows are available. The
+          assistant calls them with arguments via <code>cli_call</code>;
+          each invocation still needs your approval.
+        </p>
+        <ul id="cli-tool-list"></ul>
+      </section>
+
+      <section id="tab-settings" class="tab-panel">
+        <h2>Connection</h2>
+        <label
+          >OpenWebUI URL
+          <input
+            id="cfg-base-url"
+            type="text"
+            placeholder="http://localhost:3000"
+          />
+          <small>Just the root — paths like /api or /v1 are detected automatically.</small>
+        </label>
+        <label
+          >API key
+          <input id="cfg-api-key" type="password" placeholder="paste your key" />
+          <small id="cfg-api-key-status">Not set</small>
+        </label>
+        <button id="save-connection" class="primary">Save &amp; test</button>
+        <p class="status-line" id="connection-status"></p>
+
+        <h2>Defaults</h2>
+        <label
+          >Default chat model
+          <select id="cfg-default-model"></select>
+        </label>
+        <label
+          >Image model <small>(optional)</small>
+          <input
+            id="cfg-image-model"
+            type="text"
+            placeholder="dall-e-3 — or leave blank"
+          />
+        </label>
+        <label
+          >Text-to-speech voice
+          <input id="cfg-tts-voice" type="text" placeholder="alloy" />
+        </label>
+
+        <h2>Safety</h2>
+        <label class="checkbox">
+          <input id="cfg-shell-enabled" type="checkbox" />
+          Allow shell execution <small>(every command is approved by you)</small>
+        </label>
+
+        <button id="save-defaults" class="primary">Save defaults</button>
+
+        <h2>About</h2>
+        <p class="hint" id="about-info">Loading…</p>
+      </section>
+    </aside>
+
+    <main id="main">
+      <header id="chat-header">
+        <div class="chat-title-wrap">
+          <select id="workspace-select" title="Active workspace"></select>
+          <select id="chat-model-select" title="Model for this chat"></select>
+        </div>
+        <div class="chat-actions">
+          <span id="active-workspace-label" class="muted-label"></span>
+        </div>
+      </header>
+
+      <div id="messages"></div>
+
+      <div id="composer">
+        <div id="attachments-preview"></div>
+        <div class="composer-row">
+          <label class="upload-label icon" title="Attach a file (image, etc.)">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/>
+            </svg>
+            <input id="attach-input" type="file" hidden />
+          </label>
+          <textarea
+            id="composer-input"
+            placeholder="Ask anything. The assistant can run commands, read your files, and create images or audio — but only with your approval."
+            rows="2"
+          ></textarea>
+          <button id="send-btn" class="primary">Send</button>
+        </div>
+      </div>
+    </main>
+
+    <div id="dialog-root"></div>
+
+    <template id="message-template">
+      <div class="message">
+        <div class="role"></div>
+        <div class="content"></div>
+      </div>
+    </template>
+
+    <!-- Markdown + sanitization + math -->
+    <script src="https://cdn.jsdelivr.net/npm/marked@13.0.3/marked.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
+    <script
+      src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"
+      integrity="sha384-7zkQWkzuo3B5mTepMUcHkMB5jZaolc2xDwL6VFqjFALcbeS9Ggm/Yr2r3Dy4lfFg"
+      crossorigin="anonymous"
+    ></script>
+    <script
+      src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"
+      integrity="sha384-43gviWU0YVjaDtb/GhzOouOXtZMP/7XUzwPTstBeZFe/+rCMvRwr4yROQP43s0Xk"
+      crossorigin="anonymous"
+    ></script>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>
