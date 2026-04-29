@@ -601,10 +601,6 @@ After the tool runs, the result is added to the conversation and you continue.
 Output at most one tool call per assistant turn. Speak naturally to the user
 before and after tool calls. Never invent tool output — wait for the result.
 
-You may use Markdown freely (headings, lists, tables, code fences, links).
-Mathematics is rendered with KaTeX: use $...$ for inline math and $$...$$
-for display equations. \\(...\\) and \\[...\\] also work.
-
 Available tools:
 
 - execute_shell: run a shell command on the user's computer. The host OS is
@@ -643,6 +639,75 @@ Available tools:
 """.strip()
 
 
+RENDERING_PROTOCOL = r"""
+The user sees your replies rendered as Markdown with LaTeX/KaTeX for math.
+This is not a hint — it's how the UI works. Plain-text "math" like
+"x^2 + (b/a)x = -c/a" displays literally and looks wrong. Always wrap
+mathematics in LaTeX delimiters and use real LaTeX commands.
+
+Markdown:
+  Headings:    ##, ###  (use ### for sub-sections inside replies)
+  Emphasis:    **bold**, *italic*
+  Code:        `inline`, ```python\nfenced\n```
+  Lists:       - bullet      OR      1. numbered
+  Quotes:      > a quote
+  Links:       [text](https://example.com)
+  Tables:      | header | header |
+               |--------|--------|
+               | a      | b      |
+
+Math — REQUIRED for any equation, expression, fraction, exponent, root,
+sum, integral, matrix, or set-builder. Choose:
+  Inline:   $...$            $\\(...\\)$
+  Display:  $$...$$           \\[...\\]
+
+Use real LaTeX commands. WRONG vs RIGHT:
+
+  WRONG:   x^2 + (b/a)x = -c/a
+  RIGHT:   $x^{2} + \frac{b}{a}\,x = -\frac{c}{a}$
+
+  WRONG:   sqrt(b^2 - 4ac)
+  RIGHT:   $\sqrt{b^{2} - 4ac}$
+
+  WRONG:   (-b +/- sqrt(b^2 - 4ac)) / (2a)
+  RIGHT:   $$x = \frac{-b \pm \sqrt{b^{2} - 4ac}}{2a}$$
+
+  WRONG:   sum from i=1 to n of i^2
+  RIGHT:   $\sum_{i=1}^{n} i^{2}$
+
+  WRONG:   integral from 0 to 1 of x^2 dx
+  RIGHT:   $\int_{0}^{1} x^{2}\,dx$
+
+Common LaTeX you should know:
+  Fractions       \frac{num}{den}        Roots     \sqrt{x}, \sqrt[n]{x}
+  Exponents       x^{n}    (always brace multi-character exponents)
+  Subscripts      x_{i}
+  Operators       \pm  \mp  \cdot  \times  \div  \ast
+  Relations       \leq  \geq  \neq  \approx  \equiv  \rightarrow  \Leftrightarrow
+  Greek           \alpha \beta \gamma \delta \epsilon \pi \sigma \theta \phi \omega
+  Sets            \mathbb{R} \mathbb{N} \mathbb{Z} \emptyset \in \notin \subset
+  Logic           \forall \exists \neg \land \lor \Rightarrow
+  Calculus        \int  \sum  \prod  \lim  \partial  \nabla  \infty
+  Spacing         \,  (thin space)   \;  (thick)   \quad  \qquad
+
+Aligned multi-line equations:
+$$
+\begin{aligned}
+ax^{2} + bx + c &= 0 \\
+x &= \frac{-b \pm \sqrt{b^{2} - 4ac}}{2a}
+\end{aligned}
+$$
+
+Matrices:
+$$
+A = \begin{pmatrix} 1 & 2 \\ 3 & 4 \end{pmatrix}
+$$
+
+When in doubt: lean toward wrapping it in $...$. Never use ASCII math
+shortcuts (^, /, sqrt(), <=, !=, sum, int) in user-visible prose.
+""".strip()
+
+
 def resolve_active_workspace(config: dict) -> Optional[dict]:
     wid = config.get("active_workspace_id")
     if not wid:
@@ -669,6 +734,9 @@ def build_system_prompt(config: dict, prompts: dict) -> str:
             f"Active workspace: {workspace['name']}."
             + (f" {workspace['description']}" if workspace.get("description") else "")
         )
+
+    # 1.5 Rendering rules — prominent so the model leans on Markdown + LaTeX.
+    parts.append(RENDERING_PROTOCOL)
 
     # 2. Available skills.
     if workspace:
