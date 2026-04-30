@@ -608,6 +608,10 @@ Available tools:
   APPROVAL IS REQUIRED before the command runs — if denied, you'll see an
   error and should ask the user what they'd prefer. Args: {"command": "...",
   "reason": "short explanation of why this command is needed"}.
+  GRAPH / PLOT CONVENTION: if you run a Python script that generates a plot,
+  save it to /tmp/bwui_plot.png (e.g. plt.savefig('/tmp/bwui_plot.png',
+  bbox_inches='tight')) instead of plt.show(). The image is then
+  automatically captured and displayed inline in the chat.
 
 - read_file: read file(s) chosen by the user. The user is shown a file
   picker — you do NOT specify a path. The result is the chosen file(s)' name,
@@ -735,7 +739,15 @@ def build_system_prompt(config: dict, prompts: dict) -> str:
             + (f" {workspace['description']}" if workspace.get("description") else "")
         )
 
-    # 1.5 Rendering rules — prominent so the model leans on Markdown + LaTeX.
+    # 1.5 Response style.
+    parts.append(
+        "Always attempt a complete, useful response to the user's request before "
+        "asking clarifying questions. If something is ambiguous, make a reasonable "
+        "assumption, state it briefly, and proceed. Save any follow-up questions for "
+        "the end of your reply, after the substantive response."
+    )
+
+    # 1.6 Rendering rules — prominent so the model leans on Markdown + LaTeX.
     parts.append(RENDERING_PROTOCOL)
 
     # 2. Available skills.
@@ -810,9 +822,10 @@ def extract_tool_call(text: str) -> Optional[dict]:
         return None
     if not isinstance(call, dict) or "tool" not in call:
         return None
+    raw_args = call.get("args", {}) or {}
     return {
         "tool": call["tool"],
-        "args": call.get("args", {}) or {},
+        "args": raw_args if isinstance(raw_args, dict) else {},
         "raw_block": text[start : end + 3],
     }
 
@@ -957,7 +970,11 @@ async def call_openwebui_image(prompt: str, size: str, config: dict) -> dict:
             detail=f"Image generation failed: {resp.text[:500]}",
         )
     body = resp.json()
-    item = (body.get("data") or [{}])[0]
+    # Some backends return a bare list; others wrap it in {"data": [...]}.
+    if isinstance(body, list):
+        item = body[0] if body else {}
+    else:
+        item = (body.get("data") or [{}])[0] if isinstance(body, dict) else {}
     filename = f"{_slug(prompt)}-{uuid.uuid4().hex[:6]}.png"
     if "b64_json" in item:
         return {
@@ -1033,6 +1050,18 @@ async def execute_tool(
             return {"error": "User denied this command."}
         await send_event("tool_running", {"tool": "execute_shell", "command": command})
         result = await run_shell(command)
+        # Auto-capture: if the command produced an image at the conventional
+        # output path, attach it to the result so it renders inline in chat.
+        for _img_path in (Path("/tmp/bwui_plot.png"), ROOT / "bwui_plot.png"):
+            if _img_path.exists():
+                try:
+                    result["filename"] = "plot.png"
+                    result["mime"] = "image/png"
+                    result["data_b64"] = base64.b64encode(_img_path.read_bytes()).decode("ascii")
+                    _img_path.unlink()
+                except Exception:
+                    pass
+                break
         return result
 
     if tool == "read_file":
@@ -1164,6 +1193,58 @@ async def execute_tool(
         return await run_shell(command)
 
     return {"error": f"Unknown tool: {tool}"}
+
+
+# ---------------------------------------------------------------------------
+# Context-window management
+# ---------------------------------------------------------------------------
+
+# 1 token ≈ 4 chars of English text (rough approximation).
+# Set CONTEXT_TOKEN_LIMIT to match the model you're using.
+# Common values: 4_000, 8_000, 16_000, 32_000, 128_000.
+# We default to 32 K — conservative enough to work with almost any model.
+CONTEXT_TOKEN_LIMIT = 32_000
+_CONTEXT_CHAR_BUDGET = int(CONTEXT_TOKEN_LIMIT * 0.80 * 4)  # 80 % safety margin
+
+
+def _count_chars(messages: list) -> int:
+    total = 0
+    for m in messages:
+        c = m.get("content", "")
+        if isinstance(c, str):
+            total += len(c)
+        elif isinstance(c, list):
+            for part in c:
+                if isinstance(part, dict) and part.get("type") == "text":
+                    total += len(part.get("text", ""))
+    return total
+
+
+def trim_to_context(history: list, system_prompt: str) -> tuple[list, int]:
+    """Remove the oldest messages until the estimated token usage fits within
+    _CONTEXT_CHAR_BUDGET.  Always keeps at least the most recent 2 messages.
+    Returns (trimmed_history, number_of_messages_dropped)."""
+    budget = max(_CONTEXT_CHAR_BUDGET - len(system_prompt), 4_000)
+    total = _count_chars(history)
+    if total <= budget:
+        return history, 0
+
+    trimmed = list(history)
+    n_dropped = 0
+
+    while total > budget and len(trimmed) > 2:
+        removed = trimmed.pop(0)
+        total -= _count_chars([removed])
+        n_dropped += 1
+
+    # Ensure the history still starts with a user turn; shed any orphaned
+    # assistant messages left at the front by the loop above.
+    while trimmed and trimmed[0].get("role") != "user":
+        total -= _count_chars([trimmed[0]])
+        trimmed.pop(0)
+        n_dropped += 1
+
+    return trimmed, n_dropped
 
 
 # ---------------------------------------------------------------------------
@@ -1798,6 +1879,12 @@ async def chat(req: ChatRequest):
         system_prompt = build_system_prompt(cfg, prompts)
         try:
             for _step in range(8):  # safety cap on tool iterations
+                history, n_dropped = trim_to_context(history, system_prompt)
+                if n_dropped:
+                    await send_event(
+                        "notice",
+                        {"message": f"Context trimmed: {n_dropped} older message(s) removed to fit the model's context window."},
+                    )
                 openai_messages = to_openai_messages(history, system_prompt)
                 await send_event("status", {"message": "Thinking..."})
                 text = await chat_complete(openai_messages, model, cfg)

@@ -727,6 +727,30 @@ label small { font-weight: 400; }
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 
+/* Typing indicator — three bouncing dots shown while waiting for a reply */
+.message.typing .content {
+  padding: 14px 20px;
+}
+.typing-dots {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+}
+.typing-dots span {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--ink-faint);
+  animation: typing-bounce 1.3s ease-in-out infinite;
+}
+.typing-dots span:nth-child(2) { animation-delay: 0.18s; }
+.typing-dots span:nth-child(3) { animation-delay: 0.36s; }
+@keyframes typing-bounce {
+  0%, 70%, 100% { transform: translateY(0);    opacity: 0.35; }
+  35%           { transform: translateY(-7px); opacity: 1;    }
+}
+
 .empty-state {
   text-align: center;
   padding: 80px 24px 60px 24px;

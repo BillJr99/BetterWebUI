@@ -18,6 +18,9 @@ const state = {
   messages: [],
   attachments: [],
   busy: false,
+  // Keyed by filename → { url, mime, filename }. Blob URLs created here
+  // survive the `done` re-render so images/audio stay visible in-chat.
+  fileStore: {},
 };
 
 // ---------------------------------------------------------------------------
@@ -56,16 +59,11 @@ function b64ToBlob(b64, mime) {
   return new Blob([arr], { type: mime || "application/octet-stream" });
 }
 
-function triggerDownload(blob, filename) {
+// Store a blob in the browser's fileStore and return its object URL.
+// The Download link in the chat is how the user saves it — no auto-click.
+function storeFile(blob, filename, mime) {
   const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename || "download";
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  // Don't revoke the URL right away — we keep it for inline render. The
-  // browser will reclaim it when the tab closes.
+  state.fileStore[filename] = { url, mime: mime || blob.type || "application/octet-stream", filename };
   return url;
 }
 
@@ -1034,6 +1032,7 @@ function appendMessage(m) {
   const tpl = $("#message-template").content.cloneNode(true);
   const wrap = tpl.querySelector(".message");
   wrap.classList.add(m.role);
+  if (m._placeholder) wrap.classList.add("typing");
   const isToolResult =
     m.role === "tool" || (m.role === "user" && (m.content || "").startsWith("[Tool"));
   if (isToolResult) {
@@ -1045,7 +1044,10 @@ function appendMessage(m) {
   }
 
   const content = tpl.querySelector(".content");
-  if (m.role === "assistant") {
+  if (m._placeholder) {
+    content.innerHTML =
+      '<span class="typing-dots"><span></span><span></span><span></span></span>';
+  } else if (m.role === "assistant") {
     content.innerHTML = renderMarkdownWithMath(m.content || "");
   } else if (isToolResult) {
     content.textContent = m.content || "";
@@ -1053,10 +1055,21 @@ function appendMessage(m) {
     content.innerHTML = renderMarkdownWithMath(m.content || "");
   }
 
-  if (m.attachments?.length) {
+  // For backend-synced tool result messages (role:"user", content:"[Tool..."),
+  // look up the fileStore so images/audio survive the `done` re-render.
+  let effectiveAttachments = m.attachments || [];
+  if (isToolResult && m.role === "user" && !effectiveAttachments.length) {
+    const fm = (m.content || "").match(/"filename":\s*"([^"]+)"/);
+    if (fm) {
+      const stored = state.fileStore[fm[1]];
+      if (stored) effectiveAttachments = [{ url: stored.url, content_type: stored.mime, filename: stored.filename }];
+    }
+  }
+
+  if (effectiveAttachments.length) {
     const att = document.createElement("div");
     att.className = "attachments";
-    for (const a of m.attachments) {
+    for (const a of effectiveAttachments) {
       const ct = a.content_type || "";
       if (ct.startsWith("image/")) {
         const img = document.createElement("img");
@@ -1068,6 +1081,12 @@ function appendMessage(m) {
         audio.controls = true;
         audio.src = a.url;
         att.appendChild(audio);
+      } else if (ct.startsWith("video/")) {
+        const video = document.createElement("video");
+        video.controls = true;
+        video.src = a.url;
+        video.style.maxWidth = "100%";
+        att.appendChild(video);
       } else {
         const span = document.createElement("span");
         span.className = "file-pill";
@@ -1157,10 +1176,12 @@ async function send() {
   }
 
   state.busy = true;
-  $("#send-btn").disabled = true;
+  const sendBtn = $("#send-btn");
+  sendBtn.disabled = true;
+  sendBtn.innerHTML = '<span class="spinner"></span>';
 
-  // Show "thinking" placeholder
-  const placeholder = { role: "assistant", content: "…", _placeholder: true };
+  // Animated typing bubble — visible immediately, before the server responds.
+  const placeholder = { role: "assistant", content: "", _placeholder: true };
   state.messages.push(placeholder);
   appendMessage(placeholder);
   const placeholderEl = $("#messages").lastElementChild;
@@ -1215,6 +1236,10 @@ async function send() {
         appendMessage(sysMsg);
         return;
       }
+      if (event === "notice") {
+        flash(data.message);
+        return;
+      }
       if (event === "tool_call") return;
       if (event === "tool_result") {
         await handleToolResult(data);
@@ -1242,25 +1267,33 @@ async function send() {
     });
   } catch (e) {
     placeholderEl?.remove();
+    state.messages = state.messages.filter((m) => !m._placeholder);
     flash("Send failed: " + e.message, "warn");
   } finally {
     state.busy = false;
-    $("#send-btn").disabled = false;
+    const btn = $("#send-btn");
+    btn.disabled = false;
+    btn.textContent = "Send";
   }
 }
 
 async function handleToolResult(data) {
   const r = data.result || {};
 
-  // Generated/written files: trigger a download to the user's machine
-  // and render inline using a blob URL.
+  // Generated/written files: store blob URL in fileStore for inline rendering
+  // and user-initiated download; no automatic download to disk.
   if (r.data_b64 && r.filename) {
-    const blob = b64ToBlob(r.data_b64, r.mime || "application/octet-stream");
-    const url = triggerDownload(blob, r.filename);
+    const mime = r.mime || "application/octet-stream";
+    const blob = b64ToBlob(r.data_b64, mime);
+    const url = storeFile(blob, r.filename, mime);
+    const label =
+      mime.startsWith("image/") ? "Image" :
+      mime.startsWith("audio/") ? "Audio" :
+      mime.startsWith("video/") ? "Video" : "File";
     const sysMsg = {
       role: "tool",
-      content: `${data.tool === "generate_audio" ? "Audio" : data.tool === "generate_image" ? "Image" : "File"} sent to your computer: ${r.filename}`,
-      attachments: [{ url, content_type: r.mime || "application/octet-stream", filename: r.filename }],
+      content: `${label} ready: ${r.filename}`,
+      attachments: [{ url, content_type: mime, filename: r.filename }],
     };
     state.messages.push(sysMsg);
     appendMessage(sysMsg);
@@ -1392,9 +1425,9 @@ function askApproval(req) {
         <pre>${escape(req.command)}</pre>
       `;
     } else if (req.tool === "write_file") {
-      title = `Save a file to your computer?`;
+      title = `Accept file from assistant?`;
       body = `
-        <div class="danger-banner"><strong>Caution.</strong> The assistant wants to save a file (${req.byte_count} bytes) to your Downloads folder.</div>
+        <p>The assistant wants to share a file <b>(${req.byte_count} bytes)</b>. Approve to add it to the chat, where you can preview and download it.</p>
         <p><b>Filename:</b> <code>${escape(req.filename)}</code></p>
         <p><b>Preview:</b></p>
         <pre>${escape(req.preview || "")}</pre>
