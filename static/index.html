@@ -142,6 +142,11 @@
           >Text-to-speech voice
           <input id="cfg-tts-voice" type="text" placeholder="alloy" />
         </label>
+        <label
+          >Consensus runs
+          <input id="cfg-consensus-runs" type="number" min="1" max="10" value="1" />
+          <small>Send the prompt this many times in parallel and synthesize a consensus response. 1 = off.</small>
+        </label>
 
         <h2>Safety</h2>
         <label class="checkbox">

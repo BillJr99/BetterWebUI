@@ -173,6 +173,7 @@ async function loadConfig() {
     : "Not set";
   $("#cfg-image-model").value = state.config.image_model || "";
   $("#cfg-tts-voice").value = state.config.tts_voice || "alloy";
+  $("#cfg-consensus-runs").value = state.config.consensus_runs ?? 1;
   $("#cfg-shell-enabled").checked = state.config.shell_enabled !== false;
   renderConnectionStatus(state.config);
   await loadHealth();
@@ -229,6 +230,7 @@ async function saveDefaults() {
     default_model: $("#cfg-default-model").value || null,
     image_model: $("#cfg-image-model").value.trim() || "",
     tts_voice: $("#cfg-tts-voice").value.trim() || "alloy",
+    consensus_runs: Math.min(10, Math.max(1, parseInt($("#cfg-consensus-runs").value, 10) || 1)),
     shell_enabled: $("#cfg-shell-enabled").checked,
   };
   await api("/api/config", { method: "POST", json: patch });

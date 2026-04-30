@@ -70,6 +70,7 @@ def load_config() -> dict:
             "active_workspace_id": "",
             "auto_approve_safe": True,
             "shell_enabled": True,
+            "consensus_runs": 1,
             "api_profile": None,
         },
     )
@@ -1387,6 +1388,7 @@ class ConfigPatch(BaseModel):
     active_workspace_id: Optional[str] = None
     auto_approve_safe: Optional[bool] = None
     shell_enabled: Optional[bool] = None
+    consensus_runs: Optional[int] = None
 
 
 def _public_config(cfg: dict) -> dict:
@@ -1886,8 +1888,37 @@ async def chat(req: ChatRequest):
                         {"message": f"Context trimmed: {n_dropped} older message(s) removed to fit the model's context window."},
                     )
                 openai_messages = to_openai_messages(history, system_prompt)
+                consensus_runs = max(1, min(10, cfg.get("consensus_runs", 1)))
                 await send_event("status", {"message": "Thinking..."})
-                text = await chat_complete(openai_messages, model, cfg)
+                if consensus_runs > 1:
+                    raw_responses = await asyncio.gather(
+                        *[chat_complete(openai_messages, model, cfg) for _ in range(consensus_runs)],
+                        return_exceptions=True,
+                    )
+                    valid = [r for r in raw_responses if isinstance(r, str)]
+                    if len(valid) < 2:
+                        text = valid[0] if valid else ""
+                    else:
+                        numbered = "\n\n".join(
+                            f"Response {i + 1}:\n{r}" for i, r in enumerate(valid)
+                        )
+                        synthesis_messages = list(openai_messages) + [
+                            {
+                                "role": "user",
+                                "content": (
+                                    f"The preceding query was answered independently "
+                                    f"{len(valid)} times. Synthesize the responses below "
+                                    "into a single unified reply. Favor content where the "
+                                    "responses agree; where they disagree, choose the most "
+                                    "well-reasoned position. Eliminate redundancy but "
+                                    "preserve all important information.\n\n"
+                                    + numbered
+                                ),
+                            }
+                        ]
+                        text = await chat_complete(synthesis_messages, model, cfg)
+                else:
+                    text = await chat_complete(openai_messages, model, cfg)
                 await send_event("assistant_text", {"text": text})
                 history.append({"role": "assistant", "content": text})
 
