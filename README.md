@@ -226,4 +226,4 @@ using a temporary blob URL.
 
 ## License
 
-Use freely within your institution.
+MIT license; Use freely within your institution.
