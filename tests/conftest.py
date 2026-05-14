@@ -62,6 +62,7 @@ def isolated_dirs(tmp_path, monkeypatch):
     app_module._command_explanation_cache.clear()
     app_module._background_tasks.clear()
     app_module.approvals.__init__()
+    app_module.file_responses.__init__()
 
     return {"data": data_dir, "skills": skills_dir, "tmp": tmp_path}
 

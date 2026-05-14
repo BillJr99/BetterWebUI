@@ -2133,7 +2133,7 @@ async def onboarding_complete(body: OnboardingCompleteIn):
             # Set as active
             cfg["active_workspace_id"] = wid
             save_json(CONFIG_PATH, cfg)
-            return {"ok": True, "workspace_id": wid}
+            return {"ok": True, "workspace_id": wid, "workspace_name": ws_name}
     return {"ok": True}
 
 
@@ -2181,6 +2181,9 @@ async def project_tree(path: str = ""):
     return {"entries": entries, "root": root}
 
 
+_MAX_PROJECT_FILE_BYTES = 1 * 1024 * 1024  # 1 MB cap for /api/project/file
+
+
 @app.get("/api/project/file")
 async def project_file(path: str):
     cfg = load_config()
@@ -2193,18 +2196,28 @@ async def project_file(path: str):
         raise HTTPException(403, "Path outside project root.")
     if not full.exists():
         raise HTTPException(404, "File not found.")
+    size = full.stat().st_size
+    truncated = size > _MAX_PROJECT_FILE_BYTES
     try:
-        content = full.read_text(encoding="utf-8", errors="replace")
-        is_binary = False
+        # Read at most the cap+1 bytes to detect truncation without loading huge files
+        with full.open("rb") as fh:
+            raw = fh.read(_MAX_PROJECT_FILE_BYTES)
+        try:
+            content = raw.decode("utf-8", errors="replace")
+            is_binary = False
+        except Exception:
+            content = base64.b64encode(raw).decode("ascii")
+            is_binary = True
     except Exception:
-        content = base64.b64encode(full.read_bytes()).decode("ascii")
+        content = base64.b64encode(full.read_bytes()[:_MAX_PROJECT_FILE_BYTES]).decode("ascii")
         is_binary = True
     return {
         "path": path,
         "content": content,
         "is_binary": is_binary,
-        "size": full.stat().st_size,
+        "size": size,
         "modified_at": int(full.stat().st_mtime),
+        "truncated": truncated,
     }
 
 
@@ -2684,9 +2697,10 @@ async def chat(req: ChatRequest):
         raise HTTPException(400, "Pick a model first.")
     prompts = load_prompts()
     cid = req.conversation_id or uuid.uuid4().hex
-    effective_mode = req.mode or cfg.get("chat_mode", "approve-each")
     workspace = resolve_active_workspace(cfg)
     workspace_id = (workspace or {}).get("id", "")
+    # Precedence: per-request mode → workspace.mode → config.chat_mode
+    effective_mode = req.mode or (workspace or {}).get("mode") or cfg.get("chat_mode", "approve-each")
 
     queue: asyncio.Queue = asyncio.Queue()
     # Preserve the existing plan when resuming a conversation

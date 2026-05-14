@@ -1072,7 +1072,7 @@ function renderConversationList() {
         <button data-action="delete" data-id="${c.id}" title="Delete">×</button>
       </div>`;
     li.onclick = (e) => {
-      const btn = e.target.closest("button");
+      const btn = e.target instanceof Element ? e.target.closest("button") : null;
       if (btn?.dataset.action === "delete") { e.stopPropagation(); deleteConversation(c.id); return; }
       if (btn?.dataset.action === "pin") { e.stopPropagation(); pinConversation(c.id, !c.pinned); return; }
       if (btn?.dataset.action === "fork") { e.stopPropagation(); forkConversation(c.id); return; }
@@ -2136,7 +2136,12 @@ function handleGlobalKey(e) {
   // Escape closes dialogs and modals
   if (e.key === "Escape") {
     closeDialog();
-    $("#shortcut-sheet").hidden = true;
+    const sheet = $("#shortcut-sheet"); if (sheet) sheet.hidden = true;
+    const diff = $("#diff-modal"); if (diff && !diff.hidden) diff.hidden = true;
+    const onboarding = $("#onboarding-overlay"); if (onboarding && !onboarding.hidden) onboarding.hidden = true;
+    // Return focus to the composer for keyboard users
+    const composer = $("#composer-input");
+    if (composer) composer.focus();
     return;
   }
 
@@ -2278,11 +2283,17 @@ function wireEvents() {
     renderConversationList();
   });
 
-  // Mode select
+  // Mode select — persist per-workspace when a workspace is active, otherwise globally
   $("#mode-select")?.addEventListener("change", async (e) => {
     const mode = e.target.value;
+    const activeWsId = state.config?.active_workspace_id;
     try {
-      await api("/api/config", { method: "POST", json: { chat_mode: mode } });
+      if (activeWsId) {
+        const ws = await api(`/api/workspaces/${activeWsId}`);
+        await api("/api/workspaces", { method: "POST", json: { ...ws, mode } });
+      } else {
+        await api("/api/config", { method: "POST", json: { chat_mode: mode } });
+      }
     } catch (_) { /* non-critical */ }
   });
 
