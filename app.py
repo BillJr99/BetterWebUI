@@ -1907,28 +1907,40 @@ class SessionTrustIn(BaseModel):
     command: str
 
 
+_DOCKER_BRIDGE_RANGE = ipaddress.ip_network("172.16.0.0/12")
+
+
 def _require_local_caller(request: Request) -> None:
     """Reject requests that don't come from a local client.
 
     Session-trust state and the project-file endpoints can affect on-disk
     state, so they shouldn't be reachable from arbitrary remote hosts when
-    the server is bound to 0.0.0.0. Accepts loopback, anything inside an
-    RFC1918 private range (so Docker bridge networks and typical LAN
-    deployments keep working), and 'testclient' for FastAPI's TestClient.
-    Set BETTERWEBUI_REQUIRE_LOCAL=strict to require pure loopback.
+    the server is bound to 0.0.0.0. Default: loopback plus the Docker
+    bridge range (172.16.0.0/12) so the containerized UI keeps working
+    when the host port is bound to 127.0.0.1 (the default in
+    docker-compose.yml). LAN-wide access is opt-in:
+      BETTERWEBUI_ALLOW_LAN=true   → accept any RFC1918 private IP
+      BETTERWEBUI_REQUIRE_LOCAL=strict → loopback only (rejects Docker too)
     """
     client_host = (request.client.host if request.client else "") or ""
-    strict = os.environ.get("BETTERWEBUI_REQUIRE_LOCAL", "").lower() == "strict"
-    loopback_or_test = client_host in ("127.0.0.1", "::1", "localhost", "testclient")
-    if loopback_or_test:
+    if client_host in ("127.0.0.1", "::1", "localhost", "testclient"):
         return
-    if not strict:
-        try:
-            addr = ipaddress.ip_address(client_host)
-            if addr.is_loopback or addr.is_private:
-                return
-        except ValueError:
-            pass
+    mode = os.environ.get("BETTERWEBUI_REQUIRE_LOCAL", "").lower()
+    if mode == "strict":
+        raise HTTPException(403, "This endpoint is limited to local callers.")
+    try:
+        addr = ipaddress.ip_address(client_host)
+    except ValueError:
+        raise HTTPException(403, "This endpoint is limited to local callers.")
+    if addr.is_loopback:
+        return
+    # Docker bridge range is allowed by default so the containerized UI works.
+    if isinstance(addr, ipaddress.IPv4Address) and addr in _DOCKER_BRIDGE_RANGE:
+        return
+    # Broader LAN access is opt-in.
+    allow_lan = os.environ.get("BETTERWEBUI_ALLOW_LAN", "").lower() in ("1", "true", "yes")
+    if allow_lan and addr.is_private:
+        return
     raise HTTPException(403, "This endpoint is limited to local callers.")
 
 
@@ -2317,11 +2329,15 @@ async def project_tree(request: Request, path: str = ""):
         raise HTTPException(500, f"Could not list directory: {exc}")
     # Don't leak the absolute filesystem root to the client; the frontend
     # only needs the relative entries to render and request further paths.
-    # project_root_set lets the UI distinguish "user hasn't configured a
-    # workspace project root yet" (show hint) from "configured but empty".
+    # project_root_set reflects the EFFECTIVE root, not just the stored
+    # workspace.project_root. _resolve_project_root can silently fall back
+    # to WORKSPACE_DIR when the stored value is invalid; in that case the
+    # UI should still show the "no project root set" hint.
+    default_base = str(Path(WORKSPACE_DIR).resolve())
+    project_root_set = bool((workspace or {}).get("project_root")) and root != default_base
     return {
         "entries": entries,
-        "project_root_set": bool((workspace or {}).get("project_root")),
+        "project_root_set": project_root_set,
     }
 
 
