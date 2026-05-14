@@ -1431,19 +1431,24 @@ async def execute_tool(call: dict, config: dict, send_event, mode: str = "approv
             return {"error": "User denied this file write."}
 
         # Write to disk
+        write_error = None
         try:
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_text(content, encoding="utf-8")
-        except Exception:
-            pass
+        except Exception as exc:
+            write_error = str(exc)
 
-        return {
+        result = {
             "filename": filename,
+            "dest_path": str(dest),
             "mime": mime,
             "bytes_written": len(content.encode("utf-8")),
             "data_b64": base64.b64encode(content.encode("utf-8")).decode("ascii"),
             "checkpoint_id": checkpoint_id,
         }
+        if write_error:
+            result["write_error"] = write_error
+        return result
 
     if tool == "load_skill":
         skill_id = args.get("skill_id", "")
@@ -2034,6 +2039,17 @@ async def import_workspace(file: UploadFile = File(...)):
                     if c["id"] not in existing_ids:
                         cli_data["tools"].append(c)
                 save_json(CLI_PATH, cli_data)
+            # Import MCP server stubs (safe fields only — env keys noted but not restored)
+            if "mcp_servers.json" in names:
+                imported_mcp = json.loads(zf.read("mcp_servers.json"))
+                mcp_data = load_mcp_servers()
+                existing_names = {s["name"] for s in mcp_data.get("servers", [])}
+                for s in imported_mcp.get("servers", []):
+                    if s.get("name") and s["name"] not in existing_names:
+                        # env_keys is informational; don't restore actual env values
+                        stub = {k: v for k, v in s.items() if k != "env_keys"}
+                        mcp_data["servers"].append(stub)
+                save_json(MCP_PATH, mcp_data)
         # Create the workspace
         wid = uuid.uuid4().hex[:8]
         ws_data = load_workspaces()
@@ -2112,27 +2128,45 @@ async def onboarding_complete(body: OnboardingCompleteIn):
 # --- Project (file tree + checkpoints) ---
 
 @app.get("/api/project/tree")
-async def project_tree():
+async def project_tree(path: str = ""):
     cfg = load_config()
     workspace = resolve_active_workspace(cfg)
     root = (workspace or {}).get("project_root") or str(WORKSPACE_DIR)
-    root_path = Path(root)
-    if not root_path.is_dir():
-        return {"files": [], "root": root, "error": f"'{root}' is not a directory."}
-    files = []
+    root_path = Path(root).resolve()
+
+    # Determine which subdirectory to list (support lazy directory expansion)
+    if path:
+        target = (root_path / path).resolve()
+        try:
+            target.relative_to(root_path)
+        except ValueError:
+            return {"entries": [], "root": root, "error": "Path outside root."}
+    else:
+        target = root_path
+
+    if not target.is_dir():
+        return {"entries": [], "root": root, "error": f"'{target}' is not a directory."}
+
+    entries = []
     try:
-        for p in sorted(root_path.rglob("*"))[:500]:
-            if p.is_file() and not any(part.startswith(".") for part in p.parts):
-                rel = str(p.relative_to(root_path))
-                files.append({
+        for p in sorted(target.iterdir()):
+            if p.name.startswith("."):
+                continue
+            rel = str(p.relative_to(root_path))
+            if p.is_dir():
+                entries.append({"type": "dir", "name": p.name, "path": rel})
+            else:
+                entries.append({
+                    "type": "file",
+                    "name": p.name,
                     "path": rel,
                     "size": p.stat().st_size,
                     "modified_at": int(p.stat().st_mtime),
                     "ext": p.suffix.lower(),
                 })
     except Exception as exc:
-        return {"files": [], "root": root, "error": str(exc)}
-    return {"files": files, "root": root}
+        return {"entries": [], "root": root, "error": str(exc)}
+    return {"entries": entries, "root": root}
 
 
 @app.get("/api/project/file")
@@ -2338,6 +2372,24 @@ async def transcribe_audio(file: UploadFile = File(...)):
         return {"text": body.get("text", "")}
     except Exception:
         return {"text": resp.text}
+
+
+# --- Text-to-speech (read-aloud) ---
+
+class TtsIn(BaseModel):
+    text: str
+    voice: Optional[str] = None
+
+
+@app.post("/api/tts")
+async def tts_endpoint(body: TtsIn):
+    cfg = load_config()
+    if not cfg.get("api_key") or not cfg.get("base_url"):
+        raise HTTPException(400, "Set your OpenWebUI URL and API key first.")
+    voice = body.voice or cfg.get("tts_voice", "alloy")
+    result = await call_openwebui_audio(body.text[:4096], voice, cfg)
+    audio_bytes = base64.b64decode(result["data_b64"])
+    return Response(content=audio_bytes, media_type="audio/mpeg")
 
 
 # --- Command explanation ---

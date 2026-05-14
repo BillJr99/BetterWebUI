@@ -1271,10 +1271,10 @@ function buildSubagentCard(sa) {
   const collapsed = document.createElement("details");
   const summary = document.createElement("summary");
   summary.className = "subagent-header";
-  summary.innerHTML = `<span>${escape(sa.kind || "subagent")}: ${escape(sa.item || "")}</span>`;
+  summary.innerHTML = `<span>${escape(sa.kind || "subagent")} subagent result</span>`;
   const body = document.createElement("div");
   body.className = "subagent-body";
-  body.textContent = sa.summary || sa.result || "(no result)";
+  body.textContent = sa.combined || "(no result)";
   collapsed.appendChild(summary);
   collapsed.appendChild(body);
   card.appendChild(collapsed);
@@ -1471,18 +1471,11 @@ function updateRightRailVisibility() {
 // ---------------------------------------------------------------------------
 
 async function refreshFileTree() {
-  const ws = state.workspaces.find((w) => w.id === state.config?.active_workspace_id);
-  const root = ws?.project_root;
   const hint = $("#file-tree-hint");
   const ul = $("#file-tree");
-  if (!root) {
-    if (hint) hint.hidden = false;
-    if (ul) ul.innerHTML = "";
-    return;
-  }
   if (hint) hint.hidden = true;
   try {
-    const data = await api(`/api/project/tree?workspace_id=${encodeURIComponent(ws.id)}`);
+    const data = await api("/api/project/tree");
     renderFileTree(ul, data.entries || []);
   } catch (e) {
     if (ul) ul.innerHTML = `<li style="color:var(--ink-faint);font-size:12px;padding:6px 8px;">Could not load file tree.</li>`;
@@ -1501,7 +1494,7 @@ function renderFileTree(ul, entries) {
         if (details.open && sub.children.length === 0) {
           try {
             const ws = state.workspaces.find((w) => w.id === state.config?.active_workspace_id);
-            const data = await api(`/api/project/tree?workspace_id=${encodeURIComponent(ws?.id || "")}&path=${encodeURIComponent(entry.path)}`);
+            const data = await api(`/api/project/tree?path=${encodeURIComponent(entry.path)}`);
             renderFileTree(sub, data.entries || []);
           } catch (e) { /* silent */ }
         }
@@ -1690,9 +1683,7 @@ async function send() {
 
     await consumeSSE(res, async (event, data) => {
       if (event === "assistant_text") {
-        const telemetry = data.usage
-          ? { tokens_in: data.usage.prompt_tokens, tokens_out: data.usage.completion_tokens, elapsed_ms: data.elapsed_ms }
-          : null;
+        const telemetry = data.telemetry || null;
         const msg = { role: "assistant", content: data.text, telemetry, subagents: subagentSummaries.slice() };
         state.messages.push(msg);
         appendMessage(msg);
@@ -1700,7 +1691,7 @@ async function send() {
         return;
       }
       if (event === "task_plan") {
-        state.taskPlan = data.plan || [];
+        state.taskPlan = data.items || [];
         renderPlan();
         // Auto-show the plan pane when we get a plan
         if (state.taskPlan.length && !state.planPaneVisible) setPlanPaneVisible(true);
@@ -1713,8 +1704,8 @@ async function send() {
         return;
       }
       if (event === "subagent_result") {
-        subagentSummaries.push({ kind: data.kind, item: data.item, summary: data.summary, result: data.result });
-        const sysMsg = { role: "system-event", content: `✓ Subagent "${data.item || data.kind}" done.` };
+        subagentSummaries.push({ kind: data.kind, combined: data.combined });
+        const sysMsg = { role: "system-event", content: `✓ Subagent (${data.kind}, ${data.count} result${data.count !== 1 ? "s" : ""}) done.` };
         state.messages.push(sysMsg);
         appendMessage(sysMsg);
         return;
@@ -2071,7 +2062,7 @@ async function onboardingConnect() {
 
 async function onboardingComplete(useCaseId) {
   try {
-    const data = await api("/api/onboarding/complete", { method: "POST", json: { use_case: useCaseId } });
+    const data = await api("/api/onboarding/complete", { method: "POST", json: { template_id: useCaseId } });
     const msg = $("#ob-done-msg");
     if (msg) msg.textContent = `Your "${data.workspace_name || useCaseId}" workspace has been created. Click "Start chatting" to begin.`;
     $("#onboarding-step-2").hidden = true;
