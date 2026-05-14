@@ -1,5 +1,4 @@
-"""
-tests/test_services.py — Unit tests for the services/ module.
+"""tests/test_services.py — Unit tests for the services/ module.
 
 Mocks httpx calls using unittest.mock.patch so tests run fully offline.
 """
@@ -267,7 +266,7 @@ class TestOSSOClient:
         mock_resp = _mock_response({"description": "A blank desktop"})
         client, ctx, inner = self._make_client(mock_resp)
         with patch.object(client, "_client", return_value=ctx):
-            result = run(client.description())
+            run(client.description())
         inner.get.assert_awaited_once_with("/api/description", params={"mode": "accessibility"})
 
     def test_description_with_window_index(self):
