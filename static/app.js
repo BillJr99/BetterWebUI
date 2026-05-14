@@ -207,7 +207,7 @@ async function loadConfig() {
   $("#cfg-shell-enabled").checked = state.config.shell_enabled !== false;
   // Mode select
   const ms = $("#mode-select");
-  if (ms) ms.value = state.config.chat_mode || "normal";
+  if (ms) ms.value = state.config.chat_mode || "approve-each";
   // Display
   loadDisplaySettingsUI(state.config.display || {});
   applyDisplaySettings(state.config.display || {});
@@ -598,7 +598,7 @@ function openWorkspaceDialog(workspace) {
     files: [],
     default_model: "",
     project_root: "",
-    mode: "normal",
+    mode: "approve-each",
   };
   const skillsList = state.skills
     .map(
@@ -1530,7 +1530,45 @@ async function openProjectFile(path) {
 // Approval dialog (shell + write) — with explain expander + trust session
 // ---------------------------------------------------------------------------
 
-function askApproval(req) {
+async function askApproval(req) {
+  // write_file: use the diff modal for a proper before/after view
+  if (req.tool === "write_file") {
+    return new Promise(async (resolve) => {
+      const modal = document.getElementById("diff-modal");
+      const pathEl = document.getElementById("diff-modal-path");
+      const contentEl = document.getElementById("diff-modal-content");
+      const acceptBtn = document.getElementById("diff-accept-btn");
+      const rejectBtn = document.getElementById("diff-reject-btn");
+      if (!modal || !acceptBtn || !rejectBtn) {
+        resolve({ approved: confirm(`Save file "${req.filename}"?`) });
+        return;
+      }
+      if (pathEl) pathEl.textContent = req.dest_path || req.filename;
+
+      // Try to load existing content for diff
+      let oldHtml = "<em>(new file)</em>";
+      try {
+        const existing = await api(`/api/project/file?path=${encodeURIComponent(req.filename)}`);
+        if (!existing.is_binary) {
+          oldHtml = `<pre>${escape(existing.content.slice(0, 3000))}</pre>`;
+        }
+      } catch { /* file doesn't exist yet */ }
+
+      if (contentEl) {
+        contentEl.innerHTML = `
+          <div class="diff-columns">
+            <div class="diff-col"><strong>Before</strong>${oldHtml}</div>
+            <div class="diff-col diff-col-new"><strong>After (${req.byte_count} bytes)</strong><pre>${escape(req.preview || "")}</pre></div>
+          </div>`;
+      }
+      modal.hidden = false;
+      acceptBtn.focus();
+      const cleanup = () => { modal.hidden = true; };
+      acceptBtn.onclick = () => { cleanup(); resolve({ approved: true }); };
+      rejectBtn.onclick = () => { cleanup(); resolve({ approved: false }); };
+    });
+  }
+
   return new Promise((resolve) => {
     let title, body;
     if (req.tool === "execute_shell") {
@@ -1548,14 +1586,6 @@ function askApproval(req) {
           <input type="checkbox" id="trust-session-cb" />
           Trust this command for the rest of the session (won't ask again)
         </label>
-      `;
-    } else if (req.tool === "write_file") {
-      title = `Accept file from assistant?`;
-      body = `
-        <p>The assistant wants to share a file <b>(${req.byte_count} bytes)</b>. Approve to add it to the chat, where you can preview and download it.</p>
-        <p><b>Filename:</b> <code>${escape(req.filename)}</code></p>
-        <p><b>Preview:</b></p>
-        <pre>${escape(req.preview || "")}</pre>
       `;
     } else {
       title = `Allow ${req.tool}?`;
@@ -1645,7 +1675,7 @@ async function send() {
     return;
   }
 
-  const chatMode = $("#mode-select")?.value || state.config?.chat_mode || "normal";
+  const chatMode = $("#mode-select")?.value || state.config?.chat_mode || "approve-each";
 
   state.busy = true;
   const sendBtn = $("#send-btn");
@@ -1698,7 +1728,7 @@ async function send() {
         return;
       }
       if (event === "subagent_start") {
-        const sysMsg = { role: "system-event", content: `↪ Starting ${data.kind} subagent: ${data.item || ""}` };
+        const sysMsg = { role: "system-event", content: `↪ Starting ${data.count} ${data.kind} subagent${data.count !== 1 ? "s" : ""}…` };
         state.messages.push(sysMsg);
         appendMessage(sysMsg);
         return;

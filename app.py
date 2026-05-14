@@ -1280,7 +1280,7 @@ def _should_skip_approval(command: str, cli_id: Optional[str], config: dict) -> 
 # Tool execution
 # ---------------------------------------------------------------------------
 
-async def execute_tool(call: dict, config: dict, send_event, mode: str = "approve-each") -> dict:
+async def execute_tool(call: dict, config: dict, send_event, mode: str = "approve-each", model: str = "") -> dict:
     tool = call["tool"]
     args = call["args"]
 
@@ -1300,9 +1300,9 @@ async def execute_tool(call: dict, config: dict, send_event, mode: str = "approv
         kind = args.get("kind", "explore")
         prompt = args.get("prompt", "")
         items = args.get("items") or []
-        model = config.get("default_model", "")
+        model = model or config.get("default_model", "")
         if not model:
-            return {"error": "No default model set — cannot spawn subagents."}
+            return {"error": "No model available — cannot spawn subagents."}
 
         # Build per-subagent prompts
         if items and kind == "compare":
@@ -1337,7 +1337,7 @@ async def execute_tool(call: dict, config: dict, send_event, mode: str = "approv
         if not command:
             return {"error": "No command provided."}
 
-        if _should_skip_approval(command, None, config):
+        if mode == "trusted" or _should_skip_approval(command, None, config):
             await send_event("tool_running", {"tool": "execute_shell", "command": command, "auto_approved": True})
         else:
             aid = approvals.new()
@@ -1415,20 +1415,21 @@ async def execute_tool(call: dict, config: dict, send_event, mode: str = "approv
                 wid, filename, dest.read_text(encoding="utf-8", errors="replace")
             )
 
-        aid = approvals.new()
-        await send_event("approval_request", {
-            "approval_id": aid,
-            "tool": "write_file",
-            "filename": filename,
-            "mime": mime,
-            "preview": content[:1000],
-            "byte_count": len(content.encode("utf-8")),
-            "checkpoint_id": checkpoint_id,
-            "dest_path": str(dest),
-        })
-        approved = await approvals.wait(aid)
-        if not approved:
-            return {"error": "User denied this file write."}
+        if mode != "trusted":
+            aid = approvals.new()
+            await send_event("approval_request", {
+                "approval_id": aid,
+                "tool": "write_file",
+                "filename": filename,
+                "mime": mime,
+                "preview": content[:1000],
+                "byte_count": len(content.encode("utf-8")),
+                "checkpoint_id": checkpoint_id,
+                "dest_path": str(dest),
+            })
+            approved = await approvals.wait(aid)
+            if not approved:
+                return {"error": "User denied this file write."}
 
         # Write to disk
         write_error = None
@@ -1493,7 +1494,7 @@ async def execute_tool(call: dict, config: dict, send_event, mode: str = "approv
         template = cli.get("command_template", "{args}")
         command = template.replace("{args}", cli_args)
 
-        if _should_skip_approval(command, cli_id, config):
+        if mode == "trusted" or _should_skip_approval(command, cli_id, config):
             await send_event("tool_running", {"tool": "cli_call", "command": command, "auto_approved": True})
         else:
             aid = approvals.new()
@@ -2006,12 +2007,21 @@ async def export_workspace(wid: str):
     )
 
 
+_MAX_BUNDLE_BYTES = 10 * 1024 * 1024   # 10 MB compressed
+_MAX_MEMBER_BYTES = 2 * 1024 * 1024    # 2 MB per uncompressed member
+
+
 @app.post("/api/workspaces/import")
 async def import_workspace(file: UploadFile = File(...)):
-    content = await file.read()
+    content = await file.read(_MAX_BUNDLE_BYTES + 1)
+    if len(content) > _MAX_BUNDLE_BYTES:
+        raise HTTPException(413, "Workspace bundle too large (max 10 MB).")
     try:
         buf = io.BytesIO(content)
         with zipfile.ZipFile(buf, "r") as zf:
+            for info in zf.infolist():
+                if info.file_size > _MAX_MEMBER_BYTES:
+                    raise HTTPException(413, f"Bundle member '{info.filename}' exceeds 2 MB limit.")
             names = zf.namelist()
             manifest = json.loads(zf.read("manifest.json"))
             # Import system prompt if present
@@ -2671,7 +2681,9 @@ async def chat(req: ChatRequest):
     workspace_id = (workspace or {}).get("id", "")
 
     queue: asyncio.Queue = asyncio.Queue()
-    current_task_plan: list = []
+    # Preserve the existing plan when resuming a conversation
+    _existing_conv = load_conversations().get("conversations", {}).get(cid, {})
+    current_task_plan: list = _existing_conv.get("task_plan", [])
 
     async def send_event(event: str, data: dict) -> None:
         await queue.put({"event": event, "data": data})
@@ -2732,7 +2744,7 @@ async def chat(req: ChatRequest):
                     break
 
                 await send_event("tool_call", {"tool": call["tool"], "args": call["args"]})
-                result = await execute_tool(call, cfg, send_event, effective_mode)
+                result = await execute_tool(call, cfg, send_event, effective_mode, model)
                 await send_event("tool_result", {"tool": call["tool"], "result": result})
 
                 # Persist task plan updates

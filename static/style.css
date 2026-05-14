@@ -1711,6 +1711,12 @@ kbd {
 .diff-line.added { background: rgba(79, 107, 58, 0.2); color: #b8e6a0; }
 .diff-line.removed { background: rgba(138, 51, 36, 0.2); color: #f0a090; }
 .diff-line.context { color: var(--code-text-soft); }
+.diff-columns { display: flex; gap: 12px; }
+.diff-col { flex: 1; min-width: 0; }
+.diff-col strong { display: block; margin-bottom: 6px; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--ink-faint); }
+.diff-col pre { background: var(--code-bg); border-radius: var(--radius); padding: 8px; font-size: 11px; overflow: auto; max-height: 320px; white-space: pre-wrap; word-break: break-all; }
+.diff-col-new pre { border: 1px solid rgba(79,107,58,0.4); }
+.diff-box { max-width: 900px; width: 95vw; }
 
 /* ---------- Toasts ---------- */
 
