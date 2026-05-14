@@ -15,7 +15,23 @@
 import { test, expect } from '@playwright/test';
 import { collectSSE, collectSSEPost } from '../helpers/sse';
 
-const MODEL = process.env.OLLAMA_MODEL ?? 'tinyllama:1.1b';
+// OLLAMA_MODEL is set by run-e2e-docker.sh (e.g. "tinyllama:1.1b").
+// DEFAULT_MODEL is set by run-e2e-local.sh (any model name, or blank).
+// When both are empty we auto-select the first model from the list.
+const PREFERRED_MODEL = process.env.OLLAMA_MODEL ?? process.env.DEFAULT_MODEL ?? '';
+
+// Resolved at runtime in beforeAll — may pick from the model list.
+let MODEL = PREFERRED_MODEL;
+
+test.beforeAll(async ({ request }) => {
+  if (!MODEL) {
+    const r = await request.get('/api/models');
+    if (r.ok()) {
+      const body = await r.json();
+      MODEL = body.models?.[0]?.id ?? '';
+    }
+  }
+});
 
 // ── Health & configuration ────────────────────────────────────────────────────
 
@@ -26,23 +42,26 @@ test('BetterWebUI health endpoint is ok', async ({ request }) => {
   expect(body.ok).toBe(true);
 });
 
-test('model list includes the Ollama model', async ({ request }) => {
+test('model list is non-empty', async ({ request }) => {
   const r = await request.get('/api/models');
   expect(r.ok()).toBeTruthy();
   const body = await r.json();
   expect(Array.isArray(body.models)).toBe(true);
   expect(body.models.length).toBeGreaterThan(0);
   const ids: string[] = body.models.map((m: { id: string }) => m.id);
-  // Ollama models surface as "<name>" or "ollama/<name>" depending on
-  // OpenWebUI version — check that at least one id contains the model name.
-  const modelName = MODEL.split(':')[0];
-  expect(ids.some(id => id.toLowerCase().includes(modelName))).toBe(true);
+  // When OLLAMA_MODEL is set, verify that specific model is present.
+  // In local mode (user's own OpenWebUI) we just check the list is non-empty.
+  if (PREFERRED_MODEL) {
+    const modelName = PREFERRED_MODEL.split(':')[0];
+    expect(ids.some(id => id.toLowerCase().includes(modelName))).toBe(true);
+  }
 });
 
 // ── Chat stream ───────────────────────────────────────────────────────────────
 
 test('simple chat returns a non-empty streaming response', async ({ baseURL }) => {
   // POST /api/chat returns an SSE stream directly.
+    if (!MODEL) test.skip();
   const chatBody = {
     model: MODEL,
     messages: [{ role: 'user', content: 'Reply with one word only: hello.' }],
@@ -67,6 +86,7 @@ test('simple chat returns a non-empty streaming response', async ({ baseURL }) =
 });
 
 test('conversation is saved and retrievable', async ({ request, baseURL }) => {
+  if (!MODEL) test.skip();
   const chatBody = {
     model: MODEL,
     messages: [{ role: 'user', content: 'What is 1+1?' }],

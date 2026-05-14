@@ -114,6 +114,69 @@ See [deploy/README.md](deploy/README.md) for the full integration deployment gui
 including Docker Compose configuration and the `bootstrap.sh` script for cloning
 sibling repositories.
 
+## Running the test suite
+
+### Unit + service-integration tests (no external dependencies)
+
+```bash
+pip install -r requirements.txt
+pytest tests/ --ignore=tests/playwright
+```
+
+### End-to-end tests — Docker (Ollama + OpenWebUI, fully self-contained)
+
+Requires Docker Desktop and Node.js 18+. The script pulls the model on first
+run, starts the full stack, runs all tests, and tears everything down.
+
+```bash
+./scripts/run-e2e-docker.sh
+
+# Override the model (default: tinyllama:1.1b):
+OLLAMA_MODEL=phi3:mini ./scripts/run-e2e-docker.sh
+```
+
+Or run directly via npm (inside `tests/playwright`):
+
+```bash
+cd tests/playwright && npm run test:e2e
+# Override model:
+OLLAMA_MODEL=phi3:mini npm run test:e2e
+```
+
+### End-to-end tests — local (your own OpenWebUI, no Docker)
+
+Requires Python 3.10+, Node.js 18+, git, and a running OpenWebUI instance.
+The script clones the sibling repos, sets up virtual environments, starts all
+services, and runs the full Playwright suite (service-integration + chat).
+
+```bash
+./scripts/run-e2e-local.sh
+```
+
+The script prompts for:
+- **OpenWebUI base URL** — e.g. `http://localhost:3000`
+- **OpenWebUI API key** — from OpenWebUI → Settings → Account → API Keys
+- **Model name** — leave blank to auto-select the first available model
+
+Services started locally (all stopped automatically when the script exits):
+
+| Service | Port | Mode |
+|---|---|---|
+| BetterWebUI | 8765 | normal |
+| CognitiveLoopKernel | 8001 | normal |
+| AutoGUI | 8002 | dry-run (no real desktop actions) |
+| OSScreenObserver | 5001 | mock (synthetic screen data) |
+
+Sibling repos are cloned (or updated) as siblings of this directory:
+
+```
+parent/
+├── betterwebui/          ← this repo
+├── cognitiveloopkernel/
+├── autogui/
+└── osscreenobserver/
+```
+
 ## First-time setup
 
 You need an **OpenWebUI instance you can reach** and its **API key**
