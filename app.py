@@ -42,7 +42,12 @@ MCP_PATH = DATA_DIR / "mcp_servers.json"
 CLI_PATH = DATA_DIR / "cli_tools.json"
 BRANDING_PATH = DATA_DIR / "branding.json"
 
-for d in (DATA_DIR, SKILLS_DIR, UPLOADS_DIR, CHECKPOINTS_DIR, TASKS_DIR):
+# WORKSPACE_DIR is the default directory for shell execution and file I/O.
+# Set via the WORKSPACE_DIR environment variable (Docker mounts a host folder
+# here). Falls back to a local "workspace/" subfolder when running without Docker.
+WORKSPACE_DIR = Path(os.environ.get("WORKSPACE_DIR", str(ROOT / "workspace")))
+
+for d in (DATA_DIR, SKILLS_DIR, UPLOADS_DIR, CHECKPOINTS_DIR, TASKS_DIR, WORKSPACE_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
 
@@ -1035,16 +1040,17 @@ def detect_shell() -> tuple[list[str], str]:
     return (["bash", "-lc"], "bash")
 
 
-async def run_shell(command: str, timeout: int = 120) -> dict:
+async def run_shell(command: str, timeout: int = 120, cwd: Optional[str] = None) -> dict:
     argv_prefix, shell_name = detect_shell()
     argv = argv_prefix + [command]
     started = time.time()
+    effective_cwd = cwd or str(WORKSPACE_DIR)
     try:
         proc = await asyncio.create_subprocess_exec(
             *argv,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            cwd=str(ROOT),
+            cwd=effective_cwd,
         )
         try:
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
@@ -1347,7 +1353,9 @@ async def execute_tool(call: dict, config: dict, send_event, mode: str = "approv
                 return {"error": "User denied this command."}
             await send_event("tool_running", {"tool": "execute_shell", "command": command})
 
-        result = await run_shell(command)
+        workspace = resolve_active_workspace(config)
+        shell_cwd = (workspace or {}).get("project_root") or str(WORKSPACE_DIR)
+        result = await run_shell(command, cwd=shell_cwd)
         # Auto-capture plot
         for _img_path in (Path("/tmp/bwui_plot.png"), ROOT / "bwui_plot.png"):
             if _img_path.exists():
@@ -1396,16 +1404,16 @@ async def execute_tool(call: dict, config: dict, send_event, mode: str = "approv
         if not isinstance(content, str):
             content = str(content)
 
-        # Checkpoint if workspace has a project root
+        # Determine the write directory: workspace project_root → WORKSPACE_DIR
         workspace = resolve_active_workspace(config)
-        project_root = (workspace or {}).get("project_root", "")
+        project_root = (workspace or {}).get("project_root") or str(WORKSPACE_DIR)
         checkpoint_id = None
-        if project_root and workspace:
-            dest = Path(project_root) / filename
-            if dest.exists():
-                checkpoint_id = _checkpoint_file(
-                    workspace["id"], filename, dest.read_text(encoding="utf-8", errors="replace")
-                )
+        dest = Path(project_root) / filename
+        if dest.exists():
+            wid = (workspace or {}).get("id", "default")
+            checkpoint_id = _checkpoint_file(
+                wid, filename, dest.read_text(encoding="utf-8", errors="replace")
+            )
 
         aid = approvals.new()
         await send_event("approval_request", {
@@ -1416,18 +1424,18 @@ async def execute_tool(call: dict, config: dict, send_event, mode: str = "approv
             "preview": content[:1000],
             "byte_count": len(content.encode("utf-8")),
             "checkpoint_id": checkpoint_id,
+            "dest_path": str(dest),
         })
         approved = await approvals.wait(aid)
         if not approved:
             return {"error": "User denied this file write."}
 
-        # If workspace has a project_root, also write to disk there
-        if project_root and workspace:
-            dest = Path(project_root) / filename
-            try:
-                dest.write_text(content, encoding="utf-8")
-            except Exception:
-                pass
+        # Write to disk
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(content, encoding="utf-8")
+        except Exception:
+            pass
 
         return {
             "filename": filename,
@@ -2107,14 +2115,10 @@ async def onboarding_complete(body: OnboardingCompleteIn):
 async def project_tree():
     cfg = load_config()
     workspace = resolve_active_workspace(cfg)
-    if not workspace:
-        return {"files": [], "error": "No active workspace."}
-    root = workspace.get("project_root", "")
-    if not root:
-        return {"files": [], "error": "No project root set on this workspace."}
+    root = (workspace or {}).get("project_root") or str(WORKSPACE_DIR)
     root_path = Path(root)
     if not root_path.is_dir():
-        return {"files": [], "error": f"Project root '{root}' is not a directory."}
+        return {"files": [], "root": root, "error": f"'{root}' is not a directory."}
     files = []
     try:
         for p in sorted(root_path.rglob("*"))[:500]:
@@ -2127,7 +2131,7 @@ async def project_tree():
                     "ext": p.suffix.lower(),
                 })
     except Exception as exc:
-        return {"files": [], "error": str(exc)}
+        return {"files": [], "root": root, "error": str(exc)}
     return {"files": files, "root": root}
 
 
@@ -2135,13 +2139,8 @@ async def project_tree():
 async def project_file(path: str):
     cfg = load_config()
     workspace = resolve_active_workspace(cfg)
-    if not workspace:
-        raise HTTPException(400, "No active workspace.")
-    root = workspace.get("project_root", "")
-    if not root:
-        raise HTTPException(400, "No project root set.")
+    root = (workspace or {}).get("project_root") or str(WORKSPACE_DIR)
     full = Path(root) / path
-    # Prevent path traversal
     try:
         full.resolve().relative_to(Path(root).resolve())
     except ValueError:
@@ -2167,9 +2166,8 @@ async def project_file(path: str):
 async def list_project_checkpoints(filename: str):
     cfg = load_config()
     workspace = resolve_active_workspace(cfg)
-    if not workspace:
-        return {"checkpoints": []}
-    return {"checkpoints": _list_checkpoints(workspace["id"], filename)}
+    wid = (workspace or {}).get("id", "default")
+    return {"checkpoints": _list_checkpoints(wid, filename)}
 
 
 class RevertIn(BaseModel):
@@ -2181,18 +2179,17 @@ class RevertIn(BaseModel):
 async def revert_project_file(r: RevertIn):
     cfg = load_config()
     workspace = resolve_active_workspace(cfg)
-    if not workspace:
-        raise HTTPException(400, "No active workspace.")
-    content = _get_checkpoint(workspace["id"], r.filename, r.checkpoint_id)
+    wid = (workspace or {}).get("id", "default")
+    content = _get_checkpoint(wid, r.filename, r.checkpoint_id)
     if content is None:
         raise HTTPException(404, "Checkpoint not found.")
-    root = workspace.get("project_root", "")
-    if root:
-        dest = Path(root) / r.filename
-        try:
-            dest.write_text(content, encoding="utf-8")
-        except Exception as exc:
-            raise HTTPException(500, f"Could not write file: {exc}")
+    root = (workspace or {}).get("project_root") or str(WORKSPACE_DIR)
+    dest = Path(root) / r.filename
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(content, encoding="utf-8")
+    except Exception as exc:
+        raise HTTPException(500, f"Could not write file: {exc}")
     return {"ok": True, "filename": r.filename, "bytes": len(content)}
 
 

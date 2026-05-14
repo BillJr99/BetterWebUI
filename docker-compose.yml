@@ -4,9 +4,15 @@ services:
     ports:
       - "${PORT:-8765}:8765"
     volumes:
-      # All user data (config, conversations, workspaces, uploads …) lives here.
-      # Delete this folder to reset everything; back it up to preserve your work.
+      # App data (config, conversations, workspaces, uploads …)
+      # Back this up to preserve your settings and chat history.
       - ./data:/app/data
+
+      # Workspace — the folder the assistant reads from and writes to.
+      # Change ./workspace to any folder on your machine, e.g.:
+      #   - /Users/alice/Documents/my-project:/workspace
+      - ./workspace:/workspace
     environment:
       - PORT=8765
+      - WORKSPACE_DIR=/workspace
     restart: unless-stopped

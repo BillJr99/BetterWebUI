@@ -27,3 +27,6 @@ Thumbs.db
 
 # Logs / runtime
 *.log
+
+# Local workspace folder (Docker volume mount point; gitignore so user files aren't committed)
+workspace/
