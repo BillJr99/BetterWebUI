@@ -1429,6 +1429,8 @@ function toggleMic() {
 // Task plan pane
 // ---------------------------------------------------------------------------
 
+const _PLAN_STATUSES = ["pending", "in_progress", "done", "blocked"];
+
 function renderPlan() {
   const list = $("#plan-list");
   if (!list) return;
@@ -1439,10 +1441,13 @@ function renderPlan() {
   }
   const icons = { pending: "○", in_progress: "◉", done: "✓", blocked: "⚠" };
   for (const item of state.taskPlan) {
+    // Clamp item.status to the known set — values come from model output and
+    // could otherwise inject whitespace or extra tokens into className.
+    const status = _PLAN_STATUSES.includes(item.status) ? item.status : "pending";
     const li = document.createElement("li");
-    li.className = `plan-item ${item.status || "pending"}`;
+    li.className = `plan-item ${status}`;
     li.innerHTML = `
-      <span class="plan-item-icon" aria-label="${escape(item.status || "pending")}">${icons[item.status] || "○"}</span>
+      <span class="plan-item-icon" aria-label="${escape(status)}">${icons[status]}</span>
       <span class="plan-item-text">
         ${escape(item.title || "")}
         ${item.note ? `<div class="plan-item-note">${escape(item.note)}</div>` : ""}
@@ -1544,7 +1549,7 @@ function renderFileTree(ul, entries) {
 async function openProjectFile(path) {
   const ws = state.workspaces.find((w) => w.id === state.config?.active_workspace_id);
   try {
-    const data = await api(`/api/project/file?workspace_id=${encodeURIComponent(ws?.id || "")}&path=${encodeURIComponent(path)}`);
+    const data = await api(`/api/project/file?workspace_id=${encodeURIComponent(ws?.id || "")}&path=${encodeURIComponent(path)}&include_content=true`);
     const name = path.split("/").pop() || path;
     let body;
     if (data.is_binary) {
@@ -1589,7 +1594,7 @@ async function askApproval(req) {
       // Try to load existing content for diff
       let oldHtml = "<em>(new file)</em>";
       try {
-        const existing = await api(`/api/project/file?path=${encodeURIComponent(req.filename)}`);
+        const existing = await api(`/api/project/file?path=${encodeURIComponent(req.filename)}&include_content=true`);
         if (existing.is_binary) {
           oldHtml = `<em>(binary file, ${existing.size ?? "?"} bytes — preview not available)</em>`;
         } else {

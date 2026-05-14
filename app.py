@@ -1472,19 +1472,17 @@ async def execute_tool(call: dict, config: dict, send_event, mode: str = "approv
         except Exception as exc:
             write_error = str(exc)
 
-        # Inline the data only when small enough for the browser to handle as a
-        # blob in the chat transcript; for larger writes, the file is still on
-        # disk at project_root and the frontend just won't show an inline link.
-        _MAX_INLINE_BYTES = 1 * 1024 * 1024
+        # Always inline data_b64 up to the hard cap (_MAX_WRITE_BYTES), so the
+        # frontend can offer a download link for every approved write. The
+        # base64 expansion is bounded by the hard cap above.
         result = {
             "filename": filename,
             "dest_path": filename,
             "mime": mime,
             "bytes_written": content_bytes_len,
+            "data_b64": base64.b64encode(content.encode("utf-8")).decode("ascii"),
             "checkpoint_id": checkpoint_id,
         }
-        if content_bytes_len <= _MAX_INLINE_BYTES:
-            result["data_b64"] = base64.b64encode(content.encode("utf-8")).decode("ascii")
         if write_error:
             result["write_error"] = write_error
         return result
@@ -1961,13 +1959,21 @@ async def get_workspace(wid: str):
 @app.post("/api/workspaces")
 async def upsert_workspace(w: WorkspaceIn):
     # Reject project_root values that escape WORKSPACE_DIR up front so the user
-    # gets actionable feedback. _resolve_project_root still clamps as defense-
-    # in-depth, but failing closed here avoids the "configured path silently
-    # ignored" footgun the reviewer flagged.
+    # gets actionable feedback. Relative paths are resolved against
+    # WORKSPACE_DIR (e.g., "my-project" → "<workspace_dir>/my-project") rather
+    # than the server process CWD. _resolve_project_root still clamps as
+    # defense-in-depth.
     if w.project_root:
         base = Path(WORKSPACE_DIR).resolve()
+        candidate_path = Path(w.project_root)
+        if not candidate_path.is_absolute():
+            candidate_path = base / candidate_path
         try:
-            Path(w.project_root).resolve().relative_to(base)
+            normalized = candidate_path.resolve()
+            normalized.relative_to(base)
+            # Persist the normalized absolute path so downstream code uses a
+            # consistent value regardless of what the user typed.
+            w.project_root = str(normalized)
         except (ValueError, OSError):
             raise HTTPException(
                 400,
@@ -2271,7 +2277,7 @@ _MAX_PROJECT_FILE_BYTES = 1 * 1024 * 1024  # 1 MB cap for /api/project/file
 
 
 @app.get("/api/project/file")
-async def project_file(path: str, include_content: bool = True):
+async def project_file(path: str, include_content: bool = False):
     cfg = load_config()
     workspace = resolve_active_workspace(cfg)
     root = _resolve_project_root(workspace)
