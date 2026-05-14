@@ -1259,6 +1259,20 @@ async def chat_complete(messages: list, model: str, config: dict) -> tuple[str, 
 # Subagent execution
 # ---------------------------------------------------------------------------
 
+_SUBAGENT_TOOL_PROTOCOL = """
+You have one tool. To call it, output exactly one fenced JSON block on its own lines:
+
+```tool
+{"tool": "load_skill", "args": {"skill_id": "..."}}
+```
+
+Available tools:
+- load_skill: load the full content of a named skill. Args: {"skill_id": "..."}.
+
+Output at most one tool call per turn. Never invent tool output — wait for the result.
+""".strip()
+
+
 async def run_subagent_loop(
     prompt: str, model: str, config: dict, max_steps: int = 4
 ) -> str:
@@ -1268,6 +1282,8 @@ async def run_subagent_loop(
         "Do NOT call execute_shell, write_file, generate_image, generate_audio, "
         "cli_call, mcp_call, or read_file. Summarize from your existing context. "
         "Produce a concise summary of your findings when done.\n\n"
+        + _SUBAGENT_TOOL_PROTOCOL
+        + "\n\n"
         + RENDERING_PROTOCOL
     )
     history = [{"role": "user", "content": prompt}]
@@ -2132,7 +2148,8 @@ async def delete_workspace(wid: str):
 
 
 @app.get("/api/workspaces/{wid}/export")
-async def export_workspace(wid: str):
+async def export_workspace(request: Request, wid: str):
+    _require_local_caller(request)
     data = load_workspaces()
     w = next((x for x in data["workspaces"] if x["id"] == wid), None)
     if not w:
@@ -2195,7 +2212,8 @@ _MAX_BUNDLE_TOTAL_BYTES = 50 * 1024 * 1024  # cap total uncompressed bytes (zip-
 
 
 @app.post("/api/workspaces/import")
-async def import_workspace(file: UploadFile = File(...)):
+async def import_workspace(request: Request, file: UploadFile = File(...)):
+    _require_local_caller(request)
     content = await file.read(_MAX_BUNDLE_BYTES + 1)
     if len(content) > _MAX_BUNDLE_BYTES:
         raise HTTPException(413, "Workspace bundle too large (max 10 MB).")
@@ -2372,7 +2390,12 @@ def _resolve_project_root_info(workspace: Optional[dict]) -> tuple[str, bool]:
     if not requested:
         return str(base), False
     try:
-        candidate = Path(requested).resolve()
+        candidate = Path(requested)
+        # Resolve relative paths against WORKSPACE_DIR (not the process CWD),
+        # matching the validation logic in upsert_workspace.
+        if not candidate.is_absolute():
+            candidate = base / candidate
+        candidate = candidate.resolve()
         candidate.relative_to(base)
         return str(candidate), False
     except (ValueError, OSError):
@@ -2463,6 +2486,8 @@ async def project_file(request: Request, path: str, include_content: bool = Fals
         raise HTTPException(403, "Path outside project root.")
     if not full.exists():
         raise HTTPException(404, "File not found.")
+    if not full.is_file():
+        raise HTTPException(400, "Path is not a file.")
     size = full.stat().st_size
     truncated = size > _MAX_PROJECT_FILE_BYTES
     content = None
@@ -2775,7 +2800,8 @@ async def explain_command(body: ExplainCommandIn, request: Request):
 # --- Conversations ---
 
 @app.get("/api/conversations")
-async def list_conversations():
+async def list_conversations(request: Request):
+    _require_local_caller(request)
     data = load_conversations()
     summary = []
     for cid, conv in data["conversations"].items():
@@ -2792,7 +2818,8 @@ async def list_conversations():
 
 
 @app.get("/api/conversations/search")
-async def search_conversations(q: str = ""):
+async def search_conversations(request: Request, q: str = ""):
+    _require_local_caller(request)
     data = load_conversations()
     q_lower = q.lower().strip()
     results = []
@@ -2824,7 +2851,8 @@ async def search_conversations(q: str = ""):
 
 
 @app.get("/api/conversations/{cid}")
-async def get_conversation(cid: str):
+async def get_conversation(request: Request, cid: str):
+    _require_local_caller(request)
     data = load_conversations()
     conv = data["conversations"].get(cid)
     if not conv:
@@ -2833,7 +2861,8 @@ async def get_conversation(cid: str):
 
 
 @app.delete("/api/conversations/{cid}")
-async def delete_conversation(cid: str):
+async def delete_conversation(request: Request, cid: str):
+    _require_local_caller(request)
     data = load_conversations()
     data["conversations"].pop(cid, None)
     save_json(CONVERSATIONS_PATH, data)
@@ -2845,7 +2874,8 @@ class PinIn(BaseModel):
 
 
 @app.post("/api/conversations/{cid}/pin")
-async def pin_conversation(cid: str, body: PinIn):
+async def pin_conversation(request: Request, cid: str, body: PinIn):
+    _require_local_caller(request)
     data = load_conversations()
     conv = data["conversations"].get(cid)
     if not conv:
@@ -2860,7 +2890,8 @@ class TagIn(BaseModel):
 
 
 @app.post("/api/conversations/{cid}/tags")
-async def tag_conversation(cid: str, body: TagIn):
+async def tag_conversation(request: Request, cid: str, body: TagIn):
+    _require_local_caller(request)
     data = load_conversations()
     conv = data["conversations"].get(cid)
     if not conv:
@@ -2877,7 +2908,8 @@ class ForkIn(BaseModel):
 
 
 @app.post("/api/conversations/{cid}/fork")
-async def fork_conversation(cid: str, body: ForkIn):
+async def fork_conversation(request: Request, cid: str, body: ForkIn):
+    _require_local_caller(request)
     data = load_conversations()
     conv = data["conversations"].get(cid)
     if not conv:

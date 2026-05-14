@@ -2515,5 +2515,5 @@ async function init() {
 }
 
 init().catch((e) => {
-  document.body.innerHTML = `<pre style="padding: 30px;">Init failed: ${escape(e.message)}\n\n${e.stack || ""}</pre>`;
+  document.body.innerHTML = `<pre style="padding: 30px;">Init failed: ${escape(e.message)}\n\n${escape(e.stack || "")}</pre>`;
 });
