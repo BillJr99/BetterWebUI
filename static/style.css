@@ -392,7 +392,7 @@ label small { font-weight: 400; }
   transition: background 0.15s ease;
 }
 .upload-label:hover { background: var(--parchment-pale); }
-.upload-label.icon { padding: 8px 10px; flex: 0 0 auto; color: var(--ink-soft); }
+.upload-label.icon { padding: 8px 10px; flex: 0 0 auto; color: var(--ink-soft); height: 40px; line-height: 1; }
 
 .hint {
   font-size: 13px;
@@ -1718,7 +1718,7 @@ kbd {
 .diff-columns { display: flex; gap: 12px; }
 .diff-col { flex: 1; min-width: 0; }
 .diff-col strong { display: block; margin-bottom: 6px; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--ink-faint); }
-.diff-col pre { background: var(--code-bg); border-radius: var(--radius); padding: 8px; font-size: 11px; overflow: auto; max-height: 320px; white-space: pre-wrap; word-break: break-all; }
+.diff-col pre { background: var(--code-bg); color: var(--code-text); border-radius: var(--radius); padding: 8px; font-size: 11px; overflow: auto; max-height: 320px; white-space: pre-wrap; word-break: break-all; }
 .diff-col-new pre { border: 1px solid rgba(79,107,58,0.4); }
 .diff-box { max-width: 900px; width: 95vw; }
 

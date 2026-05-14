@@ -1704,6 +1704,14 @@ async function askApproval(req) {
           Trust this command for the rest of the session (won't ask again)
         </label>
       `;
+    } else if (req.tool === "delete_file") {
+      title = "Delete a file?";
+      body = `
+        <div class="danger-banner"><strong>This cannot be undone.</strong> The file will be permanently deleted from your workspace.</div>
+        ${req.reason ? `<p><b>Why:</b> ${escape(req.reason)}</p>` : ""}
+        <p><b>File:</b> <code>${escape(req.filename)}</code></p>
+        <p><small>${escape(req.dest_path || "")}</small></p>
+      `;
     } else {
       title = `Allow ${req.tool}?`;
       body = `<pre>${escape(JSON.stringify(req, null, 2))}</pre>`;
@@ -1981,6 +1989,17 @@ async function handleToolResult(data) {
     const sysMsg = { role: "tool", content: text };
     state.messages.push(sysMsg);
     appendMessage(sysMsg);
+    return;
+  }
+
+  if (data.tool === "delete_file") {
+    const content = r.error
+      ? `Delete failed: ${r.error}`
+      : `Deleted: ${r.deleted}`;
+    const sysMsg = { role: "tool", content };
+    state.messages.push(sysMsg);
+    appendMessage(sysMsg);
+    if (!r.error && state.filesPaneVisible) refreshFileTree();
     return;
   }
 
