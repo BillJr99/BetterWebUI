@@ -1,0 +1,65 @@
+version: "3.9"
+
+services:
+  betterwebui:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      CLK_BASE_URL: http://clk:8001
+      AUTOGUI_BASE_URL: ${AUTOGUI_BASE_URL:-http://host.docker.internal:8002}
+      OSSO_BASE_URL: ${OSSO_BASE_URL:-http://host.docker.internal:5001}
+      OPENWEBUI_BASE_URL: ${OPENWEBUI_BASE_URL:-http://host.docker.internal:3000}
+      OPENWEBUI_API_KEY: ${OPENWEBUI_API_KEY:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./data/betterwebui:/app/data
+    depends_on:
+      clk:
+        condition: service_healthy
+    restart: unless-stopped
+
+  clk:
+    build:
+      context: ../../cognitiveloopkernel
+    command: ["python", "-m", "clk_harness.api"]
+    ports:
+      - "8001:8001"
+    environment:
+      CLK_WORKSPACES_DIR: /workspaces
+      CLK_API_PORT: "8001"
+    volumes:
+      - ${CLK_WORKSPACES_DIR:-./data/clk-workspaces}:/workspaces
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8001/api/healthz').raise_for_status()"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Test-only services (profile: test)
+  autogui-test:
+    profiles: ["test"]
+    build:
+      context: ../../autogui
+    command: ["python", "api.py"]
+    ports:
+      - "8002:8002"
+    environment:
+      AUTOGUI_DRY_RUN: "true"
+      AUTOGUI_API_PORT: "8002"
+      OPENWEBUI_BASE_URL: ${OPENWEBUI_BASE_URL:-http://host.docker.internal:3000}
+      OPENWEBUI_API_KEY: ${OPENWEBUI_API_KEY:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  osso-test:
+    profiles: ["test"]
+    build:
+      context: ../../osscreenobserver
+    command: ["python", "main.py", "--mock", "--mode", "inspect"]
+    ports:
+      - "5001:5001"
