@@ -1125,13 +1125,18 @@ def _ckpt_key(filename: str) -> str:
     return hashlib.sha1(norm.encode("utf-8")).hexdigest()[:16]
 
 
-def _checkpoint_file(workspace_id: str, filename: str, content: str) -> str:
-    """Save a checkpoint snapshot. Returns the checkpoint id."""
+def _checkpoint_file(workspace_id: str, filename: str, content: bytes) -> str:
+    """Save a checkpoint snapshot of raw bytes. Returns the checkpoint id.
+
+    Stores as `.bin` so binary files round-trip without UTF-8 replacement.
+    Legacy `.txt` snapshots from earlier versions are still readable by
+    _get_checkpoint and _list_checkpoints.
+    """
     ckpt_dir = CHECKPOINTS_DIR / workspace_id / _ckpt_key(filename)
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     ckpt_id = f"{int(time.time())}_{uuid.uuid4().hex[:6]}"
-    ckpt_path = ckpt_dir / f"{ckpt_id}.txt"
-    ckpt_path.write_text(content, encoding="utf-8")
+    ckpt_path = ckpt_dir / f"{ckpt_id}.bin"
+    ckpt_path.write_bytes(content)
     return ckpt_id
 
 
@@ -1139,19 +1144,31 @@ def _list_checkpoints(workspace_id: str, filename: str) -> list[dict]:
     ckpt_dir = CHECKPOINTS_DIR / workspace_id / _ckpt_key(filename)
     if not ckpt_dir.exists():
         return []
+    # Sort by mtime (descending) so the .bin and legacy .txt eras interleave
+    # correctly when both exist for the same filename.
+    files = list(ckpt_dir.glob("*.bin")) + list(ckpt_dir.glob("*.txt"))
     out = []
-    for p in sorted(ckpt_dir.glob("*.txt"), reverse=True)[:20]:
+    for p in sorted(files, key=lambda p: p.stat().st_mtime, reverse=True)[:20]:
         parts = p.stem.split("_", 1)
         ts = int(parts[0]) if parts else 0
         out.append({"id": p.stem, "filename": filename, "saved_at": ts})
     return out
 
 
-def _get_checkpoint(workspace_id: str, filename: str, ckpt_id: str) -> Optional[str]:
-    ckpt_path = CHECKPOINTS_DIR / workspace_id / _ckpt_key(filename) / f"{ckpt_id}.txt"
-    if not ckpt_path.exists():
-        return None
-    return ckpt_path.read_text(encoding="utf-8")
+def _get_checkpoint(workspace_id: str, filename: str, ckpt_id: str) -> Optional[bytes]:
+    """Return the raw checkpoint bytes, or None if the checkpoint is missing.
+
+    Reads `.bin` first; falls back to legacy `.txt` (UTF-8) for snapshots taken
+    before checkpoints became binary-safe.
+    """
+    base = CHECKPOINTS_DIR / workspace_id / _ckpt_key(filename)
+    bin_path = base / f"{ckpt_id}.bin"
+    if bin_path.exists():
+        return bin_path.read_bytes()
+    txt_path = base / f"{ckpt_id}.txt"
+    if txt_path.exists():
+        return txt_path.read_bytes()
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -1481,8 +1498,10 @@ async def execute_tool(call: dict, config: dict, send_event, mode: str = "approv
             try:
                 existing_size = dest.stat().st_size
                 if existing_size <= _MAX_CHECKPOINT_BYTES:
+                    # Read raw bytes so binary files round-trip through
+                    # checkpoint/revert without lossy UTF-8 replacement.
                     checkpoint_id = _checkpoint_file(
-                        wid, filename, dest.read_text(encoding="utf-8", errors="replace")
+                        wid, filename, dest.read_bytes()
                     )
             except Exception:
                 checkpoint_id = None
@@ -2300,18 +2319,30 @@ def _resolve_project_root(workspace: Optional[dict]) -> str:
     WORKSPACE_DIR. This prevents an unauthenticated caller (via /api/workspaces)
     from pointing a workspace at '/' or another sensitive directory and using
     the project file APIs to browse the host filesystem."""
+    root, _clamped = _resolve_project_root_info(workspace)
+    return root
+
+
+def _resolve_project_root_info(workspace: Optional[dict]) -> tuple[str, bool]:
+    """Same resolution as _resolve_project_root but also reports whether the
+    stored project_root had to be clamped to WORKSPACE_DIR.
+
+    Returns (effective_root, clamped). `clamped=True` means the caller set an
+    out-of-bounds project_root that we silently coerced — useful for UI hints
+    that distinguish "no project root configured" from "configured but invalid"
+    even when the user intentionally pointed project_root at WORKSPACE_DIR
+    itself (in which case clamped is False).
+    """
     requested = (workspace or {}).get("project_root")
     base = Path(WORKSPACE_DIR).resolve()
     if not requested:
-        return str(base)
+        return str(base), False
     try:
         candidate = Path(requested).resolve()
         candidate.relative_to(base)
-        return str(candidate)
+        return str(candidate), False
     except (ValueError, OSError):
-        # Fall back to the safe base so the workspace silently degrades to
-        # the default workspace directory rather than exposing the filesystem.
-        return str(base)
+        return str(base), True
 
 
 @app.get("/api/project/tree")
@@ -2319,7 +2350,7 @@ async def project_tree(request: Request, path: str = ""):
     _require_local_caller(request)
     cfg = load_config()
     workspace = resolve_active_workspace(cfg)
-    root = _resolve_project_root(workspace)
+    root, clamped = _resolve_project_root_info(workspace)
     root_path = Path(root).resolve()
 
     # Determine which subdirectory to list (support lazy directory expansion)
@@ -2358,12 +2389,12 @@ async def project_tree(request: Request, path: str = ""):
         raise HTTPException(500, f"Could not list directory: {exc}")
     # Don't leak the absolute filesystem root to the client; the frontend
     # only needs the relative entries to render and request further paths.
-    # project_root_set reflects the EFFECTIVE root, not just the stored
-    # workspace.project_root. _resolve_project_root can silently fall back
-    # to WORKSPACE_DIR when the stored value is invalid; in that case the
-    # UI should still show the "no project root set" hint.
-    default_base = str(Path(WORKSPACE_DIR).resolve())
-    project_root_set = bool((workspace or {}).get("project_root")) and root != default_base
+    # project_root_set is true when the workspace has a non-empty project_root
+    # that resolved cleanly (clamped=False). A user who intentionally pointed
+    # project_root AT the WORKSPACE_DIR base still gets project_root_set=true
+    # — what matters is whether the configured value was honored, not whether
+    # it differs from the default base.
+    project_root_set = bool((workspace or {}).get("project_root")) and not clamped
     return {
         "entries": entries,
         "project_root_set": project_root_set,
@@ -2483,7 +2514,8 @@ async def revert_project_file(r: RevertIn, request: Request):
         raise HTTPException(403, "Path outside project root.")
     try:
         dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_text(content, encoding="utf-8")
+        # content is raw bytes — binary checkpoints round-trip without loss.
+        dest.write_bytes(content)
     except Exception as exc:
         raise HTTPException(500, f"Could not write file: {exc}")
     return {"ok": True, "filename": r.filename, "bytes": len(content)}
