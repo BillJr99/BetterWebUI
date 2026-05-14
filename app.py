@@ -22,8 +22,8 @@ from pathlib import Path
 from typing import Any, AsyncGenerator, Optional
 
 import aiofiles
-import frontmatter
 import httpx
+import yaml
 from fastapi import FastAPI, HTTPException, UploadFile, File, Request
 from fastapi.responses import FileResponse, StreamingResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -50,6 +50,32 @@ WORKSPACE_DIR = Path(os.environ.get("WORKSPACE_DIR", str(ROOT / "workspace")))
 
 for d in (DATA_DIR, SKILLS_DIR, UPLOADS_DIR, CHECKPOINTS_DIR, TASKS_DIR, WORKSPACE_DIR):
     d.mkdir(parents=True, exist_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# Frontmatter parsing (avoids dependency on specific python-frontmatter API)
+# ---------------------------------------------------------------------------
+
+class _FrontmatterPost:
+    def __init__(self, meta: dict, content: str) -> None:
+        self._meta = meta
+        self.content = content
+
+    def get(self, key: str, default=None):
+        return self._meta.get(key, default)
+
+
+def _load_frontmatter(path: Path) -> _FrontmatterPost:
+    text = path.read_text(encoding="utf-8")
+    if text.startswith("---"):
+        end = text.find("\n---", 4)
+        if end != -1:
+            try:
+                meta = yaml.safe_load(text[4:end]) or {}
+            except yaml.YAMLError:
+                meta = {}
+            return _FrontmatterPost(meta, text[end + 4:].lstrip("\n"))
+    return _FrontmatterPost({}, text)
 
 
 # ---------------------------------------------------------------------------
@@ -624,7 +650,7 @@ def list_skill_files() -> list[dict]:
     skills = []
     for path in sorted(SKILLS_DIR.glob("*.md")):
         try:
-            post = frontmatter.load(path)
+            post = _load_frontmatter(path)
             skills.append({
                 "id": path.stem,
                 "name": post.get("name", path.stem),
@@ -645,7 +671,7 @@ def load_skill_content(skill_id: str) -> Optional[dict]:
     path = SKILLS_DIR / f"{skill_id}.md"
     if not path.exists():
         return None
-    post = frontmatter.load(path)
+    post = _load_frontmatter(path)
     return {
         "id": skill_id,
         "name": post.get("name", skill_id),
@@ -658,7 +684,7 @@ def _lint_skills() -> list[dict]:
     issues = []
     for path in sorted(SKILLS_DIR.glob("*.md")):
         try:
-            post = frontmatter.load(path)
+            post = _load_frontmatter(path)
             if not post.get("name"):
                 issues.append({"type": "skill", "id": path.stem, "issue": "Missing 'name' in frontmatter"})
             if not post.get("description"):
@@ -757,6 +783,10 @@ Available tools:
   on-disk write fails so the user can still retrieve the content.
   Args: {"filename": "name.ext", "content":
   "...", "mime": "text/plain"}.
+
+- delete_file: permanently delete a file from the workspace project folder
+  (REQUIRES APPROVAL — the user must confirm before the file is removed).
+  Args: {"filename": "name.ext", "reason": "why this file should be deleted"}.
 
 - load_skill: load the full content of a named skill so you can follow its
   instructions. Args: {"skill_id": "..."}. Use this when a listed skill
@@ -1218,7 +1248,7 @@ async def call_openwebui_audio(text: str, voice: str, config: dict) -> dict:
     async with httpx.AsyncClient(timeout=240.0) as client:
         resp = await client.post(f"{base}{profile['audio']}", json=payload, headers=headers)
     if resp.status_code != 200:
-        raise HTTPException(status_code=resp.status_code, detail=f"Audio generation failed: {resp.text[:500]}")
+        raise HTTPException(status_code=502, detail=f"Audio generation failed (upstream {resp.status_code}): {resp.text[:500]}")
     filename = f"{_slug(text, 'speech')}-{uuid.uuid4().hex[:6]}.mp3"
     return {
         "filename": filename,
@@ -1549,6 +1579,36 @@ async def execute_tool(call: dict, config: dict, send_event, mode: str = "approv
             result["write_error"] = write_error
             result["data_b64"] = base64.b64encode(content.encode("utf-8")).decode("ascii")
         return result
+
+    if tool == "delete_file":
+        filename = (args.get("filename") or args.get("path") or "").strip()
+        filename = Path(filename).name
+        if not filename:
+            return {"error": "delete_file requires a 'filename' argument."}
+        workspace = resolve_active_workspace(config)
+        project_root = _resolve_project_root(workspace)
+        dest = Path(project_root) / filename
+        if not dest.exists():
+            return {"error": f"File '{filename}' not found in the workspace."}
+
+        if mode != "trusted":
+            aid = approvals.new()
+            await send_event("approval_request", {
+                "approval_id": aid,
+                "tool": "delete_file",
+                "filename": filename,
+                "dest_path": str(dest),
+                "reason": args.get("reason", ""),
+            })
+            approved = await approvals.wait(aid)
+            if not approved:
+                return {"error": "User denied file deletion."}
+
+        try:
+            dest.unlink()
+        except OSError as exc:
+            return {"error": f"Could not delete '{filename}': {exc}"}
+        return {"deleted": filename, "path": str(dest)}
 
     if tool == "load_skill":
         skill_id = args.get("skill_id", "")
