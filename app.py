@@ -23,7 +23,7 @@ from typing import Any, AsyncGenerator, Optional
 import aiofiles
 import frontmatter
 import httpx
-from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi import FastAPI, HTTPException, UploadFile, File, Request
 from fastapi.responses import FileResponse, StreamingResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -1302,10 +1302,13 @@ async def execute_tool(call: dict, config: dict, send_event, mode: str = "approv
     tool = call["tool"]
     args = call["args"]
 
-    # Plan mode: block side-effecting tools
+    # Plan mode: block side-effecting tools (and spawn_subagent, which can
+    # transitively read files/skills but otherwise consumes context budget
+    # before any execution has been approved — matches PLAN_MODE_BLOCK's
+    # "ONLY call update_task_plan/read_file/load_skill" contract).
     if mode == "plan" and tool in (
         "execute_shell", "write_file", "generate_image",
-        "generate_audio", "cli_call", "mcp_call",
+        "generate_audio", "cli_call", "mcp_call", "spawn_subagent",
     ):
         return {"error": f"Tool '{tool}' is blocked in plan mode. Switch to Approve-each to execute."}
 
@@ -1525,6 +1528,7 @@ async def execute_tool(call: dict, config: dict, send_event, mode: str = "approv
             return {"error": f"CLI shortcut '{cli_id}' is not configured."}
         template = cli.get("command_template", "{args}")
         command = template.replace("{args}", cli_args)
+        workspace = resolve_active_workspace(config)
 
         if mode == "trusted" or _should_skip_approval(command, cli_id, config):
             await send_event("tool_running", {"tool": "cli_call", "command": command, "auto_approved": True})
@@ -1543,7 +1547,11 @@ async def execute_tool(call: dict, config: dict, send_event, mode: str = "approv
                 return {"error": "User denied this command."}
             await send_event("tool_running", {"tool": "cli_call", "command": command})
 
-        return await run_shell(command)
+        # Run CLI shortcuts from the workspace project_root, mirroring
+        # execute_shell so commands that assume they run inside the project
+        # folder (e.g., pandoc on input/*.md) behave consistently.
+        cli_cwd = _resolve_project_root(workspace)
+        return await run_shell(command, cwd=cli_cwd)
 
     return {"error": f"Unknown tool: {tool}"}
 
@@ -1889,19 +1897,36 @@ class SessionTrustIn(BaseModel):
     command: str
 
 
+def _require_local_caller(request: Request) -> None:
+    """Reject requests that don't come from a local client.
+
+    Session-trust state can downgrade the approval gate, so the endpoints
+    that modify it should not be reachable from other hosts on the network
+    even when the server is bound to 0.0.0.0 (e.g., behind Docker port
+    mapping). Same-origin browser callers always hit localhost in practice.
+    """
+    client_host = (request.client.host if request.client else "") or ""
+    # 'testclient' is FastAPI's TestClient default so this stays unit-testable.
+    if client_host not in ("127.0.0.1", "::1", "localhost", "testclient"):
+        raise HTTPException(403, "Session trust endpoints are limited to local callers.")
+
+
 @app.post("/api/session/trust")
-async def session_trust(t: SessionTrustIn):
+async def session_trust(t: SessionTrustIn, request: Request):
+    _require_local_caller(request)
     _session_trusted_commands.add(t.command)
     return {"ok": True, "trusted_count": len(_session_trusted_commands)}
 
 
 @app.get("/api/session/trust")
-async def list_session_trust():
+async def list_session_trust(request: Request):
+    _require_local_caller(request)
     return {"commands": list(_session_trusted_commands)}
 
 
 @app.delete("/api/session/trust")
-async def clear_session_trust():
+async def clear_session_trust(request: Request):
+    _require_local_caller(request)
     _session_trusted_commands.clear()
     return {"ok": True}
 
@@ -2266,7 +2291,12 @@ async def project_tree(path: str = ""):
         raise HTTPException(500, f"Could not list directory: {exc}")
     # Don't leak the absolute filesystem root to the client; the frontend
     # only needs the relative entries to render and request further paths.
-    return {"entries": entries}
+    # project_root_set lets the UI distinguish "user hasn't configured a
+    # workspace project root yet" (show hint) from "configured but empty".
+    return {
+        "entries": entries,
+        "project_root_set": bool((workspace or {}).get("project_root")),
+    }
 
 
 _MAX_PROJECT_FILE_BYTES = 1 * 1024 * 1024  # 1 MB cap for /api/project/file

@@ -1,8 +1,12 @@
 services:
   betterwebui:
     build: .
+    # Both sides use the same ${PORT:-8765} so changing PORT on the host also
+    # changes the port uvicorn binds inside the container (the Dockerfile's
+    # CMD reads $PORT). Otherwise the host mapping would point at a port the
+    # container isn't listening on.
     ports:
-      - "${PORT:-8765}:8765"
+      - "${PORT:-8765}:${PORT:-8765}"
     volumes:
       # App data (config, conversations, workspaces, uploads …)
       # Back this up to preserve your settings and chat history.
@@ -13,6 +17,6 @@ services:
       #   - /Users/alice/Documents/my-project:/workspace
       - ./workspace:/workspace
     environment:
-      - PORT=8765
+      - PORT=${PORT:-8765}
       - WORKSPACE_DIR=/workspace
     restart: unless-stopped

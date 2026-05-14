@@ -1503,15 +1503,21 @@ async function refreshFileTree() {
   const ul = $("#file-tree");
   try {
     const data = await api("/api/project/tree");
-    // Only hide the hint on a successful load; on failure the hint is the user's
-    // best guidance on how to fix the configuration (e.g., set a project root).
-    if (hint) hint.hidden = true;
+    // Surface the hint when the workspace has no project_root configured yet,
+    // even though the request succeeded. Keep it visible only in that case.
+    if (hint) {
+      if (data.project_root_set === false) {
+        hint.hidden = false;
+        hint.textContent = "No project root set for this workspace. Open the workspace settings to point it at a folder.";
+      } else {
+        hint.hidden = true;
+      }
+    }
     renderFileTree(ul, data.entries || []);
   } catch (e) {
     if (ul) ul.innerHTML = "";
     if (hint) {
       hint.hidden = false;
-      // Use a friendlier message when the workspace simply has no project root yet
       const status = e && e.status ? e.status : 0;
       if (status === 404 || status === 403) {
         hint.textContent = "No project root set for this workspace. Open the workspace settings to point it at a folder.";
@@ -1554,14 +1560,19 @@ function renderFileTree(ul, entries) {
 async function openProjectFile(path) {
   const ws = state.workspaces.find((w) => w.id === state.config?.active_workspace_id);
   try {
-    const data = await api(`/api/project/file?workspace_id=${encodeURIComponent(ws?.id || "")}&path=${encodeURIComponent(path)}&include_content=true`);
+    // First fetch metadata only — for binary files we never display the bytes,
+    // so save bandwidth by skipping the second fetch. For text files do a
+    // second request with include_content=true to populate the preview.
+    const wsParam = `workspace_id=${encodeURIComponent(ws?.id || "")}`;
+    const meta = await api(`/api/project/file?${wsParam}&path=${encodeURIComponent(path)}`);
     const name = path.split("/").pop() || path;
     let body;
-    if (data.is_binary) {
-      const sizeStr = data.size != null ? `${data.size} bytes` : "unknown size";
-      const truncated = data.truncated ? " (truncated)" : "";
+    if (meta.is_binary) {
+      const sizeStr = meta.size != null ? `${meta.size} bytes` : "unknown size";
+      const truncated = meta.truncated ? " (truncated)" : "";
       body = `<p><em>Binary file (${sizeStr})${truncated} — preview not available.</em></p>`;
     } else {
+      const data = await api(`/api/project/file?${wsParam}&path=${encodeURIComponent(path)}&include_content=true`);
       const truncated = data.truncated
         ? `<p class="hint">File was truncated to the first 1 MB for preview.</p>` : "";
       body = `${truncated}<pre style="max-height:400px;overflow:auto;">${escape(data.content || "")}</pre>`;
