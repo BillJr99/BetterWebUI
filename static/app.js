@@ -2347,11 +2347,10 @@ function wireEvents() {
   $("#new-chat-btn").onclick = newChat;
   $("#send-btn").onclick = send;
   $("#composer-input").addEventListener("keydown", (e) => {
+    // Plain Enter in the textarea sends. Ctrl/Cmd+Enter is handled by
+    // handleGlobalKey() — if we also handled it here, send() would fire
+    // twice (once per listener). Don't duplicate that branch.
     if (e.key === "Enter" && !e.shiftKey && !e.ctrlKey && !e.metaKey) {
-      e.preventDefault();
-      send();
-    }
-    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
       e.preventDefault();
       send();
     }

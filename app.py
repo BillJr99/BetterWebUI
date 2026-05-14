@@ -2611,7 +2611,10 @@ _MAX_TRANSCRIBE_BYTES = 25 * 1024 * 1024  # 25 MB cap for /api/transcribe upload
 
 
 @app.post("/api/transcribe")
-async def transcribe_audio(file: UploadFile = File(...)):
+async def transcribe_audio(request: Request, file: UploadFile = File(...)):
+    # Proxies user-API-key requests to the backend, so restrict to local
+    # callers (matches /api/tts and /api/explain-command).
+    _require_local_caller(request)
     cfg = load_config()
     if not cfg.get("api_key") or not cfg.get("base_url"):
         raise HTTPException(400, "Set your OpenWebUI URL and API key first.")
@@ -2649,7 +2652,8 @@ class TtsIn(BaseModel):
 
 
 @app.post("/api/tts")
-async def tts_endpoint(body: TtsIn):
+async def tts_endpoint(body: TtsIn, request: Request):
+    _require_local_caller(request)
     cfg = load_config()
     if not cfg.get("api_key") or not cfg.get("base_url"):
         raise HTTPException(400, "Set your OpenWebUI URL and API key first.")
@@ -2666,7 +2670,8 @@ class ExplainCommandIn(BaseModel):
 
 
 @app.post("/api/explain-command")
-async def explain_command(body: ExplainCommandIn):
+async def explain_command(body: ExplainCommandIn, request: Request):
+    _require_local_caller(request)
     cmd = body.command.strip()
     if not cmd:
         raise HTTPException(400, "Command is required.")
