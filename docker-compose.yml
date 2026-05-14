@@ -1,0 +1,12 @@
+services:
+  betterwebui:
+    build: .
+    ports:
+      - "${PORT:-8765}:8765"
+    volumes:
+      # All user data (config, conversations, workspaces, uploads …) lives here.
+      # Delete this folder to reset everything; back it up to preserve your work.
+      - ./data:/app/data
+    environment:
+      - PORT=8765
+    restart: unless-stopped

@@ -215,3 +215,16 @@ jobs:
               sys.exit(1)
           print(f"All {len(list(Path('skills').glob('*.md')))} skill(s) valid.")
           EOF
+
+  # ---------------------------------------------------------------------------
+  # Docker build check
+  # ---------------------------------------------------------------------------
+  docker:
+    name: Docker build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -t betterwebui:ci .
