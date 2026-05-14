@@ -526,7 +526,7 @@ class TestLint:
     def test_detects_missing_frontmatter(self, client, isolated_dirs):
         # Write a skill with no frontmatter
         bad = isolated_dirs["skills"] / "broken.md"
-        bad.write_text("This skill has no frontmatter.")
+        bad.write_text("This skill has no frontmatter.", encoding="utf-8")
         r = client.get("/api/lint")
         data = r.json()
         assert data["ok"] is False
@@ -558,7 +558,7 @@ class TestBranding:
 
     def test_custom_branding(self, client, isolated_dirs):
         branding = {"logo": None, "primary_color": "#ff0000", "welcome": "Hello", "institution": "ACME"}
-        (isolated_dirs["data"] / "branding.json").write_text(json.dumps(branding))
+        (isolated_dirs["data"] / "branding.json").write_text(json.dumps(branding), encoding="utf-8")
         r = client.get("/api/branding")
         assert r.json()["primary_color"] == "#ff0000"
         assert r.json()["institution"] == "ACME"

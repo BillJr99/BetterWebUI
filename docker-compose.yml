@@ -22,4 +22,11 @@ services:
     environment:
       - PORT=${PORT:-8765}
       - WORKSPACE_DIR=/workspace
+      # Inside a container, browser requests arrive from the Docker bridge
+      # gateway (172.16/12). _require_local_caller blocks that range by
+      # default so a bare-metal install on a real 172.16/12 LAN can't be
+      # exfiltrated; here we opt in because the container is the legitimate
+      # caller. The host port is still bound to 127.0.0.1 above, so this
+      # does not expose anything to the LAN by itself.
+      - BETTERWEBUI_ALLOW_DOCKER=true
     restart: unless-stopped

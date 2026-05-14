@@ -114,7 +114,7 @@ def seed_conversation(isolated_dirs, cid="conv-1", title="Hello", messages=None)
     """Write a conversation directly to disk, bypassing the chat endpoint."""
     import time
     conversations_path = isolated_dirs["data"] / "conversations.json"
-    data = json.loads(conversations_path.read_text()) if conversations_path.exists() else {"conversations": {}}
+    data = json.loads(conversations_path.read_text(encoding="utf-8")) if conversations_path.exists() else {"conversations": {}}
     data["conversations"][cid] = {
         "id": cid,
         "title": title,
@@ -125,5 +125,5 @@ def seed_conversation(isolated_dirs, cid="conv-1", title="Hello", messages=None)
         "tags": [],
         "task_plan": [],
     }
-    conversations_path.write_text(json.dumps(data))
+    conversations_path.write_text(json.dumps(data), encoding="utf-8")
     return cid

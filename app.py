@@ -1983,12 +1983,18 @@ def _require_local_caller(request: Request) -> None:
 
     Session-trust state and the project-file endpoints can affect on-disk
     state, so they shouldn't be reachable from arbitrary remote hosts when
-    the server is bound to 0.0.0.0. Default: loopback plus the Docker
-    bridge range (172.16.0.0/12) so the containerized UI keeps working
-    when the host port is bound to 127.0.0.1 (the default in
-    docker-compose.yml). LAN-wide access is opt-in:
-      BETTERWEBUI_ALLOW_LAN=true   → accept any RFC1918 private IP
-      BETTERWEBUI_REQUIRE_LOCAL=strict → loopback only (rejects Docker too)
+    the server is bound to 0.0.0.0. Default: loopback only. Docker bridge
+    and broader LAN access are opt-in via env vars:
+      BETTERWEBUI_ALLOW_DOCKER=true → also accept 172.16.0.0/12 (the
+                                      Docker bridge range). docker-compose.yml
+                                      sets this by default so the
+                                      containerized UI just works.
+      BETTERWEBUI_ALLOW_LAN=true    → accept any RFC1918 private IP
+      BETTERWEBUI_REQUIRE_LOCAL=strict → loopback only (overrides both above)
+
+    The narrower default protects bare-metal deployments on real LANs that
+    happen to use 172.16/12 — they no longer leak local-only endpoints to
+    LAN peers just because the network's CIDR overlaps Docker's range.
     """
     client_host = (request.client.host if request.client else "") or ""
     if client_host in ("127.0.0.1", "::1", "localhost", "testclient"):
@@ -2002,10 +2008,12 @@ def _require_local_caller(request: Request) -> None:
         raise HTTPException(403, "This endpoint is limited to local callers.")
     if addr.is_loopback:
         return
-    # Docker bridge range is allowed by default so the containerized UI works.
-    if isinstance(addr, ipaddress.IPv4Address) and addr in _DOCKER_BRIDGE_RANGE:
+    # Docker bridge range is opt-in (default off) so a bare-metal install on
+    # a real 172.16/12 LAN doesn't accidentally expose local-only endpoints.
+    allow_docker = os.environ.get("BETTERWEBUI_ALLOW_DOCKER", "").lower() in ("1", "true", "yes")
+    if allow_docker and isinstance(addr, ipaddress.IPv4Address) and addr in _DOCKER_BRIDGE_RANGE:
         return
-    # Broader LAN access is opt-in.
+    # Broader LAN access is also opt-in.
     allow_lan = os.environ.get("BETTERWEBUI_ALLOW_LAN", "").lower() in ("1", "true", "yes")
     if allow_lan and addr.is_private:
         return
@@ -2065,12 +2073,14 @@ class WorkspaceIn(BaseModel):
 
 
 @app.get("/api/workspaces")
-async def list_workspaces_endpoint():
+async def list_workspaces_endpoint(request: Request):
+    _require_local_caller(request)
     return load_workspaces()
 
 
 @app.get("/api/workspaces/{wid}")
-async def get_workspace(wid: str):
+async def get_workspace(request: Request, wid: str):
+    _require_local_caller(request)
     data = load_workspaces()
     w = next((x for x in data["workspaces"] if x["id"] == wid), None)
     if not w:
@@ -2079,7 +2089,8 @@ async def get_workspace(wid: str):
 
 
 @app.post("/api/workspaces")
-async def upsert_workspace(w: WorkspaceIn):
+async def upsert_workspace(w: WorkspaceIn, request: Request):
+    _require_local_caller(request)
     # Reject project_root values that escape WORKSPACE_DIR up front so the user
     # gets actionable feedback. Relative paths are resolved against
     # WORKSPACE_DIR (e.g., "my-project" → "<workspace_dir>/my-project") rather
@@ -2094,9 +2105,13 @@ async def upsert_workspace(w: WorkspaceIn):
             normalized = candidate_path.resolve()
             normalized.relative_to(base)
         except (ValueError, OSError):
+            # Don't include the resolved base path in the error message: this
+            # endpoint is gated by _require_local_caller, but defense-in-depth
+            # is cheap and we still avoid serializing absolute filesystem
+            # paths in any HTTP response body.
             raise HTTPException(
                 400,
-                f"project_root must be inside the workspace directory ({base}).",
+                "project_root must be inside the configured workspace directory.",
             )
         # Create the directory if it doesn't exist yet so /api/project/tree
         # and execute_shell can use it immediately without "no such directory"
@@ -2106,12 +2121,12 @@ async def upsert_workspace(w: WorkspaceIn):
         except OSError as exc:
             raise HTTPException(
                 400,
-                f"Could not create project_root '{normalized}': {exc}",
+                f"Could not create project_root: {exc}",
             )
         if not normalized.is_dir():
             raise HTTPException(
                 400,
-                f"project_root '{normalized}' exists but is not a directory.",
+                "project_root exists but is not a directory.",
             )
         # Persist the normalized absolute path so downstream code uses a
         # consistent value regardless of what the user typed.
@@ -2136,7 +2151,8 @@ async def upsert_workspace(w: WorkspaceIn):
 
 
 @app.delete("/api/workspaces/{wid}")
-async def delete_workspace(wid: str):
+async def delete_workspace(request: Request, wid: str):
+    _require_local_caller(request)
     data = load_workspaces()
     data["workspaces"] = [x for x in data["workspaces"] if x["id"] != wid]
     save_json(WORKSPACES_PATH, data)
