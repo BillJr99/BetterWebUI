@@ -2205,12 +2205,22 @@ async def import_workspace(file: UploadFile = File(...)):
                     p_data["prompts"].append(p)
                     save_json(PROMPTS_PATH, p_data)
                 prompt_id = p["id"]
-            # Import skills
+            # Import skills. Skip any skill whose target filename already
+            # exists in SKILLS_DIR so a bundle can't silently overwrite a
+            # user's local skill with the same name. The names of the
+            # skipped files come back in the response so the UI can show
+            # the user what wasn't imported.
+            imported_skills: list[str] = []
+            skipped_skills: list[str] = []
             for name in names:
                 if name.startswith("skills/") and name.endswith(".md"):
                     skill_bytes = zf.read(name)
                     dest = SKILLS_DIR / Path(name).name
+                    if dest.exists():
+                        skipped_skills.append(dest.name)
+                        continue
                     dest.write_bytes(skill_bytes)
+                    imported_skills.append(dest.name)
             # Import CLI tools
             if "cli_tools.json" in names:
                 imported_cli = json.loads(zf.read("cli_tools.json"))
@@ -2248,7 +2258,12 @@ async def import_workspace(file: UploadFile = File(...)):
             "updated_at": int(time.time()),
         })
         save_json(WORKSPACES_PATH, ws_data)
-        return {"id": wid, "name": manifest.get("name")}
+        return {
+            "id": wid,
+            "name": manifest.get("name"),
+            "imported_skills": imported_skills,
+            "skipped_skills": skipped_skills,
+        }
     except HTTPException:
         raise
     except Exception as exc:

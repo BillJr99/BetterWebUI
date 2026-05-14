@@ -1531,7 +1531,15 @@ async function refreshFileTree() {
       hint.hidden = false;
       const status = e && e.status ? e.status : 0;
       if (status === 404 || status === 403) {
+        // The endpoint exists but the workspace has no usable project_root —
+        // guide the user toward the workspace settings.
         hint.textContent = "No project root set for this workspace. Open the workspace settings to point it at a folder.";
+      } else if (status >= 500) {
+        hint.textContent = `Couldn't load file tree (server error ${status}). Try again, or check the server logs.`;
+      } else if (status === 0) {
+        hint.textContent = "Couldn't reach the server. Check your network connection and try again.";
+      } else {
+        hint.textContent = `Couldn't load file tree (HTTP ${status}).`;
       }
     }
   }
@@ -2183,7 +2191,15 @@ function renderUseCaseGrid(templates) {
       const btn = $("#ob-usecase-btn");
       if (btn) { btn.disabled = false; btn.dataset.useCase = t.id; }
     };
-    card.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") card.click(); };
+    card.onkeydown = (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        // Space scrolls the page by default — stop that and let it select
+        // the card the same way Enter does (matches file-tree behavior).
+        e.preventDefault();
+        e.stopPropagation();
+        card.click();
+      }
+    };
     grid.appendChild(card);
   }
 }
