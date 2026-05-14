@@ -31,9 +31,10 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Install test dependencies
-        # Only install test-runner deps; httpx and python-frontmatter come
-        # pinned from requirements.txt above so CI matches production.
-        run: pip install pytest pytest-asyncio
+        # httpx comes from requirements.txt (used by services/ and mocked in
+        # tests/test_services.py via unittest.mock — no extra httpx mock lib needed).
+        # python-frontmatter is required by the app at import time.
+        run: pip install pytest pytest-asyncio python-frontmatter
 
       - name: Run tests
         run: pytest tests/ -v --tb=short
@@ -55,7 +56,7 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: pip install -r requirements.txt python-frontmatter
 
       - name: Start server in background
         run: |
@@ -173,7 +174,7 @@ jobs:
         run: pip install pyflakes python-frontmatter
 
       - name: pyflakes (syntax / undefined names)
-        run: python -m pyflakes app.py tests/
+        run: python -m pyflakes app.py services/ tests/
 
       - name: Check HTML is valid UTF-8
         run: python3 -c "open('static/index.html', encoding='utf-8').read(); print('index.html OK')"
@@ -185,13 +186,15 @@ jobs:
         run: python3 -c "open('static/style.css', encoding='utf-8').read(); print('style.css OK')"
 
       - name: Verify no Python syntax errors
-        run: python3 -m py_compile app.py && echo "app.py compiles OK"
+        run: |
+          python3 -m py_compile app.py && echo "app.py compiles OK"
+          python3 -m py_compile services/registry.py services/clients.py services/health.py services/routes.py && echo "services/ compiles OK"
 
       - name: Check required files exist
         run: |
-          for f in app.py requirements.txt static/index.html static/app.js static/style.css start.sh start.bat; do
+          for f in app.py requirements.txt static/index.html static/app.js static/style.css deploy/start.sh deploy/start.bat; do
             [ -f "$f" ] || (echo "Missing: $f" && exit 1)
-            echo "✓ $f"
+            echo "OK $f"
           done
 
       - name: Verify skills have valid frontmatter

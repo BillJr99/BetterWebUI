@@ -238,6 +238,7 @@ async function loadConfig() {
   applyDisplaySettings(state.config.display || {});
   renderConnectionStatus(state.config);
   await loadHealth();
+  await loadServicesStatus();
 }
 
 function renderConnectionStatus(cfg) {
@@ -264,6 +265,37 @@ async function loadHealth() {
       `${h.mcp_running}/${h.mcp_servers} MCP server(s) running · ${h.cli_tools} CLI shortcut(s)`;
   } catch (e) {
     $("#about-info").textContent = "Health check failed.";
+  }
+}
+
+async function loadServicesStatus() {
+  try {
+    const s = await api("/api/services/status");
+    const map = s.services || {};
+    ["clk", "autogui", "osso"].forEach((name) => {
+      const el = $(`#svc-${name}-enabled`);
+      if (el) el.checked = map[name]?.enabled !== false;
+    });
+  } catch (_) { /* services module not running — ignore */ }
+}
+
+async function toggleService(name, enabled) {
+  const statusEl = $("#services-toggle-status");
+  try {
+    await api(`/api/services/${name}/${enabled ? "enable" : "disable"}`, { method: "POST" });
+    if (statusEl) {
+      statusEl.textContent = `${name} ${enabled ? "enabled" : "disabled"}.`;
+      statusEl.className = "status-line good";
+      setTimeout(() => { statusEl.textContent = ""; statusEl.className = "status-line"; }, 2500);
+    }
+  } catch (e) {
+    if (statusEl) {
+      statusEl.textContent = `Failed to update ${name}: ${e.message}`;
+      statusEl.className = "status-line bad";
+    }
+    // Revert the checkbox
+    const el = $(`#svc-${name}-enabled`);
+    if (el) el.checked = !enabled;
   }
 }
 
@@ -2448,6 +2480,13 @@ function wireEvents() {
   $("#save-connection").onclick = saveConnection;
   $("#save-defaults").onclick = saveDefaults;
   $("#save-display")?.addEventListener("click", saveDisplay);
+
+  // Services enable/disable
+  ["clk", "autogui", "osso"].forEach((name) => {
+    $(`#svc-${name}-enabled`)?.addEventListener("change", (e) => {
+      toggleService(name, e.target.checked);
+    });
+  });
 
   // Prompts
   $("#new-prompt-btn").onclick = () => openPromptDialog(null);

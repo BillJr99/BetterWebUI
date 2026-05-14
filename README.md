@@ -30,6 +30,153 @@ and audio, calling MCP servers — without having to be a developer.
 - **Local shell execution** — bash on macOS/Linux, PowerShell on Windows.
   Every command requires a one-click approval before it runs.
 
+## Service Integrations
+
+BetterWebUI integrates with three external AI services via REST APIs, exposing them
+at `/api/services/*` endpoints that the LLM can call through tool use or slash commands.
+
+| Service | Env var | Default URL | Purpose |
+|---|---|---|---|
+| CognitiveLoopKernel (CLK) | `CLK_BASE_URL` | `http://localhost:8001` | Deep research loops & multi-step workflows |
+| AutoGUI | `AUTOGUI_BASE_URL` | `http://localhost:8002` | Desktop GUI automation via ReAct |
+| OSScreenObserver (OSSO) | `OSSO_BASE_URL` | `http://localhost:5001` | Screen reading & accessibility inspection |
+
+### Enable / disable services
+
+Each service can be toggled on or off independently from **Settings → Services**
+(or via the API). Disabled services immediately return an HTTP 503 for all
+their routes, and the LLM is told the service is unavailable. Re-enabling
+restores normal operation without a restart.
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/services/status` | Current enabled/disabled state for all services |
+| POST | `/api/services/{name}/enable` | Enable a service (`clk`, `autogui`, `osso`) |
+| POST | `/api/services/{name}/disable` | Disable a service |
+
+### Graceful degradation
+
+When an enabled service is **not running or unreachable**, BetterWebUI returns
+a descriptive HTTP 503 response rather than crashing. The LLM receives the
+error message and relays it to the user.
+
+### Approval flow
+
+Tool calls that trigger side-effects require a **one-click approval** from the
+user in the chat interface before the action executes:
+
+- `clk_research` — shows the workflow and command for approval
+- `autogui_task` — shows the task description for approval
+- `screen_action` — shows the action type and coordinates for approval
+
+Read-only operations (`screen_windows`, `screen_description`,
+`screen_screenshot`) run without an approval prompt.
+
+### Integrated endpoints
+
+| Method | Path | Service |
+|---|---|---|
+| GET | `/api/services/health` | All (aggregated health check) |
+| GET | `/api/services/status` | All (enable/disable state) |
+| POST | `/api/services/{name}/enable` | All |
+| POST | `/api/services/{name}/disable` | All |
+| GET | `/api/services/clk/workflows` | CLK |
+| POST | `/api/services/clk/research` | CLK |
+| GET | `/api/services/clk/research/{id}` | CLK |
+| GET | `/api/services/clk/research/{id}/stream` | CLK (SSE) |
+| GET | `/api/services/clk/research/{id}/artifacts` | CLK |
+| POST | `/api/services/clk/research/{id}/cancel` | CLK |
+| POST | `/api/services/autogui/task` | AutoGUI |
+| GET | `/api/services/autogui/task/{id}` | AutoGUI |
+| GET | `/api/services/autogui/task/{id}/stream` | AutoGUI (SSE) |
+| POST | `/api/services/autogui/task/{id}/cancel` | AutoGUI |
+| GET | `/api/services/autogui/tools` | AutoGUI |
+| GET | `/api/services/osso/windows` | OSSO |
+| GET | `/api/services/osso/description` | OSSO |
+| GET | `/api/services/osso/structure` | OSSO |
+| GET | `/api/services/osso/screenshot` | OSSO |
+| POST | `/api/services/osso/action` | OSSO |
+| GET | `/api/services/osso/capabilities` | OSSO |
+| GET | `/api/services/tools` | All (LLM tool specs) |
+
+### Slash commands
+
+When typing in the chat, prefix your message with a slash command to route directly
+to a service:
+
+- `/research <topic>` — starts a CLK research workflow
+- `/observe` — returns a description of the current screen via OSSO
+- `/automate <task>` — sends a GUI automation task to AutoGUI (dry-run by default)
+
+### Deployment
+
+See [deploy/README.md](deploy/README.md) for the full integration deployment guide,
+including Docker Compose configuration and the `bootstrap.sh` script for cloning
+sibling repositories.
+
+## Running the test suite
+
+### Unit + service-integration tests (no external dependencies)
+
+```bash
+pip install -r requirements.txt
+pytest tests/ --ignore=tests/playwright
+```
+
+### End-to-end tests — Docker (Ollama + OpenWebUI, fully self-contained)
+
+Requires Docker Desktop and Node.js 18+. The script pulls the model on first
+run, starts the full stack, runs all tests, and tears everything down.
+
+```bash
+./scripts/run-e2e-docker.sh
+
+# Override the model (default: tinyllama:1.1b):
+OLLAMA_MODEL=phi3:mini ./scripts/run-e2e-docker.sh
+```
+
+Or run directly via npm (inside `tests/playwright`):
+
+```bash
+cd tests/playwright && npm run test:e2e
+# Override model:
+OLLAMA_MODEL=phi3:mini npm run test:e2e
+```
+
+### End-to-end tests — local (your own OpenWebUI, no Docker)
+
+Requires Python 3.10+, Node.js 18+, git, and a running OpenWebUI instance.
+The script clones the sibling repos, sets up virtual environments, starts all
+services, and runs the full Playwright suite (service-integration + chat).
+
+```bash
+./scripts/run-e2e-local.sh
+```
+
+The script prompts for:
+- **OpenWebUI base URL** — e.g. `http://localhost:3000`
+- **OpenWebUI API key** — from OpenWebUI → Settings → Account → API Keys
+- **Model name** — leave blank to auto-select the first available model
+
+Services started locally (all stopped automatically when the script exits):
+
+| Service | Port | Mode |
+|---|---|---|
+| BetterWebUI | 8765 | normal |
+| CognitiveLoopKernel | 8001 | normal |
+| AutoGUI | 8002 | dry-run (no real desktop actions) |
+| OSScreenObserver | 5001 | mock (synthetic screen data) |
+
+Sibling repos are cloned (or updated) as siblings of this directory:
+
+```
+parent/
+├── betterwebui/          ← this repo
+├── cognitiveloopkernel/
+├── autogui/
+└── osscreenobserver/
+```
+
 ## First-time setup
 
 You need an **OpenWebUI instance you can reach** and its **API key**
@@ -88,7 +235,10 @@ When the server is running, open <http://127.0.0.1:8765> in your browser.
    and your API key. Click **Save & test** — the URL is auto-detected and
    the model dropdown populates.
 3. Pick a default chat model. Click **Save defaults**.
-4. Start a new chat (or use the onboarding wizard if prompted).
+4. If you have CLK, AutoGUI, or OSScreenObserver running, scroll to
+   **Settings → Services** to enable/disable each one. (All three are enabled
+   by default; they degrade gracefully if not reachable.)
+5. Start a new chat (or use the onboarding wizard if prompted).
 
 Optional, only if you want to use MCP servers:
 
@@ -214,6 +364,7 @@ betterwebui/
 ├── app.py              # backend (FastAPI)
 ├── static/             # frontend (HTML/CSS/JS, no build step)
 ├── skills/             # your skills, as .md files
+├── services/           # integration clients (CLK, AutoGUI, OSSO)
 ├── data/
 │   ├── config.json         # your settings (API key lives here)
 │   ├── system_prompts.json

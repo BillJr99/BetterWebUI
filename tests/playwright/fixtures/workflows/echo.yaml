@@ -1,0 +1,10 @@
+name: echo
+description: A minimal test workflow that echoes the input idea to a markdown file.
+stages:
+  - id: echo
+    agent: chief
+    objective: |
+      Echo the following back as a markdown summary file at .clk/state/echo_result.md:
+      {{ idea }}
+    commit: false
+    validate: false

@@ -1688,6 +1688,132 @@ async def execute_tool(call: dict, config: dict, send_event, mode: str = "approv
         cli_cwd = _resolve_project_root(workspace)
         return await run_shell(command, cwd=cli_cwd)
 
+    # ── Service tool calls ────────────────────────────────────────────────────
+
+    if tool == "clk_research":
+        from services.clients import get_clk_client
+        from services import state as svc_state
+        import httpx as _httpx
+        if not svc_state.is_enabled("clk"):
+            return {"error": "CognitiveLoopKernel is disabled. Enable it in Settings > Services."}
+        command = args.get("command", "run")
+        workflow = args.get("workflow", "")
+        summary = f"CLK research — workflow: {workflow or 'default'}, command: {command}"
+        if mode != "trusted":
+            aid = approvals.new()
+            await send_event("approval_request", {
+                "approval_id": aid,
+                "tool": "clk_research",
+                "command": summary,
+                "reason": "CognitiveLoopKernel will start a research task.",
+            })
+            approved = await approvals.wait(aid)
+            if not approved:
+                return {"error": "User denied CognitiveLoopKernel research task."}
+        await send_event("tool_running", {"tool": "clk_research", "command": summary})
+        try:
+            client = get_clk_client()
+            return await client.start_research(
+                command=command,
+                args=args.get("args", []),
+                workspace_id=args.get("workspace_id"),
+                workflow=workflow or None,
+            )
+        except (_httpx.ConnectError, _httpx.TimeoutException, _httpx.TransportError) as e:
+            return {"error": f"CognitiveLoopKernel is enabled but could not be reached. ({e})"}
+
+    if tool == "autogui_task":
+        from services.clients import get_autogui_client
+        from services import state as svc_state
+        import httpx as _httpx
+        if not svc_state.is_enabled("autogui"):
+            return {"error": "AutoGUI is disabled. Enable it in Settings > Services."}
+        task_desc = args.get("task", "")
+        dry_run = args.get("dry_run", False)
+        summary = f"AutoGUI task: {task_desc[:120]}" + (" [dry run]" if dry_run else "")
+        if mode != "trusted":
+            aid = approvals.new()
+            await send_event("approval_request", {
+                "approval_id": aid,
+                "tool": "autogui_task",
+                "command": summary,
+                "reason": "AutoGUI will control the desktop GUI to complete this task.",
+            })
+            approved = await approvals.wait(aid)
+            if not approved:
+                return {"error": "User denied AutoGUI desktop task."}
+        await send_event("tool_running", {"tool": "autogui_task", "command": summary})
+        try:
+            client = get_autogui_client()
+            return await client.start_task(
+                task=task_desc,
+                model=args.get("model"),
+                dry_run=dry_run,
+            )
+        except (_httpx.ConnectError, _httpx.TimeoutException, _httpx.TransportError) as e:
+            return {"error": f"AutoGUI is enabled but could not be reached. ({e})"}
+
+    if tool == "screen_windows":
+        from services.clients import get_osso_client
+        from services import state as svc_state
+        import httpx as _httpx
+        if not svc_state.is_enabled("osso"):
+            return {"error": "OSScreenObserver is disabled. Enable it in Settings > Services."}
+        try:
+            return await get_osso_client().windows()
+        except (_httpx.ConnectError, _httpx.TimeoutException, _httpx.TransportError) as e:
+            return {"error": f"OSScreenObserver is enabled but could not be reached. ({e})"}
+
+    if tool == "screen_description":
+        from services.clients import get_osso_client
+        from services import state as svc_state
+        import httpx as _httpx
+        if not svc_state.is_enabled("osso"):
+            return {"error": "OSScreenObserver is disabled. Enable it in Settings > Services."}
+        try:
+            return await get_osso_client().description(
+                window_index=args.get("window_index"),
+                mode=args.get("mode", "accessibility"),
+            )
+        except (_httpx.ConnectError, _httpx.TimeoutException, _httpx.TransportError) as e:
+            return {"error": f"OSScreenObserver is enabled but could not be reached. ({e})"}
+
+    if tool == "screen_screenshot":
+        from services.clients import get_osso_client
+        from services import state as svc_state
+        import httpx as _httpx
+        if not svc_state.is_enabled("osso"):
+            return {"error": "OSScreenObserver is disabled. Enable it in Settings > Services."}
+        try:
+            return await get_osso_client().screenshot(window_index=args.get("window_index"))
+        except (_httpx.ConnectError, _httpx.TimeoutException, _httpx.TransportError) as e:
+            return {"error": f"OSScreenObserver is enabled but could not be reached. ({e})"}
+
+    if tool == "screen_action":
+        from services.clients import get_osso_client
+        from services import state as svc_state
+        import httpx as _httpx
+        if not svc_state.is_enabled("osso"):
+            return {"error": "OSScreenObserver is disabled. Enable it in Settings > Services."}
+        action_type = args.get("action", "")
+        summary = f"screen_{action_type}" + (f" at ({args.get('x')}, {args.get('y')})" if "x" in args else "")
+        if mode != "trusted":
+            aid = approvals.new()
+            await send_event("approval_request", {
+                "approval_id": aid,
+                "tool": "screen_action",
+                "command": summary,
+                "reason": "OSScreenObserver will perform an action on the screen.",
+            })
+            approved = await approvals.wait(aid)
+            if not approved:
+                return {"error": "User denied screen action."}
+        await send_event("tool_running", {"tool": "screen_action", "command": summary})
+        try:
+            return await get_osso_client().action(args)
+        except (_httpx.ConnectError, _httpx.TimeoutException, _httpx.TransportError) as e:
+            return {"error": f"OSScreenObserver is enabled but could not be reached. ({e})"}
+
     return {"error": f"Unknown tool: {tool}"}
 
 
@@ -3256,6 +3382,13 @@ async def chat(req: ChatRequest, request: Request):
             task.cancel()
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+# ─── Services integration ────────────────────────────────────────────────────
+
+from services.routes import register_routes as _register_service_routes
+
+_register_service_routes(app)
 
 
 # --- Health ---
