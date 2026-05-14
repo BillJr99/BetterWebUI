@@ -6,6 +6,7 @@ to mount all /api/services/* endpoints onto the existing FastAPI app.
 """
 from __future__ import annotations
 
+import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 
@@ -16,11 +17,21 @@ from . import state as svc_state
 
 _VALID_SERVICE_NAMES = frozenset({"clk", "autogui", "osso"})
 
+_SERVICE_LABELS = {"clk": "CognitiveLoopKernel", "autogui": "AutoGUI", "osso": "OSScreenObserver"}
+
 
 def _require_enabled(name: str) -> None:
     """Raise 503 if the named service is currently disabled."""
     if not svc_state.is_enabled(name):
         raise HTTPException(status_code=503, detail=f"Service '{name}' is disabled")
+
+
+def _unreachable(name: str, exc: Exception) -> HTTPException:
+    label = _SERVICE_LABELS.get(name, name)
+    return HTTPException(
+        status_code=503,
+        detail=f"{label} is enabled but could not be reached. Check that it is running. ({exc})",
+    )
 
 
 def register_routes(app: FastAPI) -> None:  # noqa: C901
@@ -62,24 +73,33 @@ def register_routes(app: FastAPI) -> None:  # noqa: C901
     async def clk_list_workflows():
         _require_enabled("clk")
         client = get_clk_client()
-        return await client.list_workflows()
+        try:
+            return await client.list_workflows()
+        except (httpx.ConnectError, httpx.TimeoutException, httpx.TransportError) as e:
+            raise _unreachable("clk", e) from e
 
     @app.post("/api/services/clk/research")
     async def clk_start_research(body: dict):
         _require_enabled("clk")
         client = get_clk_client()
-        return await client.start_research(
-            command=body.get("command", "run"),
-            args=body.get("args", []),
-            workspace_id=body.get("workspace_id"),
-            workflow=body.get("workflow"),
-        )
+        try:
+            return await client.start_research(
+                command=body.get("command", "run"),
+                args=body.get("args", []),
+                workspace_id=body.get("workspace_id"),
+                workflow=body.get("workflow"),
+            )
+        except (httpx.ConnectError, httpx.TimeoutException, httpx.TransportError) as e:
+            raise _unreachable("clk", e) from e
 
     @app.get("/api/services/clk/research/{task_id}")
     async def clk_get_task(task_id: str):
         _require_enabled("clk")
         client = get_clk_client()
-        return await client.get_task(task_id)
+        try:
+            return await client.get_task(task_id)
+        except (httpx.ConnectError, httpx.TimeoutException, httpx.TransportError) as e:
+            raise _unreachable("clk", e) from e
 
     @app.get("/api/services/clk/research/{task_id}/stream")
     async def clk_stream_task(task_id: str):
@@ -95,13 +115,19 @@ def register_routes(app: FastAPI) -> None:  # noqa: C901
     async def clk_list_artifacts(task_id: str):
         _require_enabled("clk")
         client = get_clk_client()
-        return await client.list_artifacts(task_id)
+        try:
+            return await client.list_artifacts(task_id)
+        except (httpx.ConnectError, httpx.TimeoutException, httpx.TransportError) as e:
+            raise _unreachable("clk", e) from e
 
     @app.post("/api/services/clk/research/{task_id}/cancel")
     async def clk_cancel_task(task_id: str):
         _require_enabled("clk")
         client = get_clk_client()
-        return await client.cancel_task(task_id)
+        try:
+            return await client.cancel_task(task_id)
+        except (httpx.ConnectError, httpx.TimeoutException, httpx.TransportError) as e:
+            raise _unreachable("clk", e) from e
 
     # ── AutoGUI ───────────────────────────────────────────────────────────────────
 
@@ -109,18 +135,24 @@ def register_routes(app: FastAPI) -> None:  # noqa: C901
     async def autogui_start_task(body: dict):
         _require_enabled("autogui")
         client = get_autogui_client()
-        return await client.start_task(
-            task=body["task"],
-            model=body.get("model"),
-            allow=body.get("allow"),
-            dry_run=body.get("dry_run", False),
-        )
+        try:
+            return await client.start_task(
+                task=body["task"],
+                model=body.get("model"),
+                allow=body.get("allow"),
+                dry_run=body.get("dry_run", False),
+            )
+        except (httpx.ConnectError, httpx.TimeoutException, httpx.TransportError) as e:
+            raise _unreachable("autogui", e) from e
 
     @app.get("/api/services/autogui/task/{task_id}")
     async def autogui_get_task(task_id: str):
         _require_enabled("autogui")
         client = get_autogui_client()
-        return await client.get_task(task_id)
+        try:
+            return await client.get_task(task_id)
+        except (httpx.ConnectError, httpx.TimeoutException, httpx.TransportError) as e:
+            raise _unreachable("autogui", e) from e
 
     @app.get("/api/services/autogui/task/{task_id}/stream")
     async def autogui_stream_task(task_id: str):
@@ -136,13 +168,19 @@ def register_routes(app: FastAPI) -> None:  # noqa: C901
     async def autogui_cancel_task(task_id: str):
         _require_enabled("autogui")
         client = get_autogui_client()
-        return await client.cancel_task(task_id)
+        try:
+            return await client.cancel_task(task_id)
+        except (httpx.ConnectError, httpx.TimeoutException, httpx.TransportError) as e:
+            raise _unreachable("autogui", e) from e
 
     @app.get("/api/services/autogui/tools")
     async def autogui_list_tools():
         _require_enabled("autogui")
         client = get_autogui_client()
-        return await client.list_tools()
+        try:
+            return await client.list_tools()
+        except (httpx.ConnectError, httpx.TimeoutException, httpx.TransportError) as e:
+            raise _unreachable("autogui", e) from e
 
     # ── OSScreenObserver ────────────────────────────────────────────────────────────────
 
@@ -150,37 +188,55 @@ def register_routes(app: FastAPI) -> None:  # noqa: C901
     async def osso_windows():
         _require_enabled("osso")
         client = get_osso_client()
-        return await client.windows()
+        try:
+            return await client.windows()
+        except (httpx.ConnectError, httpx.TimeoutException, httpx.TransportError) as e:
+            raise _unreachable("osso", e) from e
 
     @app.get("/api/services/osso/description")
     async def osso_description(window_index: int | None = None, mode: str = "accessibility"):
         _require_enabled("osso")
         client = get_osso_client()
-        return await client.description(window_index, mode)
+        try:
+            return await client.description(window_index, mode)
+        except (httpx.ConnectError, httpx.TimeoutException, httpx.TransportError) as e:
+            raise _unreachable("osso", e) from e
 
     @app.get("/api/services/osso/structure")
     async def osso_structure(window_index: int | None = None):
         _require_enabled("osso")
         client = get_osso_client()
-        return await client.structure(window_index)
+        try:
+            return await client.structure(window_index)
+        except (httpx.ConnectError, httpx.TimeoutException, httpx.TransportError) as e:
+            raise _unreachable("osso", e) from e
 
     @app.get("/api/services/osso/screenshot")
     async def osso_screenshot(window_index: int | None = None):
         _require_enabled("osso")
         client = get_osso_client()
-        return await client.screenshot(window_index)
+        try:
+            return await client.screenshot(window_index)
+        except (httpx.ConnectError, httpx.TimeoutException, httpx.TransportError) as e:
+            raise _unreachable("osso", e) from e
 
     @app.post("/api/services/osso/action")
     async def osso_action(body: dict):
         _require_enabled("osso")
         client = get_osso_client()
-        return await client.action(body)
+        try:
+            return await client.action(body)
+        except (httpx.ConnectError, httpx.TimeoutException, httpx.TransportError) as e:
+            raise _unreachable("osso", e) from e
 
     @app.get("/api/services/osso/capabilities")
     async def osso_capabilities():
         _require_enabled("osso")
         client = get_osso_client()
-        return await client.capabilities()
+        try:
+            return await client.capabilities()
+        except (httpx.ConnectError, httpx.TimeoutException, httpx.TransportError) as e:
+            raise _unreachable("osso", e) from e
 
     # ── LLM Tool Specs ────────────────────────────────────────────────────────────────
 

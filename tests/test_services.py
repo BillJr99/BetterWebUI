@@ -823,3 +823,64 @@ class TestHealthWithDisabledServices:
         for name, val in results.items():
             assert val["ok"] is True, f"{name} should report ok when disabled"
             assert val["enabled"] is False
+
+
+class TestGracefulDegradation:
+    """Enabled-but-unreachable services return 503 with a friendly message."""
+
+    @pytest.fixture()
+    def app_client(self):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from services.routes import register_routes
+
+        app = FastAPI()
+        register_routes(app)
+        return TestClient(app, raise_server_exceptions=False)
+
+    def test_clk_unreachable_returns_503(self, app_client):
+        import httpx
+        with patch("services.state.is_enabled", return_value=True), \
+             patch("services.routes.get_clk_client") as mock_factory:
+            mock_client = AsyncMock()
+            mock_client.list_workflows.side_effect = httpx.ConnectError("refused")
+            mock_factory.return_value = mock_client
+            r = app_client.get("/api/services/clk/workflows")
+        assert r.status_code == 503
+        assert "CognitiveLoopKernel" in r.json()["detail"]
+        assert "could not be reached" in r.json()["detail"]
+
+    def test_autogui_unreachable_returns_503(self, app_client):
+        import httpx
+        with patch("services.state.is_enabled", return_value=True), \
+             patch("services.routes.get_autogui_client") as mock_factory:
+            mock_client = AsyncMock()
+            mock_client.start_task.side_effect = httpx.ConnectError("refused")
+            mock_factory.return_value = mock_client
+            r = app_client.post("/api/services/autogui/task", json={"task": "click OK"})
+        assert r.status_code == 503
+        assert "AutoGUI" in r.json()["detail"]
+        assert "could not be reached" in r.json()["detail"]
+
+    def test_osso_unreachable_returns_503(self, app_client):
+        import httpx
+        with patch("services.state.is_enabled", return_value=True), \
+             patch("services.routes.get_osso_client") as mock_factory:
+            mock_client = AsyncMock()
+            mock_client.windows.side_effect = httpx.ConnectError("refused")
+            mock_factory.return_value = mock_client
+            r = app_client.get("/api/services/osso/windows")
+        assert r.status_code == 503
+        assert "OSScreenObserver" in r.json()["detail"]
+        assert "could not be reached" in r.json()["detail"]
+
+    def test_timeout_also_returns_503(self, app_client):
+        import httpx
+        with patch("services.state.is_enabled", return_value=True), \
+             patch("services.routes.get_clk_client") as mock_factory:
+            mock_client = AsyncMock()
+            mock_client.get_task.side_effect = httpx.TimeoutException("timed out")
+            mock_factory.return_value = mock_client
+            r = app_client.get("/api/services/clk/research/task-123")
+        assert r.status_code == 503
+        assert "could not be reached" in r.json()["detail"]

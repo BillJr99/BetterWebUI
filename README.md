@@ -41,11 +41,45 @@ at `/api/services/*` endpoints that the LLM can call through tool use or slash c
 | AutoGUI | `AUTOGUI_BASE_URL` | `http://localhost:8002` | Desktop GUI automation via ReAct |
 | OSScreenObserver (OSSO) | `OSSO_BASE_URL` | `http://localhost:5001` | Screen reading & accessibility inspection |
 
+### Enable / disable services
+
+Each service can be toggled on or off independently from **Settings → Services**
+(or via the API). Disabled services immediately return an HTTP 503 for all
+their routes, and the LLM is told the service is unavailable. Re-enabling
+restores normal operation without a restart.
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/services/status` | Current enabled/disabled state for all services |
+| POST | `/api/services/{name}/enable` | Enable a service (`clk`, `autogui`, `osso`) |
+| POST | `/api/services/{name}/disable` | Disable a service |
+
+### Graceful degradation
+
+When an enabled service is **not running or unreachable**, BetterWebUI returns
+a descriptive HTTP 503 response rather than crashing. The LLM receives the
+error message and relays it to the user.
+
+### Approval flow
+
+Tool calls that trigger side-effects require a **one-click approval** from the
+user in the chat interface before the action executes:
+
+- `clk_research` — shows the workflow and command for approval
+- `autogui_task` — shows the task description for approval
+- `screen_action` — shows the action type and coordinates for approval
+
+Read-only operations (`screen_windows`, `screen_description`,
+`screen_screenshot`) run without an approval prompt.
+
 ### Integrated endpoints
 
 | Method | Path | Service |
 |---|---|---|
 | GET | `/api/services/health` | All (aggregated health check) |
+| GET | `/api/services/status` | All (enable/disable state) |
+| POST | `/api/services/{name}/enable` | All |
+| POST | `/api/services/{name}/disable` | All |
 | GET | `/api/services/clk/workflows` | CLK |
 | POST | `/api/services/clk/research` | CLK |
 | GET | `/api/services/clk/research/{id}` | CLK |
@@ -138,7 +172,10 @@ When the server is running, open <http://127.0.0.1:8765> in your browser.
    and your API key. Click **Save & test** — the URL is auto-detected and
    the model dropdown populates.
 3. Pick a default chat model. Click **Save defaults**.
-4. Start a new chat (or use the onboarding wizard if prompted).
+4. If you have CLK, AutoGUI, or OSScreenObserver running, scroll to
+   **Settings → Services** to enable/disable each one. (All three are enabled
+   by default; they degrade gracefully if not reachable.)
+5. Start a new chat (or use the onboarding wizard if prompted).
 
 Optional, only if you want to use MCP servers:
 
