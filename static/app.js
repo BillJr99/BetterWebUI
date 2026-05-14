@@ -43,7 +43,10 @@ async function api(path, opts = {}) {
   });
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(`${res.status}: ${text}`);
+    const err = new Error(`${res.status}: ${text}`);
+    err.status = res.status;
+    err.body = text;
+    throw err;
   }
   return res.json();
 }

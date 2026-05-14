@@ -1376,7 +1376,7 @@ async def execute_tool(call: dict, config: dict, send_event, mode: str = "approv
             await send_event("tool_running", {"tool": "execute_shell", "command": command})
 
         workspace = resolve_active_workspace(config)
-        shell_cwd = (workspace or {}).get("project_root") or str(WORKSPACE_DIR)
+        shell_cwd = _resolve_project_root(workspace)
         result = await run_shell(command, cwd=shell_cwd)
         # Auto-capture plot
         for _img_path in (Path("/tmp/bwui_plot.png"), ROOT / "bwui_plot.png"):
@@ -1428,14 +1428,8 @@ async def execute_tool(call: dict, config: dict, send_event, mode: str = "approv
 
         # Determine the write directory: workspace project_root → WORKSPACE_DIR
         workspace = resolve_active_workspace(config)
-        project_root = (workspace or {}).get("project_root") or str(WORKSPACE_DIR)
-        checkpoint_id = None
+        project_root = _resolve_project_root(workspace)
         dest = Path(project_root) / filename
-        if dest.exists():
-            wid = (workspace or {}).get("id", "default")
-            checkpoint_id = _checkpoint_file(
-                wid, filename, dest.read_text(encoding="utf-8", errors="replace")
-            )
 
         if mode != "trusted":
             aid = approvals.new()
@@ -1446,12 +1440,23 @@ async def execute_tool(call: dict, config: dict, send_event, mode: str = "approv
                 "mime": mime,
                 "preview": content[:1000],
                 "byte_count": len(content.encode("utf-8")),
-                "checkpoint_id": checkpoint_id,
                 "dest_path": filename,
             })
             approved = await approvals.wait(aid)
             if not approved:
                 return {"error": "User denied this file write."}
+
+        # Snapshot the existing file only after approval, so denied requests
+        # don't leave junk checkpoints behind on disk.
+        checkpoint_id = None
+        if dest.exists():
+            wid = (workspace or {}).get("id", "default")
+            try:
+                checkpoint_id = _checkpoint_file(
+                    wid, filename, dest.read_text(encoding="utf-8", errors="replace")
+                )
+            except Exception:
+                checkpoint_id = None
 
         # Write to disk
         write_error = None
@@ -2029,8 +2034,10 @@ async def export_workspace(wid: str):
     )
 
 
-_MAX_BUNDLE_BYTES = 10 * 1024 * 1024   # 10 MB compressed
-_MAX_MEMBER_BYTES = 2 * 1024 * 1024    # 2 MB per uncompressed member
+_MAX_BUNDLE_BYTES = 10 * 1024 * 1024       # 10 MB compressed
+_MAX_MEMBER_BYTES = 2 * 1024 * 1024        # 2 MB per uncompressed member
+_MAX_BUNDLE_MEMBERS = 500                  # cap member count to bound iteration cost
+_MAX_BUNDLE_TOTAL_BYTES = 50 * 1024 * 1024  # cap total uncompressed bytes (zip-bomb guard)
 
 
 @app.post("/api/workspaces/import")
@@ -2041,9 +2048,16 @@ async def import_workspace(file: UploadFile = File(...)):
     try:
         buf = io.BytesIO(content)
         with zipfile.ZipFile(buf, "r") as zf:
-            for info in zf.infolist():
+            infos = zf.infolist()
+            if len(infos) > _MAX_BUNDLE_MEMBERS:
+                raise HTTPException(413, f"Bundle has too many entries (max {_MAX_BUNDLE_MEMBERS}).")
+            total_uncompressed = 0
+            for info in infos:
                 if info.file_size > _MAX_MEMBER_BYTES:
                     raise HTTPException(413, f"Bundle member '{info.filename}' exceeds 2 MB limit.")
+                total_uncompressed += info.file_size
+                if total_uncompressed > _MAX_BUNDLE_TOTAL_BYTES:
+                    raise HTTPException(413, f"Bundle uncompressed total exceeds {_MAX_BUNDLE_TOTAL_BYTES} bytes.")
             names = zf.namelist()
             manifest = json.loads(zf.read("manifest.json"))
             # Import system prompt if present
@@ -2161,11 +2175,30 @@ async def onboarding_complete(body: OnboardingCompleteIn):
 
 # --- Project (file tree + checkpoints) ---
 
+def _resolve_project_root(workspace: Optional[dict]) -> str:
+    """Resolve a workspace's project root, restricting it to live under
+    WORKSPACE_DIR. This prevents an unauthenticated caller (via /api/workspaces)
+    from pointing a workspace at '/' or another sensitive directory and using
+    the project file APIs to browse the host filesystem."""
+    requested = (workspace or {}).get("project_root")
+    base = Path(WORKSPACE_DIR).resolve()
+    if not requested:
+        return str(base)
+    try:
+        candidate = Path(requested).resolve()
+        candidate.relative_to(base)
+        return str(candidate)
+    except (ValueError, OSError):
+        # Fall back to the safe base so the workspace silently degrades to
+        # the default workspace directory rather than exposing the filesystem.
+        return str(base)
+
+
 @app.get("/api/project/tree")
 async def project_tree(path: str = ""):
     cfg = load_config()
     workspace = resolve_active_workspace(cfg)
-    root = (workspace or {}).get("project_root") or str(WORKSPACE_DIR)
+    root = _resolve_project_root(workspace)
     root_path = Path(root).resolve()
 
     # Determine which subdirectory to list (support lazy directory expansion)
@@ -2212,7 +2245,7 @@ _MAX_PROJECT_FILE_BYTES = 1 * 1024 * 1024  # 1 MB cap for /api/project/file
 async def project_file(path: str):
     cfg = load_config()
     workspace = resolve_active_workspace(cfg)
-    root = (workspace or {}).get("project_root") or str(WORKSPACE_DIR)
+    root = _resolve_project_root(workspace)
     full = Path(root) / path
     try:
         full.resolve().relative_to(Path(root).resolve())
@@ -2284,7 +2317,7 @@ async def revert_project_file(r: RevertIn):
     content = _get_checkpoint(wid, r.filename, r.checkpoint_id)
     if content is None:
         raise HTTPException(404, "Checkpoint not found.")
-    root = (workspace or {}).get("project_root") or str(WORKSPACE_DIR)
+    root = _resolve_project_root(workspace)
     dest = Path(root) / r.filename
     # Reject path traversal: ensure dest stays under the resolved project root
     try:
