@@ -15,8 +15,8 @@ import pytest
 # ---------------------------------------------------------------------------
 
 def run(coro):
-    """Run a coroutine synchronously (works outside an event loop)."""
-    return asyncio.get_event_loop().run_until_complete(coro)
+    """Run a coroutine synchronously."""
+    return asyncio.run(coro)
 
 
 def _mock_response(json_data: dict, status_code: int = 200):
