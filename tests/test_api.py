@@ -715,7 +715,13 @@ class TestProjectApi:
 
     def test_file_read(self, client, isolated_dirs):
         self._setup_workspace_dir(isolated_dirs)
-        r = client.get("/api/project/file?path=hello.txt")
+        # Default request returns metadata only; content requires opt-in.
+        meta = client.get("/api/project/file?path=hello.txt")
+        assert meta.status_code == 200
+        meta_data = meta.json()
+        assert meta_data["is_binary"] is False
+        assert "content" not in meta_data
+        r = client.get("/api/project/file?path=hello.txt&include_content=true")
         assert r.status_code == 200
         data = r.json()
         assert data["content"] == "hello world"

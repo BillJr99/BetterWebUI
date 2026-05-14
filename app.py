@@ -2249,7 +2249,8 @@ def _resolve_project_root(workspace: Optional[dict]) -> str:
 
 
 @app.get("/api/project/tree")
-async def project_tree(path: str = ""):
+async def project_tree(request: Request, path: str = ""):
+    _require_local_caller(request)
     cfg = load_config()
     workspace = resolve_active_workspace(cfg)
     root = _resolve_project_root(workspace)
@@ -2303,7 +2304,8 @@ _MAX_PROJECT_FILE_BYTES = 1 * 1024 * 1024  # 1 MB cap for /api/project/file
 
 
 @app.get("/api/project/file")
-async def project_file(path: str, include_content: bool = False):
+async def project_file(request: Request, path: str, include_content: bool = False):
+    _require_local_caller(request)
     cfg = load_config()
     workspace = resolve_active_workspace(cfg)
     root = _resolve_project_root(workspace)
@@ -2357,13 +2359,17 @@ async def project_file(path: str, include_content: bool = False):
         "modified_at": int(full.stat().st_mtime),
         "truncated": truncated,
     }
-    if not is_binary or include_content:
+    # include_content gates the body for both text and binary so the frontend
+    # can do a cheap metadata-only first request before deciding to fetch the
+    # bytes. Defaults to false (set in the route signature).
+    if include_content:
         payload["content"] = content
     return payload
 
 
 @app.get("/api/project/checkpoints")
-async def list_project_checkpoints(filename: str):
+async def list_project_checkpoints(request: Request, filename: str):
+    _require_local_caller(request)
     cfg = load_config()
     workspace = resolve_active_workspace(cfg)
     wid = (workspace or {}).get("id", "default")
@@ -2376,7 +2382,8 @@ class RevertIn(BaseModel):
 
 
 @app.post("/api/project/revert")
-async def revert_project_file(r: RevertIn):
+async def revert_project_file(r: RevertIn, request: Request):
+    _require_local_caller(request)
     cfg = load_config()
     workspace = resolve_active_workspace(cfg)
     wid = (workspace or {}).get("id", "default")

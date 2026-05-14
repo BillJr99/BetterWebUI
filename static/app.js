@@ -1535,11 +1535,14 @@ function renderFileTree(ul, entries) {
       const sub = li.querySelector("ul");
       const details = li.querySelector("details");
       details.addEventListener("toggle", async () => {
-        if (details.open && sub.children.length === 0) {
+        // Use a data-loaded flag so empty directories aren't refetched on
+        // every expand (children.length === 0 stays true for empty results).
+        if (details.open && details.dataset.loaded !== "1") {
           try {
             const data = await api(`/api/project/tree?path=${encodeURIComponent(entry.path)}`);
             renderFileTree(sub, data.entries || []);
           } catch (e) { /* silent */ }
+          details.dataset.loaded = "1";
         }
       });
     } else {
