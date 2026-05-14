@@ -153,14 +153,21 @@ function renderMathIn(el) {
 // Display settings
 // ---------------------------------------------------------------------------
 
+const _FONT_SIZE_VALUES = ["sm", "md", "lg", "xl"];
+const _LINE_HEIGHT_VALUES = ["normal", "relaxed", "loose"];
+
 function applyDisplaySettings(display) {
   const body = document.body;
+  // Validate persisted values against an allowlist; classList tokens cannot
+  // contain whitespace, so a corrupted config value would otherwise throw.
+  const fontSize = _FONT_SIZE_VALUES.includes(display.font_size) ? display.font_size : "md";
+  const lineHeight = _LINE_HEIGHT_VALUES.includes(display.line_height) ? display.line_height : "normal";
   // Font size
   body.classList.remove("font-sm", "font-md", "font-lg", "font-xl");
-  body.classList.add("font-" + (display.font_size || "md"));
+  body.classList.add("font-" + fontSize);
   // Line height
   body.classList.remove("lh-normal", "lh-relaxed", "lh-loose");
-  body.classList.add("lh-" + (display.line_height || "normal"));
+  body.classList.add("lh-" + lineHeight);
   // Dyslexic font
   body.classList.toggle("dyslexic-font", !!display.dyslexic_font);
   // High contrast
@@ -1523,7 +1530,11 @@ function renderFileTree(ul, entries) {
       li.innerHTML = `<div class="file-tree-item" role="button" tabindex="0" data-path="${escape(entry.path)}"><span class="file-tree-icon">📄</span>${escape(entry.name)}</div>`;
       li.querySelector(".file-tree-item").onclick = () => openProjectFile(entry.path);
       li.querySelector(".file-tree-item").onkeydown = (e) => {
-        if (e.key === "Enter" || e.key === " ") openProjectFile(entry.path);
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();   // stop Space from scrolling the page
+          e.stopPropagation();
+          openProjectFile(entry.path);
+        }
       };
     }
     ul.appendChild(li);

@@ -31,7 +31,9 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Install test dependencies
-        run: pip install pytest pytest-asyncio httpx python-frontmatter
+        # Only install test-runner deps; httpx and python-frontmatter come
+        # pinned from requirements.txt above so CI matches production.
+        run: pip install pytest pytest-asyncio
 
       - name: Run tests
         run: pytest tests/ -v --tb=short

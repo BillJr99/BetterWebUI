@@ -1425,6 +1425,12 @@ async def execute_tool(call: dict, config: dict, send_event, mode: str = "approv
         mime = args.get("mime", "text/plain")
         if not isinstance(content, str):
             content = str(content)
+        # Cap write size so a single tool call can't blow up SSE/JSON payloads
+        # (base64 inflates by ~33% on top of UTF-8 encoding).
+        _MAX_WRITE_BYTES = 5 * 1024 * 1024
+        content_bytes_len = len(content.encode("utf-8"))
+        if content_bytes_len > _MAX_WRITE_BYTES:
+            return {"error": f"write_file payload too large ({content_bytes_len} bytes; max {_MAX_WRITE_BYTES})."}
 
         # Determine the write directory: workspace project_root → WORKSPACE_DIR
         workspace = resolve_active_workspace(config)
@@ -1466,14 +1472,19 @@ async def execute_tool(call: dict, config: dict, send_event, mode: str = "approv
         except Exception as exc:
             write_error = str(exc)
 
+        # Inline the data only when small enough for the browser to handle as a
+        # blob in the chat transcript; for larger writes, the file is still on
+        # disk at project_root and the frontend just won't show an inline link.
+        _MAX_INLINE_BYTES = 1 * 1024 * 1024
         result = {
             "filename": filename,
             "dest_path": filename,
             "mime": mime,
-            "bytes_written": len(content.encode("utf-8")),
-            "data_b64": base64.b64encode(content.encode("utf-8")).decode("ascii"),
+            "bytes_written": content_bytes_len,
             "checkpoint_id": checkpoint_id,
         }
+        if content_bytes_len <= _MAX_INLINE_BYTES:
+            result["data_b64"] = base64.b64encode(content.encode("utf-8")).decode("ascii")
         if write_error:
             result["write_error"] = write_error
         return result
@@ -2251,14 +2262,16 @@ async def project_tree(path: str = ""):
                 })
     except Exception as exc:
         raise HTTPException(500, f"Could not list directory: {exc}")
-    return {"entries": entries, "root": root}
+    # Don't leak the absolute filesystem root to the client; the frontend
+    # only needs the relative entries to render and request further paths.
+    return {"entries": entries}
 
 
 _MAX_PROJECT_FILE_BYTES = 1 * 1024 * 1024  # 1 MB cap for /api/project/file
 
 
 @app.get("/api/project/file")
-async def project_file(path: str):
+async def project_file(path: str, include_content: bool = True):
     cfg = load_config()
     workspace = resolve_active_workspace(cfg)
     root = _resolve_project_root(workspace)
@@ -2302,14 +2315,19 @@ async def project_file(path: str):
             is_binary = True
         except Exception as exc:
             raise HTTPException(500, f"Could not read file: {exc}")
-    return {
+    # The frontend treats binary files as "preview not available" and never
+    # reads the bytes, so omit the base64 content by default to keep responses
+    # small. Callers that genuinely need the bytes can pass include_content=true.
+    payload = {
         "path": path,
-        "content": content,
         "is_binary": is_binary,
         "size": size,
         "modified_at": int(full.stat().st_mtime),
         "truncated": truncated,
     }
+    if not is_binary or include_content:
+        payload["content"] = content
+    return payload
 
 
 @app.get("/api/project/checkpoints")

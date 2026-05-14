@@ -35,17 +35,19 @@ def isolated_dirs(tmp_path, monkeypatch):
     """
     data_dir = tmp_path / "data"
     skills_dir = tmp_path / "skills"
+    workspace_dir = tmp_path / "workspace"
     uploads_dir = data_dir / "uploads"
     checkpoints_dir = data_dir / "checkpoints"
     tasks_dir = data_dir / "tasks"
 
-    for d in (data_dir, skills_dir, uploads_dir, checkpoints_dir, tasks_dir):
+    for d in (data_dir, skills_dir, workspace_dir, uploads_dir, checkpoints_dir, tasks_dir):
         d.mkdir(parents=True, exist_ok=True)
 
     import app as app_module
 
     monkeypatch.setattr(app_module, "DATA_DIR", data_dir)
     monkeypatch.setattr(app_module, "SKILLS_DIR", skills_dir)
+    monkeypatch.setattr(app_module, "WORKSPACE_DIR", workspace_dir)
     monkeypatch.setattr(app_module, "UPLOADS_DIR", uploads_dir)
     monkeypatch.setattr(app_module, "CHECKPOINTS_DIR", checkpoints_dir)
     monkeypatch.setattr(app_module, "TASKS_DIR", tasks_dir)
