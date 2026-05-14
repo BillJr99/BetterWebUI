@@ -747,9 +747,14 @@ Available tools:
   type, and content. Args: {"reason": "why you need to read", "accept": "*",
   "multiple": false}. Use accept="image/*" or "text/*,.md,.csv" to filter.
 
-- write_file: send the user a file to download to their computer. The browser
-  saves it (REQUIRES APPROVAL). If a project root is set, the file is also
-  checkpointed for undo. Args: {"filename": "name.ext", "content":
+- write_file: write a file to the workspace project folder (REQUIRES
+  APPROVAL unless mode is "trusted"). The file lands at
+  <project_root>/<filename> — falling back to the server's WORKSPACE_DIR
+  when the workspace has no project_root configured. Any pre-existing
+  file at that path is snapshotted into checkpoints before being
+  overwritten, so the user can revert from the UI. The result also
+  inlines the bytes (data_b64) up to ~5 MB so the user can download
+  the saved file from chat. Args: {"filename": "name.ext", "content":
   "...", "mime": "text/plain"}.
 
 - load_skill: load the full content of a named skill so you can follow its

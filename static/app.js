@@ -1586,9 +1586,18 @@ async function openProjectFile(path) {
       body = `<p><em>Binary file (${sizeStr})${truncated} — preview not available.</em></p>`;
     } else {
       const data = await api(`/api/project/file?${wsParam}&path=${encodeURIComponent(path)}&include_content=true`);
-      const truncated = data.truncated
-        ? `<p class="hint">File was truncated to the first 1 MB for preview.</p>` : "";
-      body = `${truncated}<pre style="max-height:400px;overflow:auto;">${escape(data.content || "")}</pre>`;
+      // The full read can decode differently than the 4 KB header sniff
+      // (e.g., a NUL byte later in the file). Re-check is_binary on the
+      // second response before rendering the content as text.
+      if (data.is_binary) {
+        const sizeStr = data.size != null ? `${data.size} bytes` : "unknown size";
+        const truncated = data.truncated ? " (truncated)" : "";
+        body = `<p><em>Binary file (${sizeStr})${truncated} — preview not available.</em></p>`;
+      } else {
+        const truncated = data.truncated
+          ? `<p class="hint">File was truncated to the first 1 MB for preview.</p>` : "";
+        body = `${truncated}<pre style="max-height:400px;overflow:auto;">${escape(data.content || "")}</pre>`;
+      }
     }
     showDialog({
       title: name,
