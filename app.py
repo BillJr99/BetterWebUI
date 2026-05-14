@@ -2221,11 +2221,14 @@ async def project_file(path: str):
     if not full.exists():
         raise HTTPException(404, "File not found.")
     size = full.stat().st_size
-    truncated = size > _MAX_PROJECT_FILE_BYTES
     try:
-        # Read at most the cap+1 bytes to detect truncation without loading huge files
+        # Read cap+1 bytes so we can detect truncation from the read itself
+        # (not just from stat, which can lie on streaming filesystems or fifos).
         with full.open("rb") as fh:
-            raw = fh.read(_MAX_PROJECT_FILE_BYTES)
+            raw = fh.read(_MAX_PROJECT_FILE_BYTES + 1)
+        truncated = len(raw) > _MAX_PROJECT_FILE_BYTES
+        if truncated:
+            raw = raw[:_MAX_PROJECT_FILE_BYTES]
         # NUL byte heuristic + strict UTF-8 decode: anything that fails either
         # check is treated as binary so the diff modal's binary guard works.
         if b"\x00" in raw:
@@ -2242,7 +2245,10 @@ async def project_file(path: str):
         # Capped streaming fallback so a transient read failure can't blow past the 1 MB cap
         try:
             with full.open("rb") as fh:
-                raw = fh.read(_MAX_PROJECT_FILE_BYTES)
+                raw = fh.read(_MAX_PROJECT_FILE_BYTES + 1)
+            truncated = len(raw) > _MAX_PROJECT_FILE_BYTES
+            if truncated:
+                raw = raw[:_MAX_PROJECT_FILE_BYTES]
             content = base64.b64encode(raw).decode("ascii")
             is_binary = True
         except Exception as exc:
@@ -2280,6 +2286,11 @@ async def revert_project_file(r: RevertIn):
         raise HTTPException(404, "Checkpoint not found.")
     root = (workspace or {}).get("project_root") or str(WORKSPACE_DIR)
     dest = Path(root) / r.filename
+    # Reject path traversal: ensure dest stays under the resolved project root
+    try:
+        dest.resolve().relative_to(Path(root).resolve())
+    except ValueError:
+        raise HTTPException(403, "Path outside project root.")
     try:
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(content, encoding="utf-8")

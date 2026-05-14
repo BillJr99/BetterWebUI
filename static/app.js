@@ -1480,12 +1480,22 @@ function updateRightRailVisibility() {
 async function refreshFileTree() {
   const hint = $("#file-tree-hint");
   const ul = $("#file-tree");
-  if (hint) hint.hidden = true;
   try {
     const data = await api("/api/project/tree");
+    // Only hide the hint on a successful load; on failure the hint is the user's
+    // best guidance on how to fix the configuration (e.g., set a project root).
+    if (hint) hint.hidden = true;
     renderFileTree(ul, data.entries || []);
   } catch (e) {
-    if (ul) ul.innerHTML = `<li style="color:var(--ink-faint);font-size:12px;padding:6px 8px;">Could not load file tree.</li>`;
+    if (ul) ul.innerHTML = "";
+    if (hint) {
+      hint.hidden = false;
+      // Use a friendlier message when the workspace simply has no project root yet
+      const status = e && e.status ? e.status : 0;
+      if (status === 404 || status === 403) {
+        hint.textContent = "No project root set for this workspace. Open the workspace settings to point it at a folder.";
+      }
+    }
   }
 }
 
