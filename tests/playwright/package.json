@@ -4,7 +4,9 @@
   "scripts": {
     "test": "playwright test",
     "test:headed": "playwright test --headed",
-    "test:debug": "playwright test --debug"
+    "test:debug": "playwright test --debug",
+    "test:e2e": "playwright test --config e2e.config.ts",
+    "test:e2e:headed": "playwright test --config e2e.config.ts --headed"
   },
   "devDependencies": {
     "@playwright/test": "^1.44.0",

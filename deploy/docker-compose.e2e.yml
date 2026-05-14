@@ -1,0 +1,116 @@
+version: "3.9"
+
+# End-to-end test stack: BetterWebUI + CLK + AutoGUI (dry-run) +
+# OSScreenObserver (mock) + Ollama + OpenWebUI.
+#
+# Usage:
+#   docker compose -f deploy/docker-compose.e2e.yml up -d --build
+#   cd tests/playwright && npx playwright test --config e2e.config.ts
+#   docker compose -f deploy/docker-compose.e2e.yml down -v
+
+services:
+  # ── Ollama ───────────────────────────────────────────────────────────────────
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:11434/api/tags || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 15s
+
+  # ── OpenWebUI ────────────────────────────────────────────────────────────────
+  openwebui:
+    image: ghcr.io/open-webui/open-webui:main
+    ports:
+      - "3000:3000"
+    environment:
+      OLLAMA_BASE_URL: http://ollama:11434
+      WEBUI_SECRET_KEY: bwui-e2e-test-secret
+      ENV: dev
+    depends_on:
+      ollama:
+        condition: service_healthy
+    volumes:
+      - openwebui-data:/app/backend/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:3000/health || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 30s
+
+  # ── BetterWebUI ──────────────────────────────────────────────────────────────
+  betterwebui:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      PORT: "8080"
+      WORKSPACE_DIR: /workspace
+      # Allow Playwright (from host, arriving via Docker bridge) to call
+      # local-only endpoints such as /api/chat.
+      BETTERWEBUI_ALLOW_DOCKER: "true"
+      CLK_BASE_URL: http://clk:8001
+      AUTOGUI_BASE_URL: http://autogui:8002
+      OSSO_BASE_URL: http://osso:5001
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - betterwebui-data:/app/data
+    depends_on:
+      openwebui:
+        condition: service_healthy
+      clk:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── CognitiveLoopKernel ──────────────────────────────────────────────────────
+  clk:
+    build:
+      context: ../../cognitiveloopkernel
+    command: ["python", "-m", "clk_harness.api"]
+    ports:
+      - "8001:8001"
+    environment:
+      CLK_WORKSPACES_DIR: /workspaces
+      CLK_API_PORT: "8001"
+    volumes:
+      - clk-workspaces:/workspaces
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8001/api/healthz').raise_for_status()"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ── AutoGUI (dry-run) ────────────────────────────────────────────────────────
+  autogui:
+    build:
+      context: ../../autogui
+    command: ["python", "api.py"]
+    ports:
+      - "8002:8002"
+    environment:
+      AUTOGUI_DRY_RUN: "true"
+      AUTOGUI_API_PORT: "8002"
+
+  # ── OSScreenObserver (mock) ──────────────────────────────────────────────────
+  osso:
+    build:
+      context: ../../osscreenobserver
+    command: ["python", "main.py", "--mock", "--mode", "inspect"]
+    ports:
+      - "5001:5001"
+
+volumes:
+  ollama-data:
+  openwebui-data:
+  betterwebui-data:
+  clk-workspaces:
