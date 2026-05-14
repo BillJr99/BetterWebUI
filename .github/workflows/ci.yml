@@ -192,7 +192,7 @@ jobs:
 
       - name: Check required files exist
         run: |
-          for f in app.py requirements.txt static/index.html static/app.js static/style.css start.sh start.bat; do
+          for f in app.py requirements.txt static/index.html static/app.js static/style.css deploy/start.sh deploy/start.bat; do
             [ -f "$f" ] || (echo "Missing: $f" && exit 1)
             echo "OK $f"
           done
