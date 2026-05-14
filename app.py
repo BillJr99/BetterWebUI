@@ -1885,11 +1885,15 @@ class ApprovalIn(BaseModel):
 
 
 @app.post("/api/approve")
-async def approve(a: ApprovalIn):
+async def approve(a: ApprovalIn, request: Request):
     ok = approvals.resolve(a.approval_id, a.approved)
     if not ok:
         raise HTTPException(404, "Unknown approval id")
+    # Mutating session trust here would otherwise bypass the local-caller gate
+    # on /api/session/trust. Apply the same restriction before we add to the
+    # set — non-local callers can still approve/deny, just not auto-trust.
     if a.approved and a.trust_session and a.command:
+        _require_local_caller(request)
         _session_trusted_commands.add(a.command)
     return {"ok": True}
 
@@ -2201,41 +2205,45 @@ class OnboardingCompleteIn(BaseModel):
 @app.post("/api/onboarding/complete")
 async def onboarding_complete(body: OnboardingCompleteIn):
     cfg = load_config()
-    cfg["onboarding_done"] = True
-    save_json(CONFIG_PATH, cfg)
 
+    # If a template was requested, validate it before flipping onboarding_done
+    # so a bad template_id can't permanently skip the wizard.
     if body.template_id:
         tmpl = next((t for t in ONBOARDING_TEMPLATES if t["id"] == body.template_id), None)
-        if tmpl:
-            # Create skill stubs if they don't exist (they should be in skills/ already)
-            # Create workspace
-            ws_data = load_workspaces()
-            wid = uuid.uuid4().hex[:8]
-            ws_name = body.workspace_name or tmpl["name"]
-            # Upsert system prompt
-            p_data = load_prompts()
-            pid = f"onboarding-{tmpl['id']}"
-            if not any(x["id"] == pid for x in p_data["prompts"]):
-                p_data["prompts"].append({"id": pid, "name": ws_name, "content": tmpl["system_prompt"]})
-                save_json(PROMPTS_PATH, p_data)
-            ws_data["workspaces"].append({
-                "id": wid,
-                "name": ws_name,
-                "description": tmpl["description"],
-                "system_prompt_id": pid,
-                "active_skills": tmpl.get("skills", []),
-                "active_mcp_servers": tmpl.get("mcp", []),
-                "active_cli_tools": tmpl.get("cli", []),
-                "files": [],
-                "mode": "approve-each",
-                "created_at": int(time.time()),
-                "updated_at": int(time.time()),
-            })
-            save_json(WORKSPACES_PATH, ws_data)
-            # Set as active
-            cfg["active_workspace_id"] = wid
-            save_json(CONFIG_PATH, cfg)
-            return {"ok": True, "workspace_id": wid, "workspace_name": ws_name}
+        if not tmpl:
+            raise HTTPException(400, f"Unknown onboarding template '{body.template_id}'.")
+        ws_data = load_workspaces()
+        wid = uuid.uuid4().hex[:8]
+        ws_name = body.workspace_name or tmpl["name"]
+        # Upsert system prompt
+        p_data = load_prompts()
+        pid = f"onboarding-{tmpl['id']}"
+        if not any(x["id"] == pid for x in p_data["prompts"]):
+            p_data["prompts"].append({"id": pid, "name": ws_name, "content": tmpl["system_prompt"]})
+            save_json(PROMPTS_PATH, p_data)
+        ws_data["workspaces"].append({
+            "id": wid,
+            "name": ws_name,
+            "description": tmpl["description"],
+            "system_prompt_id": pid,
+            "active_skills": tmpl.get("skills", []),
+            "active_mcp_servers": tmpl.get("mcp", []),
+            "active_cli_tools": tmpl.get("cli", []),
+            "files": [],
+            "mode": "approve-each",
+            "created_at": int(time.time()),
+            "updated_at": int(time.time()),
+        })
+        save_json(WORKSPACES_PATH, ws_data)
+        # Set as active and only now flip onboarding_done, so partial failures
+        # above re-raise (caller can retry) instead of locking out the wizard.
+        cfg["active_workspace_id"] = wid
+        cfg["onboarding_done"] = True
+        save_json(CONFIG_PATH, cfg)
+        return {"ok": True, "workspace_id": wid, "workspace_name": ws_name}
+
+    cfg["onboarding_done"] = True
+    save_json(CONFIG_PATH, cfg)
     return {"ok": True}
 
 

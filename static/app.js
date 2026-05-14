@@ -222,9 +222,17 @@ async function loadConfig() {
   $("#cfg-tts-voice").value = state.config.tts_voice || "alloy";
   $("#cfg-consensus-runs").value = state.config.consensus_runs ?? 1;
   $("#cfg-shell-enabled").checked = state.config.shell_enabled !== false;
-  // Mode select
+  // Mode select: prefer the active workspace's mode (if any) so the
+  // workspace-scoped setting actually takes effect; fall back to the
+  // global config mode, then to "approve-each".
   const ms = $("#mode-select");
-  if (ms) ms.value = state.config.chat_mode || "approve-each";
+  if (ms) {
+    const activeWsId = state.config.active_workspace_id;
+    const activeWs = activeWsId && state.workspaces
+      ? state.workspaces.find((w) => w.id === activeWsId)
+      : null;
+    ms.value = (activeWs && activeWs.mode) || state.config.chat_mode || "approve-each";
+  }
   // Display
   loadDisplaySettingsUI(state.config.display || {});
   applyDisplaySettings(state.config.display || {});
@@ -595,8 +603,10 @@ async function activateWorkspace(id) {
     method: "POST",
     json: { active_workspace_id: id || "" },
   });
-  await loadConfig();
+  // Refresh workspaces before config so loadConfig's mode-select lookup
+  // can find the new active workspace's stored mode.
   await loadWorkspaces();
+  await loadConfig();
   newChat();
   // Refresh file tree for the new workspace
   if (state.filesPaneVisible) refreshFileTree();
