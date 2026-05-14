@@ -760,3 +760,159 @@ class TestProjectApi:
             "checkpoint_id": "nonexistent",
         })
         assert r.status_code == 404
+
+
+# ===========================================================================
+# Frontmatter parsing
+# ===========================================================================
+
+class TestLoadFrontmatter:
+    """Unit tests for the _load_frontmatter helper."""
+
+    def _write(self, tmp_path, name, text):
+        p = tmp_path / name
+        p.write_text(text, encoding="utf-8")
+        return p
+
+    def test_normal_frontmatter(self, tmp_path):
+        from app import _load_frontmatter
+        p = self._write(tmp_path, "skill.md", "---\nname: My Skill\ndescription: Does X\n---\nBody text here.\n")
+        post = _load_frontmatter(p)
+        assert post.get("name") == "My Skill"
+        assert post.get("description") == "Does X"
+        assert "Body text here." in post.content
+
+    def test_missing_frontmatter(self, tmp_path):
+        from app import _load_frontmatter
+        p = self._write(tmp_path, "plain.md", "Just plain content.\n")
+        post = _load_frontmatter(p)
+        assert post.get("name") is None
+        assert "Just plain content." in post.content
+
+    def test_unclosed_frontmatter(self, tmp_path):
+        from app import _load_frontmatter
+        p = self._write(tmp_path, "bad.md", "---\nname: Oops\nno closing delimiter")
+        post = _load_frontmatter(p)
+        assert post.get("name") is None
+
+    def test_malformed_yaml_returns_empty_meta(self, tmp_path):
+        from app import _load_frontmatter
+        p = self._write(tmp_path, "bad.md", "---\n: bad: yaml: [\n---\nContent.\n")
+        post = _load_frontmatter(p)
+        assert post.get("anything") is None
+        assert "Content." in post.content
+
+    def test_non_mapping_yaml_returns_empty_meta(self, tmp_path):
+        """yaml.safe_load on a bare list should not crash _FrontmatterPost.get()."""
+        from app import _load_frontmatter
+        p = self._write(tmp_path, "list.md", "---\n- item1\n- item2\n---\nContent.\n")
+        post = _load_frontmatter(p)
+        assert post.get("name") is None
+        assert "Content." in post.content
+
+    def test_crlf_line_endings(self, tmp_path):
+        from app import _load_frontmatter
+        p = tmp_path / "crlf.md"
+        p.write_bytes(b"---\r\nname: CRLF Skill\r\n---\r\nBody.\r\n")
+        post = _load_frontmatter(p)
+        assert post.get("name") == "CRLF Skill"
+        assert "Body." in post.content
+
+    def test_content_has_no_leading_delimiter_line(self, tmp_path):
+        """The closing --- line must not appear at the start of content."""
+        from app import _load_frontmatter
+        p = self._write(tmp_path, "skill.md", "---\nname: X\n---\nFirst line.\n")
+        post = _load_frontmatter(p)
+        assert not post.content.startswith("---")
+
+
+# ===========================================================================
+# delete_file tool
+# ===========================================================================
+
+class TestDeleteFileTool:
+    """Tests for the delete_file execute_tool handler."""
+
+    def _setup_workspace(self, isolated_dirs, filename="target.txt", content="delete me"):
+        import app as app_module
+        ws = isolated_dirs["tmp"] / "workspace"
+        ws.mkdir(parents=True, exist_ok=True)
+        (ws / filename).write_text(content, encoding="utf-8")
+        app_module.WORKSPACE_DIR = ws
+        return ws
+
+    def _run_tool(self, call, mode="trusted"):
+        import asyncio
+        import app as app_module
+        events = []
+
+        async def send_event(name, data):
+            events.append((name, data))
+
+        config = app_module.load_config()
+        result = asyncio.get_event_loop().run_until_complete(
+            app_module.execute_tool(call, config, send_event, mode=mode)
+        )
+        return result, events
+
+    def test_delete_existing_file_trusted(self, isolated_dirs):
+        ws = self._setup_workspace(isolated_dirs)
+        call = {"tool": "delete_file", "args": {"filename": "target.txt", "reason": "test"}}
+        result, _ = self._run_tool(call, mode="trusted")
+        assert result.get("deleted") == "target.txt"
+        assert result.get("path") == "target.txt"
+        assert not (ws / "target.txt").exists()
+
+    def test_delete_missing_file_returns_error(self, isolated_dirs):
+        self._setup_workspace(isolated_dirs)
+        call = {"tool": "delete_file", "args": {"filename": "ghost.txt"}}
+        result, _ = self._run_tool(call, mode="trusted")
+        assert "error" in result
+        assert "not found" in result["error"]
+
+    def test_delete_directory_rejected(self, isolated_dirs):
+        import app as app_module
+        ws = self._setup_workspace(isolated_dirs)
+        (ws / "subdir").mkdir(exist_ok=True)
+        app_module.WORKSPACE_DIR = ws
+        call = {"tool": "delete_file", "args": {"filename": "subdir"}}
+        result, _ = self._run_tool(call, mode="trusted")
+        assert "error" in result
+        assert "not a regular file" in result["error"]
+
+    def test_delete_missing_filename_returns_error(self, isolated_dirs):
+        self._setup_workspace(isolated_dirs)
+        call = {"tool": "delete_file", "args": {}}
+        result, _ = self._run_tool(call, mode="trusted")
+        assert "error" in result
+
+    def test_delete_emits_approval_request_in_approve_each_mode(self, isolated_dirs):
+        """In approve-each mode the tool should emit approval_request and then
+        time out (since no one resolves the approval), returning an error."""
+        import app as app_module
+        ws = self._setup_workspace(isolated_dirs)
+        # Pre-resolve the approval as denied so the test doesn't hang
+        original_wait = app_module.ApprovalState.wait
+
+        async def instant_deny(self_inner, aid, timeout=600.0):
+            return False
+
+        app_module.ApprovalState.wait = instant_deny
+        try:
+            call = {"tool": "delete_file", "args": {"filename": "target.txt", "reason": "test"}}
+            result, events = self._run_tool(call, mode="approve-each")
+            assert any(e[0] == "approval_request" for e in events)
+            assert "error" in result
+            assert "denied" in result["error"].lower()
+            assert (ws / "target.txt").exists()
+        finally:
+            app_module.ApprovalState.wait = original_wait
+
+    def test_delete_path_in_result_is_relative(self, isolated_dirs):
+        """path in tool result must be the filename only, not an absolute host path."""
+        self._setup_workspace(isolated_dirs)
+        call = {"tool": "delete_file", "args": {"filename": "target.txt"}}
+        result, _ = self._run_tool(call, mode="trusted")
+        assert result.get("path") == "target.txt"
+        import os
+        assert not os.path.isabs(result.get("path", ""))
