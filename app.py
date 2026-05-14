@@ -1469,14 +1469,21 @@ async def execute_tool(call: dict, config: dict, send_event, mode: str = "approv
                 return {"error": "User denied this file write."}
 
         # Snapshot the existing file only after approval, so denied requests
-        # don't leave junk checkpoints behind on disk.
+        # don't leave junk checkpoints behind on disk. Skip the snapshot
+        # entirely if the existing file is larger than the checkpoint cap
+        # (2 MB) — checkpoints are an undo helper, not a backup system, and
+        # reading multi-hundred-MB files into memory just to checkpoint is
+        # worse than degrading gracefully.
+        _MAX_CHECKPOINT_BYTES = 2 * 1024 * 1024
         checkpoint_id = None
         if dest.exists():
             wid = (workspace or {}).get("id", "default")
             try:
-                checkpoint_id = _checkpoint_file(
-                    wid, filename, dest.read_text(encoding="utf-8", errors="replace")
-                )
+                existing_size = dest.stat().st_size
+                if existing_size <= _MAX_CHECKPOINT_BYTES:
+                    checkpoint_id = _checkpoint_file(
+                        wid, filename, dest.read_text(encoding="utf-8", errors="replace")
+                    )
             except Exception:
                 checkpoint_id = None
 
@@ -1912,14 +1919,15 @@ class ApprovalIn(BaseModel):
 
 @app.post("/api/approve")
 async def approve(a: ApprovalIn, request: Request):
+    # Approving an in-flight tool call can release shell/file-write side
+    # effects, so restrict the endpoint to local callers up front (matching
+    # /api/project/* and /api/session/trust). Remote clients can't approve
+    # tool calls without the operator's local browser.
+    _require_local_caller(request)
     ok = approvals.resolve(a.approval_id, a.approved)
     if not ok:
         raise HTTPException(404, "Unknown approval id")
-    # Mutating session trust here would otherwise bypass the local-caller gate
-    # on /api/session/trust. Apply the same restriction before we add to the
-    # set — non-local callers can still approve/deny, just not auto-trust.
     if a.approved and a.trust_session and a.command:
-        _require_local_caller(request)
         _session_trusted_commands.add(a.command)
     return {"ok": True}
 
@@ -2906,7 +2914,12 @@ def to_openai_messages(history: list, system_prompt: str) -> list:
 
 
 @app.post("/api/chat")
-async def chat(req: ChatRequest):
+async def chat(req: ChatRequest, request: Request):
+    # /api/chat can drive side-effecting tools (execute_shell, write_file,
+    # cli_call) which only require an /api/approve from the same operator.
+    # Restricting both endpoints to local callers means a network-exposed
+    # server can't be used to ride the operator's approval pipeline.
+    _require_local_caller(request)
     cfg = load_config()
     if not cfg.get("api_key") or not cfg.get("base_url"):
         raise HTTPException(400, "Set your OpenWebUI URL and API key first.")

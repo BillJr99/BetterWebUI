@@ -2464,12 +2464,16 @@ async function init() {
   wireTabs();
   wireEvents();
   initMic();
+  // Load workspaces before config so loadConfig's #mode-select lookup can
+  // see the active workspace's stored mode on first paint; otherwise the
+  // select would fall back to config.chat_mode until the next config
+  // refresh.
+  await loadWorkspaces();
   await loadConfig();
   await Promise.all([
     refreshModels(),
     loadPrompts(),
     loadSkills(),
-    loadWorkspaces(),
     loadMcp(),
     loadCli(),
     loadConversations(),
