@@ -1522,10 +1522,20 @@ async function openProjectFile(path) {
   try {
     const data = await api(`/api/project/file?workspace_id=${encodeURIComponent(ws?.id || "")}&path=${encodeURIComponent(path)}`);
     const name = path.split("/").pop() || path;
+    let body;
+    if (data.is_binary) {
+      const sizeStr = data.size != null ? `${data.size} bytes` : "unknown size";
+      const truncated = data.truncated ? " (truncated)" : "";
+      body = `<p><em>Binary file (${sizeStr})${truncated} — preview not available.</em></p>`;
+    } else {
+      const truncated = data.truncated
+        ? `<p class="hint">File was truncated to the first 1 MB for preview.</p>` : "";
+      body = `${truncated}<pre style="max-height:400px;overflow:auto;">${escape(data.content || "")}</pre>`;
+    }
     showDialog({
       title: name,
       wide: true,
-      body: `<pre style="max-height:400px;overflow:auto;">${escape(data.content || "")}</pre>`,
+      body,
       actions: [{ label: "Close", action: "cancel" }],
     });
   } catch (e) {

@@ -1093,7 +1093,7 @@ label small { font-weight: 400; }
   gap: 4px;
 }
 .explain-expander summary::before { content: "▸ "; }
-details[open] .explain-expander summary::before { content: "▾ "; }
+.explain-expander[open] summary::before { content: "▾ "; }
 .explain-body {
   margin-top: 8px;
   padding: 10px 12px;

@@ -673,14 +673,25 @@ def _lint_skills() -> list[dict]:
 
 def _lint_mcp() -> list[dict]:
     issues = []
+    # Suggest what a missing binary usually means so the user knows how to fix it
+    hint_by_bin = {
+        "npx": "install Node.js (provides npx)",
+        "node": "install Node.js",
+        "uvx": "install uv (provides uvx)",
+        "uv": "install uv",
+    }
     for s in load_mcp_servers().get("servers", []):
         if not s.get("command"):
             issues.append({"type": "mcp", "id": s.get("name", "?"), "issue": "Missing 'command'"})
+            continue
         cmd = s.get("command", "")
-        if cmd in ("npx", "node") and not shutil.which("npx") and not shutil.which("node"):
-            issues.append({"type": "mcp", "id": s["name"], "issue": "npx/node not found — install Node.js"})
-        if cmd in ("uvx", "uv") and not shutil.which("uvx") and not shutil.which("uv"):
-            issues.append({"type": "mcp", "id": s["name"], "issue": "uvx/uv not found — install uv"})
+        # Validate the exact configured binary, not an alternative
+        if cmd and not shutil.which(cmd):
+            hint = hint_by_bin.get(cmd)
+            msg = f"'{cmd}' not found on PATH"
+            if hint:
+                msg += f" — {hint}"
+            issues.append({"type": "mcp", "id": s["name"], "issue": msg})
     return issues
 
 
@@ -1045,6 +1056,17 @@ async def run_shell(command: str, timeout: int = 120, cwd: Optional[str] = None)
     argv = argv_prefix + [command]
     started = time.time()
     effective_cwd = cwd or str(WORKSPACE_DIR)
+    # Validate cwd up front so a misconfigured workspace project_root produces
+    # a clear error instead of being reported as "Shell not available".
+    cwd_path = Path(effective_cwd)
+    if not cwd_path.exists() or not cwd_path.is_dir():
+        return {
+            "shell": shell_name,
+            "exit_code": -1,
+            "stdout": "",
+            "stderr": f"Working directory does not exist: {effective_cwd}",
+            "duration_ms": int((time.time() - started) * 1000),
+        }
     try:
         proc = await asyncio.create_subprocess_exec(
             *argv,
@@ -2217,8 +2239,14 @@ async def project_file(path: str):
                 content = base64.b64encode(raw).decode("ascii")
                 is_binary = True
     except Exception:
-        content = base64.b64encode(full.read_bytes()[:_MAX_PROJECT_FILE_BYTES]).decode("ascii")
-        is_binary = True
+        # Capped streaming fallback so a transient read failure can't blow past the 1 MB cap
+        try:
+            with full.open("rb") as fh:
+                raw = fh.read(_MAX_PROJECT_FILE_BYTES)
+            content = base64.b64encode(raw).decode("ascii")
+            is_binary = True
+        except Exception as exc:
+            raise HTTPException(500, f"Could not read file: {exc}")
     return {
         "path": path,
         "content": content,
@@ -2378,6 +2406,9 @@ async def upload_file(file: UploadFile = File(...)):
 
 # --- Voice transcription ---
 
+_MAX_TRANSCRIBE_BYTES = 25 * 1024 * 1024  # 25 MB cap for /api/transcribe uploads
+
+
 @app.post("/api/transcribe")
 async def transcribe_audio(file: UploadFile = File(...)):
     cfg = load_config()
@@ -2387,7 +2418,9 @@ async def transcribe_audio(file: UploadFile = File(...)):
     base = normalize_base_url(cfg["base_url"])
     transcribe_url = f"{base}{profile.get('transcribe', '/api/v1/audio/transcriptions')}"
     headers = {"Authorization": f"Bearer {cfg['api_key']}"}
-    audio_bytes = await file.read()
+    audio_bytes = await file.read(_MAX_TRANSCRIBE_BYTES + 1)
+    if len(audio_bytes) > _MAX_TRANSCRIBE_BYTES:
+        raise HTTPException(413, "Audio upload too large (max 25 MB).")
     async with httpx.AsyncClient(timeout=60.0) as client:
         try:
             resp = await client.post(
