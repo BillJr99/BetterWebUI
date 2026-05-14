@@ -752,9 +752,10 @@ Available tools:
   <project_root>/<filename> — falling back to the server's WORKSPACE_DIR
   when the workspace has no project_root configured. Any pre-existing
   file at that path is snapshotted into checkpoints before being
-  overwritten, so the user can revert from the UI. The result also
-  inlines the bytes (data_b64) up to ~5 MB so the user can download
-  the saved file from chat. Args: {"filename": "name.ext", "content":
+  overwritten, so the user can revert from the UI. On success the file
+  is visible in the Files pane; data_b64 is only returned when the
+  on-disk write fails so the user can still retrieve the content.
+  Args: {"filename": "name.ext", "content":
   "...", "mime": "text/plain"}.
 
 - load_skill: load the full content of a named skill so you can follow its

@@ -1727,14 +1727,9 @@ async function askApproval(req) {
           action: async () => {
             const trustCb = document.getElementById("trust-session-cb");
             const trustSession = trustCb ? trustCb.checked : false;
-            if (trustSession && req.command) {
-              try {
-                await api("/api/session/trust", {
-                  method: "POST",
-                  json: { command: req.command },
-                });
-              } catch (e) { /* non-critical */ }
-            }
+            // Don't call /api/session/trust here: /api/approve already handles
+            // trust_session+command atomically, so an early call would trust
+            // the command even if the approve request later fails.
             closeDialog();
             state.pendingDialogCancel = null;
             resolve({ approved: true, trust_session: trustSession, command: req.command });
@@ -2175,7 +2170,14 @@ async function checkOnboarding() {
   if (cfg?.onboarding_done) return;
   // Show wizard
   const overlay = $("#onboarding-overlay");
-  if (overlay) overlay.hidden = false;
+  if (overlay) {
+    overlay.hidden = false;
+    overlay.addEventListener("keydown", trapFocus);
+    const firstFocusable = overlay.querySelector(
+      'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+    );
+    firstFocusable?.focus();
+  }
   // Load use-case templates
   try {
     const data = await api("/api/onboarding/templates");
@@ -2262,7 +2264,12 @@ async function onboardingComplete(useCaseId) {
 
 function onboardingFinish() {
   const overlay = $("#onboarding-overlay");
-  if (overlay) overlay.hidden = true;
+  if (overlay) {
+    overlay.hidden = true;
+    overlay.removeEventListener("keydown", trapFocus);
+  }
+  // Return focus to the composer so keyboard users can start typing immediately
+  $("#user-input")?.focus();
   flash("Welcome to BetterWebUI!", "good");
 }
 
@@ -2272,6 +2279,29 @@ function onboardingFinish() {
 
 let _gKeyPending = false;
 let _gKeyTimer = null;
+
+let _shortcutPriorFocus = null;
+
+function openShortcutSheet() {
+  const sheet = $("#shortcut-sheet");
+  if (!sheet || !sheet.hidden) return;
+  _shortcutPriorFocus = document.activeElement;
+  sheet.hidden = false;
+  sheet.addEventListener("keydown", trapFocus);
+  const firstFocusable = sheet.querySelector(
+    'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+  );
+  firstFocusable?.focus();
+}
+
+function closeShortcutSheet() {
+  const sheet = $("#shortcut-sheet");
+  if (!sheet || sheet.hidden) return;
+  sheet.hidden = true;
+  sheet.removeEventListener("keydown", trapFocus);
+  _shortcutPriorFocus?.focus();
+  _shortcutPriorFocus = null;
+}
 
 function handleGlobalKey(e) {
   // Don't intercept when typing in inputs — with two exceptions:
@@ -2301,7 +2331,7 @@ function handleGlobalKey(e) {
     } else {
       closeDialog();
     }
-    const sheet = $("#shortcut-sheet"); if (sheet) sheet.hidden = true;
+    closeShortcutSheet();
     const diff = $("#diff-modal"); if (diff && !diff.hidden) diff.hidden = true;
     const onboarding = $("#onboarding-overlay"); if (onboarding && !onboarding.hidden) onboarding.hidden = true;
     // Return focus to the composer for keyboard users
@@ -2310,10 +2340,10 @@ function handleGlobalKey(e) {
     return;
   }
 
-  // ? opens shortcut sheet
+  // ? toggles shortcut sheet
   if (e.key === "?") {
     const sheet = $("#shortcut-sheet");
-    if (sheet) sheet.hidden = !sheet.hidden;
+    if (sheet?.hidden) openShortcutSheet(); else closeShortcutSheet();
     return;
   }
 
@@ -2462,13 +2492,8 @@ function wireEvents() {
   });
 
   // Keyboard shortcuts modal
-  $("#shortcut-help-btn")?.addEventListener("click", () => {
-    const sheet = $("#shortcut-sheet");
-    if (sheet) sheet.hidden = false;
-  });
-  $("#shortcut-sheet")?.querySelector(".modal-close")?.addEventListener("click", () => {
-    $("#shortcut-sheet").hidden = true;
-  });
+  $("#shortcut-help-btn")?.addEventListener("click", openShortcutSheet);
+  $("#shortcut-sheet")?.querySelector(".modal-close")?.addEventListener("click", closeShortcutSheet);
 
   // Global keyboard shortcuts
   document.addEventListener("keydown", handleGlobalKey);
