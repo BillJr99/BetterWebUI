@@ -1,0 +1,217 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Backend + frontend tests
+  # ---------------------------------------------------------------------------
+  test:
+    name: Tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install application dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install test dependencies
+        run: pip install pytest pytest-asyncio httpx python-frontmatter
+
+      - name: Run tests
+        run: pytest tests/ -v --tb=short
+
+  # ---------------------------------------------------------------------------
+  # Smoke-test: the server actually starts and responds
+  # ---------------------------------------------------------------------------
+  smoke:
+    name: Server smoke test
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Start server in background
+        run: |
+          python -m uvicorn app:app --host 127.0.0.1 --port 8765 &
+          echo $! > /tmp/server.pid
+          # Wait up to 15 s for the server to be ready
+          for i in $(seq 1 15); do
+            curl -sf http://127.0.0.1:8765/api/health && break
+            sleep 1
+          done
+
+      - name: Health check
+        run: curl -sf http://127.0.0.1:8765/api/health | python3 -m json.tool
+
+      - name: Verify index.html served
+        run: |
+          STATUS=$(curl -so /dev/null -w "%{http_code}" http://127.0.0.1:8765/)
+          [ "$STATUS" = "200" ] || (echo "Expected 200, got $STATUS" && exit 1)
+
+      - name: Verify static JS served
+        run: |
+          STATUS=$(curl -so /dev/null -w "%{http_code}" http://127.0.0.1:8765/static/app.js)
+          [ "$STATUS" = "200" ] || (echo "Expected 200, got $STATUS" && exit 1)
+
+      - name: Verify static CSS served
+        run: |
+          STATUS=$(curl -so /dev/null -w "%{http_code}" http://127.0.0.1:8765/static/style.css)
+          [ "$STATUS" = "200" ] || (echo "Expected 200, got $STATUS" && exit 1)
+
+      - name: Config API responds
+        run: curl -sf http://127.0.0.1:8765/api/config | python3 -m json.tool
+
+      - name: Skills API responds
+        run: curl -sf http://127.0.0.1:8765/api/skills | python3 -m json.tool
+
+      - name: Workspaces API responds
+        run: curl -sf http://127.0.0.1:8765/api/workspaces | python3 -m json.tool
+
+      - name: Onboarding templates API responds
+        run: curl -sf http://127.0.0.1:8765/api/onboarding/templates | python3 -m json.tool
+
+      - name: Lint API responds
+        run: curl -sf http://127.0.0.1:8765/api/lint | python3 -m json.tool
+
+      - name: Branding API responds
+        run: curl -sf http://127.0.0.1:8765/api/branding | python3 -m json.tool
+
+      - name: Conversations API responds
+        run: curl -sf http://127.0.0.1:8765/api/conversations | python3 -m json.tool
+
+      - name: Conversation search API responds
+        run: curl -sf "http://127.0.0.1:8765/api/conversations/search?q=test" | python3 -m json.tool
+
+      - name: Session trust API responds
+        run: |
+          curl -sf http://127.0.0.1:8765/api/session/trust | python3 -m json.tool
+          curl -sf -X POST http://127.0.0.1:8765/api/session/trust \
+               -H "Content-Type: application/json" \
+               -d '{"command":"echo hello"}' | python3 -m json.tool
+          curl -sf http://127.0.0.1:8765/api/session/trust | python3 -m json.tool
+
+      - name: MCP registry API responds
+        run: curl -sf http://127.0.0.1:8765/api/mcp/registry | python3 -m json.tool
+
+      - name: CLI registry API responds
+        run: curl -sf http://127.0.0.1:8765/api/cli/registry | python3 -m json.tool
+
+      - name: System prompts API responds
+        run: curl -sf http://127.0.0.1:8765/api/system-prompts | python3 -m json.tool
+
+      - name: Tasks API responds
+        run: curl -sf http://127.0.0.1:8765/api/tasks | python3 -m json.tool
+
+      - name: Full skill CRUD smoke test
+        run: |
+          # Create
+          RESP=$(curl -sf -X POST http://127.0.0.1:8765/api/skills \
+               -H "Content-Type: application/json" \
+               -d '{"id":"smoke-skill","name":"Smoke","description":"smoke test","content":"Do smoke things."}')
+          echo "$RESP" | python3 -m json.tool
+          # List
+          curl -sf http://127.0.0.1:8765/api/skills | python3 -m json.tool
+          # Get
+          curl -sf http://127.0.0.1:8765/api/skills/smoke-skill | python3 -m json.tool
+          # Delete
+          curl -sf -X DELETE http://127.0.0.1:8765/api/skills/smoke-skill | python3 -m json.tool
+
+      - name: Full workspace CRUD smoke test
+        run: |
+          WID=$(curl -sf -X POST http://127.0.0.1:8765/api/workspaces \
+               -H "Content-Type: application/json" \
+               -d '{"name":"Smoke WS","description":"smoke"}' | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
+          echo "Created workspace: $WID"
+          curl -sf "http://127.0.0.1:8765/api/workspaces/$WID" | python3 -m json.tool
+          curl -sf -X DELETE "http://127.0.0.1:8765/api/workspaces/$WID" | python3 -m json.tool
+
+      - name: Stop server
+        if: always()
+        run: kill $(cat /tmp/server.pid) 2>/dev/null || true
+
+  # ---------------------------------------------------------------------------
+  # Lint / formatting checks (fast, no deps)
+  # ---------------------------------------------------------------------------
+  lint:
+    name: Code quality
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install linters
+        run: pip install pyflakes python-frontmatter
+
+      - name: pyflakes (syntax / undefined names)
+        run: python -m pyflakes app.py tests/
+
+      - name: Check HTML is valid UTF-8
+        run: python3 -c "open('static/index.html', encoding='utf-8').read(); print('index.html OK')"
+
+      - name: Check JS is valid UTF-8
+        run: python3 -c "open('static/app.js', encoding='utf-8').read(); print('app.js OK')"
+
+      - name: Check CSS is valid UTF-8
+        run: python3 -c "open('static/style.css', encoding='utf-8').read(); print('style.css OK')"
+
+      - name: Verify no Python syntax errors
+        run: python3 -m py_compile app.py && echo "app.py compiles OK"
+
+      - name: Check required files exist
+        run: |
+          for f in app.py requirements.txt static/index.html static/app.js static/style.css start.sh start.bat; do
+            [ -f "$f" ] || (echo "Missing: $f" && exit 1)
+            echo "✓ $f"
+          done
+
+      - name: Verify skills have valid frontmatter
+        run: |
+          python3 - <<'EOF'
+          import frontmatter, sys
+          from pathlib import Path
+          errors = []
+          for p in sorted(Path("skills").glob("*.md")):
+              try:
+                  post = frontmatter.load(p)
+                  if not post.get("name"):
+                      errors.append(f"{p}: missing 'name'")
+                  if not post.get("description"):
+                      errors.append(f"{p}: missing 'description'")
+              except Exception as e:
+                  errors.append(f"{p}: {e}")
+          if errors:
+              print("\n".join(errors))
+              sys.exit(1)
+          print(f"All {len(list(Path('skills').glob('*.md')))} skill(s) valid.")
+          EOF

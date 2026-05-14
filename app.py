@@ -14,8 +14,6 @@ import json
 import os
 import platform
 import shutil
-import subprocess
-import sys
 import time
 import uuid
 import zipfile
@@ -25,8 +23,8 @@ from typing import Any, AsyncGenerator, Optional
 import aiofiles
 import frontmatter
 import httpx
-from fastapi import FastAPI, HTTPException, Request, UploadFile, File, BackgroundTasks
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse, Response
+from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi.responses import FileResponse, StreamingResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -1215,7 +1213,6 @@ async def run_subagent_loop(
         + RENDERING_PROTOCOL
     )
     history = [{"role": "user", "content": prompt}]
-    prompts = load_prompts()
     for _ in range(max_steps):
         messages = [{"role": "system", "content": sub_system}] + history
         text, _ = await chat_complete(messages, model, config)
@@ -2475,7 +2472,8 @@ async def tag_conversation(cid: str, body: TagIn):
 
 
 class ForkIn(BaseModel):
-    from_message_index: int
+    fork_at: Optional[int] = None          # index sent by the JS client
+    from_message_index: Optional[int] = None  # alias kept for back-compat
     title: Optional[str] = None
 
 
@@ -2486,7 +2484,8 @@ async def fork_conversation(cid: str, body: ForkIn):
     if not conv:
         raise HTTPException(404, "Not found")
     messages = conv.get("messages", [])
-    forked_messages = messages[: body.from_message_index + 1]
+    idx = body.fork_at if body.fork_at is not None else (body.from_message_index or len(messages) - 1)
+    forked_messages = messages[: idx + 1]
     new_cid = uuid.uuid4().hex
     title = body.title or f"{conv.get('title', 'Conversation')} (fork)"
     data["conversations"][new_cid] = {
@@ -2522,8 +2521,17 @@ def save_conversation(cid: str, title: str, messages: list, task_plan: Optional[
 
 @app.get("/api/lint")
 async def lint():
-    issues = _lint_skills() + _lint_mcp() + _lint_cli()
-    return {"issues": issues, "ok": len(issues) == 0}
+    skill_issues = _lint_skills()
+    mcp_issues = _lint_mcp()
+    cli_issues = _lint_cli()
+    all_issues = skill_issues + mcp_issues + cli_issues
+    return {
+        "ok": len(all_issues) == 0,
+        "issues": all_issues,
+        "skills": [i["issue"] for i in skill_issues],
+        "mcp": [i["issue"] for i in mcp_issues],
+        "cli": [i["issue"] for i in cli_issues],
+    }
 
 
 # --- Branding ---
