@@ -1,4 +1,3 @@
-import asyncio
 import httpx
 from .registry import get_services, ServiceEndpoint
 
