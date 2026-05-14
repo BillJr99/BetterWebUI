@@ -1351,6 +1351,7 @@ async function readAloud(msgEl, text, btn) {
     msgEl.querySelector(".content").appendChild(audio);
   } catch (e) {
     btn.classList.remove("reading");
+    btn.title = "Read aloud";
     flash("Read aloud failed: " + e.message, "warn");
   }
 }
@@ -1547,12 +1548,13 @@ function renderFileTree(ul, entries) {
       details.addEventListener("toggle", async () => {
         // Use a data-loaded flag so empty directories aren't refetched on
         // every expand (children.length === 0 stays true for empty results).
+        // Only mark loaded on success so a transient failure stays retryable.
         if (details.open && details.dataset.loaded !== "1") {
           try {
             const data = await api(`/api/project/tree?path=${encodeURIComponent(entry.path)}`);
             renderFileTree(sub, data.entries || []);
-          } catch (e) { /* silent */ }
-          details.dataset.loaded = "1";
+            details.dataset.loaded = "1";
+          } catch (e) { /* silent — leave unloaded so next expand retries */ }
         }
       });
     } else {

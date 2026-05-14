@@ -1114,9 +1114,20 @@ def _slug(text: str, fallback: str = "image") -> str:
 # Checkpoint helpers (project file versioning)
 # ---------------------------------------------------------------------------
 
+def _ckpt_key(filename: str) -> str:
+    """Collision-resistant directory key for a checkpointed filename.
+
+    _slug() collapses punctuation and casing, so distinct filenames could share
+    a slug and mix their histories. Use a hash of the normalized relative path
+    instead — full content (history mixing risk gone) and bounded length.
+    """
+    norm = (filename or "file").strip().replace("\\", "/")
+    return hashlib.sha1(norm.encode("utf-8")).hexdigest()[:16]
+
+
 def _checkpoint_file(workspace_id: str, filename: str, content: str) -> str:
     """Save a checkpoint snapshot. Returns the checkpoint id."""
-    ckpt_dir = CHECKPOINTS_DIR / workspace_id / _slug(filename, "file")
+    ckpt_dir = CHECKPOINTS_DIR / workspace_id / _ckpt_key(filename)
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     ckpt_id = f"{int(time.time())}_{uuid.uuid4().hex[:6]}"
     ckpt_path = ckpt_dir / f"{ckpt_id}.txt"
@@ -1125,7 +1136,7 @@ def _checkpoint_file(workspace_id: str, filename: str, content: str) -> str:
 
 
 def _list_checkpoints(workspace_id: str, filename: str) -> list[dict]:
-    ckpt_dir = CHECKPOINTS_DIR / workspace_id / _slug(filename, "file")
+    ckpt_dir = CHECKPOINTS_DIR / workspace_id / _ckpt_key(filename)
     if not ckpt_dir.exists():
         return []
     out = []
@@ -1137,7 +1148,7 @@ def _list_checkpoints(workspace_id: str, filename: str) -> list[dict]:
 
 
 def _get_checkpoint(workspace_id: str, filename: str, ckpt_id: str) -> Optional[str]:
-    ckpt_path = CHECKPOINTS_DIR / workspace_id / _slug(filename, "file") / f"{ckpt_id}.txt"
+    ckpt_path = CHECKPOINTS_DIR / workspace_id / _ckpt_key(filename) / f"{ckpt_id}.txt"
     if not ckpt_path.exists():
         return None
     return ckpt_path.read_text(encoding="utf-8")
@@ -1705,7 +1716,7 @@ class ConfigPatch(BaseModel):
     display: Optional[dict] = None
 
 
-def _public_config(cfg: dict) -> dict:
+def _public_config(cfg: dict, include_paths: bool = False) -> dict:
     safe = dict(cfg)
     safe["api_key_set"] = bool(safe.get("api_key"))
     safe["api_key"] = ""
@@ -1714,19 +1725,29 @@ def _public_config(cfg: dict) -> dict:
         safe["api_profile_label"] = profile.get("label", profile.get("name", ""))
     else:
         safe["api_profile_label"] = ""
-    # Expose the server-controlled workspace base so the UI can render an
-    # accurate placeholder and validation hint for workspace project_root.
-    safe["workspace_dir"] = str(Path(WORKSPACE_DIR).resolve())
+    # workspace_dir is the absolute server path; only return it to local
+    # callers (UI hint) so a network-exposed server doesn't leak server
+    # filesystem layout in every config response.
+    if include_paths:
+        safe["workspace_dir"] = str(Path(WORKSPACE_DIR).resolve())
     return safe
 
 
+def _is_local_caller(request: Request) -> bool:
+    try:
+        _require_local_caller(request)
+        return True
+    except HTTPException:
+        return False
+
+
 @app.get("/api/config")
-async def get_config():
-    return _public_config(load_config())
+async def get_config(request: Request):
+    return _public_config(load_config(), include_paths=_is_local_caller(request))
 
 
 @app.post("/api/config")
-async def set_config(patch: ConfigPatch):
+async def set_config(patch: ConfigPatch, request: Request):
     cfg = load_config()
     payload = patch.model_dump(exclude_none=True)
     url_changed = False
@@ -1753,7 +1774,7 @@ async def set_config(patch: ConfigPatch):
         except Exception:
             pass
     save_json(CONFIG_PATH, cfg)
-    return _public_config(cfg)
+    return _public_config(cfg, include_paths=_is_local_caller(request))
 
 
 # --- Models ---
