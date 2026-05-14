@@ -62,7 +62,6 @@ def isolated_dirs(tmp_path, monkeypatch):
     # Clear in-memory session state
     app_module._session_trusted_commands.clear()
     app_module._command_explanation_cache.clear()
-    app_module._background_tasks.clear()
     app_module.approvals.__init__()
     app_module.file_responses.__init__()
 

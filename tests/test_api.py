@@ -681,21 +681,6 @@ class TestApprove:
 
 
 # ===========================================================================
-# Background tasks
-# ===========================================================================
-
-class TestBackgroundTasks:
-    def test_list_tasks_empty(self, client):
-        r = client.get("/api/tasks")
-        assert r.status_code == 200
-        assert r.json()["tasks"] == []
-
-    def test_get_missing_task(self, client):
-        r = client.get("/api/tasks/nonexistent")
-        assert r.status_code == 404
-
-
-# ===========================================================================
 # Project file APIs
 # ===========================================================================
 

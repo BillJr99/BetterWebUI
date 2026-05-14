@@ -2,7 +2,7 @@
 BetterWebUI — a friendlier OpenWebUI front-end with skills, custom system
 prompts, multimodal generation, MCP-style tooling, gated shell execution,
 visible task plans, file-tree/diff/checkpoints, plan mode, subagents,
-workspace bundles, conversation search/pinning/forking, background tasks,
+workspace bundles, conversation search/pinning/forking,
 per-turn telemetry, onboarding wizard, and accessibility features.
 """
 
@@ -614,10 +614,6 @@ _session_trusted_commands: set[str] = set()
 
 # Explanation cache keyed by command hash
 _command_explanation_cache: dict[str, str] = {}
-
-# Background task store: task_id -> {status, events, ...}
-_background_tasks: dict[str, dict] = {}
-
 
 # ---------------------------------------------------------------------------
 # Skill loading
@@ -2693,13 +2689,22 @@ async def fork_conversation(cid: str, body: ForkIn):
     forked_messages = messages[: idx + 1]
     new_cid = uuid.uuid4().hex
     title = body.title or f"{conv.get('title', 'Conversation')} (fork)"
+    # Copy schema-shaped fields from the source so the forked conversation
+    # matches what save_conversation/load_conversations produce elsewhere.
+    # Forks start unpinned with the parent's tags, workspace, and current
+    # task plan snapshot — but as a brand-new conversation otherwise.
+    now = int(time.time())
     data["conversations"][new_cid] = {
         "id": new_cid,
         "title": title,
         "messages": forked_messages,
         "parent_id": cid,
-        "updated_at": int(time.time()),
-        "created_at": int(time.time()),
+        "pinned": False,
+        "tags": list(conv.get("tags", [])),
+        "task_plan": list(conv.get("task_plan", [])),
+        "workspace_id": conv.get("workspace_id", ""),
+        "updated_at": now,
+        "created_at": now,
     }
     save_json(CONVERSATIONS_PATH, data)
     return {"id": new_cid, "title": title}
@@ -2746,30 +2751,6 @@ async def get_branding():
     return load_json(BRANDING_PATH, {"logo": None, "primary_color": None, "welcome": None, "institution": None})
 
 
-# --- Background tasks ---
-
-@app.get("/api/tasks")
-async def list_tasks():
-    return {"tasks": [
-        {
-            "id": tid,
-            "title": t.get("title", ""),
-            "status": t.get("status", "unknown"),
-            "created_at": t.get("created_at", 0),
-            "conversation_id": t.get("conversation_id", ""),
-        }
-        for tid, t in _background_tasks.items()
-    ]}
-
-
-@app.get("/api/tasks/{tid}")
-async def get_task(tid: str):
-    t = _background_tasks.get(tid)
-    if not t:
-        raise HTTPException(404, "Task not found")
-    return t
-
-
 # --- Chat (the main loop) ---
 
 class ChatRequest(BaseModel):
@@ -2778,7 +2759,6 @@ class ChatRequest(BaseModel):
     model: Optional[str] = None
     title: Optional[str] = None
     mode: Optional[str] = None
-    background: Optional[bool] = False
 
 
 _VALID_ROLES = {"system", "user", "assistant", "function", "tool", "developer"}
