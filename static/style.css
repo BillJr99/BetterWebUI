@@ -769,7 +769,11 @@ label small { font-weight: 400; }
   opacity: 0;
   transition: opacity 0.15s;
 }
-.message:hover .message-actions { opacity: 1; }
+/* Reveal on hover (mouse), focus-within (keyboard), and when a contained
+   button itself has focus, so keyboard and touch users can reach the actions. */
+.message:hover .message-actions,
+.message:focus-within .message-actions,
+.message-actions:focus-within { opacity: 1; }
 .message-actions button {
   background: transparent;
   border: 1px solid var(--parchment-edge-soft);

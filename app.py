@@ -10,6 +10,7 @@ import asyncio
 import base64
 import hashlib
 import io
+import ipaddress
 import json
 import os
 import platform
@@ -1900,15 +1901,26 @@ class SessionTrustIn(BaseModel):
 def _require_local_caller(request: Request) -> None:
     """Reject requests that don't come from a local client.
 
-    Session-trust state can downgrade the approval gate, so the endpoints
-    that modify it should not be reachable from other hosts on the network
-    even when the server is bound to 0.0.0.0 (e.g., behind Docker port
-    mapping). Same-origin browser callers always hit localhost in practice.
+    Session-trust state and the project-file endpoints can affect on-disk
+    state, so they shouldn't be reachable from arbitrary remote hosts when
+    the server is bound to 0.0.0.0. Accepts loopback, anything inside an
+    RFC1918 private range (so Docker bridge networks and typical LAN
+    deployments keep working), and 'testclient' for FastAPI's TestClient.
+    Set BETTERWEBUI_REQUIRE_LOCAL=strict to require pure loopback.
     """
     client_host = (request.client.host if request.client else "") or ""
-    # 'testclient' is FastAPI's TestClient default so this stays unit-testable.
-    if client_host not in ("127.0.0.1", "::1", "localhost", "testclient"):
-        raise HTTPException(403, "Session trust endpoints are limited to local callers.")
+    strict = os.environ.get("BETTERWEBUI_REQUIRE_LOCAL", "").lower() == "strict"
+    loopback_or_test = client_host in ("127.0.0.1", "::1", "localhost", "testclient")
+    if loopback_or_test:
+        return
+    if not strict:
+        try:
+            addr = ipaddress.ip_address(client_host)
+            if addr.is_loopback or addr.is_private:
+                return
+        except ValueError:
+            pass
+    raise HTTPException(403, "This endpoint is limited to local callers.")
 
 
 @app.post("/api/session/trust")
@@ -2317,38 +2329,52 @@ async def project_file(request: Request, path: str, include_content: bool = Fals
     if not full.exists():
         raise HTTPException(404, "File not found.")
     size = full.stat().st_size
-    try:
-        # Read cap+1 bytes so we can detect truncation from the read itself
-        # (not just from stat, which can lie on streaming filesystems or fifos).
-        with full.open("rb") as fh:
-            raw = fh.read(_MAX_PROJECT_FILE_BYTES + 1)
-        truncated = len(raw) > _MAX_PROJECT_FILE_BYTES
-        if truncated:
-            raw = raw[:_MAX_PROJECT_FILE_BYTES]
-        # NUL byte heuristic + strict UTF-8 decode: anything that fails either
-        # check is treated as binary so the diff modal's binary guard works.
-        if b"\x00" in raw:
-            content = base64.b64encode(raw).decode("ascii")
-            is_binary = True
-        else:
-            try:
-                content = raw.decode("utf-8", errors="strict")
-                is_binary = False
-            except UnicodeDecodeError:
-                content = base64.b64encode(raw).decode("ascii")
-                is_binary = True
-    except Exception:
-        # Capped streaming fallback so a transient read failure can't blow past the 1 MB cap
+    truncated = size > _MAX_PROJECT_FILE_BYTES
+    content = None
+    is_binary = False
+    if include_content:
         try:
+            # Read cap+1 bytes so we can detect truncation from the read itself
+            # (not just from stat, which can lie on streaming filesystems or fifos).
             with full.open("rb") as fh:
                 raw = fh.read(_MAX_PROJECT_FILE_BYTES + 1)
             truncated = len(raw) > _MAX_PROJECT_FILE_BYTES
             if truncated:
                 raw = raw[:_MAX_PROJECT_FILE_BYTES]
-            content = base64.b64encode(raw).decode("ascii")
-            is_binary = True
+            # NUL byte heuristic + strict UTF-8 decode: anything that fails either
+            # check is treated as binary so the diff modal's binary guard works.
+            if b"\x00" in raw:
+                content = base64.b64encode(raw).decode("ascii")
+                is_binary = True
+            else:
+                try:
+                    content = raw.decode("utf-8", errors="strict")
+                    is_binary = False
+                except UnicodeDecodeError:
+                    content = base64.b64encode(raw).decode("ascii")
+                    is_binary = True
         except Exception as exc:
             raise HTTPException(500, f"Could not read file: {exc}")
+    else:
+        # Metadata-only path: sniff a small header to flag binary so the UI can
+        # decide whether to do a follow-up include_content=true fetch. This
+        # avoids reading the full 1 MB body when the caller only wants metadata.
+        try:
+            with full.open("rb") as fh:
+                header = fh.read(4096)
+            if b"\x00" in header:
+                is_binary = True
+            else:
+                try:
+                    header.decode("utf-8", errors="strict")
+                    is_binary = False
+                except UnicodeDecodeError:
+                    is_binary = True
+        except Exception:
+            # If even the header read fails, default to "looks binary" so the
+            # UI shows the preview-not-available branch instead of attempting
+            # a follow-up content fetch that will likely also fail.
+            is_binary = True
     # The frontend treats binary files as "preview not available" and never
     # reads the bytes, so omit the base64 content by default to keep responses
     # small. Callers that genuinely need the bytes can pass include_content=true.

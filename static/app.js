@@ -1628,9 +1628,21 @@ async function askApproval(req) {
             <div class="diff-col diff-col-new"><strong>After (${req.byte_count} bytes)</strong><pre>${escape(req.preview || "")}</pre></div>
           </div>`;
       }
+      // Remember the previously focused element so we can restore focus on close
+      const previousFocus = document.activeElement;
       modal.hidden = false;
       acceptBtn.focus();
-      const cleanup = () => { modal.hidden = true; state.pendingDialogCancel = null; };
+      // Trap focus inside the diff modal while it's open, matching the
+      // accessibility behavior of showDialog().
+      modal.addEventListener("keydown", trapFocus);
+      const cleanup = () => {
+        modal.removeEventListener("keydown", trapFocus);
+        modal.hidden = true;
+        state.pendingDialogCancel = null;
+        if (previousFocus && typeof previousFocus.focus === "function") {
+          try { previousFocus.focus(); } catch (_) { /* ignore */ }
+        }
+      };
       acceptBtn.onclick = () => { cleanup(); resolve({ approved: true }); };
       rejectBtn.onclick = () => { cleanup(); resolve({ approved: false }); };
       // Escape (via global handler) cancels with deny
