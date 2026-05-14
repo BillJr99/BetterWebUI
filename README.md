@@ -30,6 +30,56 @@ and audio, calling MCP servers — without having to be a developer.
 - **Local shell execution** — bash on macOS/Linux, PowerShell on Windows.
   Every command requires a one-click approval before it runs.
 
+## Service Integrations
+
+BetterWebUI integrates with three external AI services via REST APIs, exposing them
+at `/api/services/*` endpoints that the LLM can call through tool use or slash commands.
+
+| Service | Env var | Default URL | Purpose |
+|---|---|---|---|
+| CognitiveLoopKernel (CLK) | `CLK_BASE_URL` | `http://localhost:8001` | Deep research loops & multi-step workflows |
+| AutoGUI | `AUTOGUI_BASE_URL` | `http://localhost:8002` | Desktop GUI automation via ReAct |
+| OSScreenObserver (OSSO) | `OSSO_BASE_URL` | `http://localhost:5001` | Screen reading & accessibility inspection |
+
+### Integrated endpoints
+
+| Method | Path | Service |
+|---|---|---|
+| GET | `/api/services/health` | All (aggregated health check) |
+| GET | `/api/services/clk/workflows` | CLK |
+| POST | `/api/services/clk/research` | CLK |
+| GET | `/api/services/clk/research/{id}` | CLK |
+| GET | `/api/services/clk/research/{id}/stream` | CLK (SSE) |
+| GET | `/api/services/clk/research/{id}/artifacts` | CLK |
+| POST | `/api/services/clk/research/{id}/cancel` | CLK |
+| POST | `/api/services/autogui/task` | AutoGUI |
+| GET | `/api/services/autogui/task/{id}` | AutoGUI |
+| GET | `/api/services/autogui/task/{id}/stream` | AutoGUI (SSE) |
+| POST | `/api/services/autogui/task/{id}/cancel` | AutoGUI |
+| GET | `/api/services/autogui/tools` | AutoGUI |
+| GET | `/api/services/osso/windows` | OSSO |
+| GET | `/api/services/osso/description` | OSSO |
+| GET | `/api/services/osso/structure` | OSSO |
+| GET | `/api/services/osso/screenshot` | OSSO |
+| POST | `/api/services/osso/action` | OSSO |
+| GET | `/api/services/osso/capabilities` | OSSO |
+| GET | `/api/services/tools` | All (LLM tool specs) |
+
+### Slash commands
+
+When typing in the chat, prefix your message with a slash command to route directly
+to a service:
+
+- `/research <topic>` — starts a CLK research workflow
+- `/observe` — returns a description of the current screen via OSSO
+- `/automate <task>` — sends a GUI automation task to AutoGUI (dry-run by default)
+
+### Deployment
+
+See [deploy/README.md](deploy/README.md) for the full integration deployment guide,
+including Docker Compose configuration and the `bootstrap.sh` script for cloning
+sibling repositories.
+
 ## First-time setup
 
 You need an **OpenWebUI instance you can reach** and its **API key**
@@ -214,6 +264,7 @@ betterwebui/
 ├── app.py              # backend (FastAPI)
 ├── static/             # frontend (HTML/CSS/JS, no build step)
 ├── skills/             # your skills, as .md files
+├── services/           # integration clients (CLK, AutoGUI, OSSO)
 ├── data/
 │   ├── config.json         # your settings (API key lives here)
 │   ├── system_prompts.json
