@@ -1,10 +1,15 @@
 """
 BetterWebUI — a friendlier OpenWebUI front-end with skills, custom system
-prompts, multimodal generation, MCP-style tooling, and gated shell execution.
+prompts, multimodal generation, MCP-style tooling, gated shell execution,
+visible task plans, file-tree/diff/checkpoints, plan mode, subagents,
+workspace bundles, conversation search/pinning/forking, background tasks,
+per-turn telemetry, onboarding wizard, and accessibility features.
 """
 
 import asyncio
 import base64
+import hashlib
+import io
 import json
 import os
 import platform
@@ -13,14 +18,15 @@ import subprocess
 import sys
 import time
 import uuid
+import zipfile
 from pathlib import Path
 from typing import Any, AsyncGenerator, Optional
 
 import aiofiles
 import frontmatter
 import httpx
-from fastapi import FastAPI, HTTPException, Request, UploadFile, File
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File, BackgroundTasks
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -28,14 +34,17 @@ ROOT = Path(__file__).parent.resolve()
 DATA_DIR = ROOT / "data"
 SKILLS_DIR = ROOT / "skills"
 UPLOADS_DIR = DATA_DIR / "uploads"
+CHECKPOINTS_DIR = DATA_DIR / "checkpoints"
+TASKS_DIR = DATA_DIR / "tasks"
 CONFIG_PATH = DATA_DIR / "config.json"
 PROMPTS_PATH = DATA_DIR / "system_prompts.json"
 CONVERSATIONS_PATH = DATA_DIR / "conversations.json"
 WORKSPACES_PATH = DATA_DIR / "workspaces.json"
 MCP_PATH = DATA_DIR / "mcp_servers.json"
 CLI_PATH = DATA_DIR / "cli_tools.json"
+BRANDING_PATH = DATA_DIR / "branding.json"
 
-for d in (DATA_DIR, SKILLS_DIR, UPLOADS_DIR):
+for d in (DATA_DIR, SKILLS_DIR, UPLOADS_DIR, CHECKPOINTS_DIR, TASKS_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
 
@@ -72,16 +81,15 @@ def load_config() -> dict:
             "shell_enabled": True,
             "consensus_runs": 1,
             "api_profile": None,
+            "chat_mode": "approve-each",
+            "onboarding_done": False,
+            "display": {},
         },
     )
 
 
 # ---------------------------------------------------------------------------
 # OpenWebUI endpoint discovery
-#
-# Different OpenWebUI versions and proxy configurations expose the
-# OpenAI-compatible API at different prefixes. We probe known profiles and
-# cache the first one that returns a sensible models list.
 # ---------------------------------------------------------------------------
 
 ENDPOINT_PROFILES: list[dict] = [
@@ -92,6 +100,7 @@ ENDPOINT_PROFILES: list[dict] = [
         "chat": "/api/chat/completions",
         "images": "/api/v1/images/generations",
         "audio": "/api/v1/audio/speech",
+        "transcribe": "/api/v1/audio/transcriptions",
     },
     {
         "name": "openwebui-openai",
@@ -100,6 +109,7 @@ ENDPOINT_PROFILES: list[dict] = [
         "chat": "/openai/v1/chat/completions",
         "images": "/openai/v1/images/generations",
         "audio": "/openai/v1/audio/speech",
+        "transcribe": "/openai/v1/audio/transcriptions",
     },
     {
         "name": "openai-v1",
@@ -108,6 +118,7 @@ ENDPOINT_PROFILES: list[dict] = [
         "chat": "/v1/chat/completions",
         "images": "/v1/images/generations",
         "audio": "/v1/audio/speech",
+        "transcribe": "/v1/audio/transcriptions",
     },
     {
         "name": "api-v1",
@@ -116,17 +127,15 @@ ENDPOINT_PROFILES: list[dict] = [
         "chat": "/api/v1/chat/completions",
         "images": "/api/v1/images/generations",
         "audio": "/api/v1/audio/speech",
+        "transcribe": "/api/v1/audio/transcriptions",
     },
 ]
 
 
 def normalize_base_url(url: str) -> str:
-    """Strip trailing slashes and common API path suffixes the user may have
-    pasted in. We want just the host root."""
     if not url:
         return ""
     url = url.strip().rstrip("/")
-    # Order matters: longest matches first.
     for suffix in ("/api/v1", "/openai/v1", "/api", "/v1", "/openai"):
         if url.endswith(suffix):
             url = url[: -len(suffix)]
@@ -135,8 +144,6 @@ def normalize_base_url(url: str) -> str:
 
 
 async def discover_profile(base: str, api_key: str) -> Optional[dict]:
-    """Probe each known profile and return the first that yields a list of
-    models. Returns None if nothing works."""
     if not base:
         return None
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
@@ -159,7 +166,6 @@ async def discover_profile(base: str, api_key: str) -> Optional[dict]:
 
 
 def active_profile(config: dict) -> dict:
-    """Return the cached profile, or fall back to the OpenWebUI native one."""
     profile = config.get("api_profile")
     if isinstance(profile, dict) and "models" in profile:
         return profile
@@ -203,9 +209,7 @@ def load_cli_tools() -> dict:
 
 
 # ---------------------------------------------------------------------------
-# MCP server registry (well-known servers a user can install with one click).
-# Most run via npx (Node) or uvx (Python via uv). The launcher checks for these
-# at runtime; we surface clear errors if they're missing.
+# MCP server registry
 # ---------------------------------------------------------------------------
 
 MCP_REGISTRY: list[dict] = [
@@ -303,9 +307,7 @@ MCP_REGISTRY: list[dict] = [
 
 
 # ---------------------------------------------------------------------------
-# CLI shortcuts registry — common command-line tools the user can register so
-# the assistant knows they're available and how to call them. The model invokes
-# them via the cli_call tool, which routes through execute_shell with approval.
+# CLI shortcuts registry
 # ---------------------------------------------------------------------------
 
 CLI_REGISTRY: list[dict] = [
@@ -367,11 +369,74 @@ CLI_REGISTRY: list[dict] = [
     },
 ]
 
+# Onboarding workspace templates (use-case presets)
+ONBOARDING_TEMPLATES: list[dict] = [
+    {
+        "id": "grading",
+        "name": "Grading",
+        "description": "Grade and give feedback on student work.",
+        "system_prompt": (
+            "You are a grading assistant for a higher-ed instructor. "
+            "Be constructive, specific, and aligned with the rubric provided. "
+            "Use load_skill to load the grading-rubric skill when grading."
+        ),
+        "skills": ["grading-rubric"],
+        "cli": [],
+        "mcp": [],
+    },
+    {
+        "id": "research",
+        "name": "Research",
+        "description": "Find sources, summarize papers, manage citations.",
+        "system_prompt": (
+            "You are a research assistant for an academic. Help find, summarize, "
+            "and cite sources. Use load_skill for research-citations."
+        ),
+        "skills": ["research-citations"],
+        "cli": [],
+        "mcp": ["fetch", "brave-search"],
+    },
+    {
+        "id": "course-prep",
+        "name": "Course Prep",
+        "description": "Write syllabi, slides, lecture notes, and assignments.",
+        "system_prompt": (
+            "You are a course-preparation assistant. Help draft syllabi, "
+            "lesson plans, slides, and assignments."
+        ),
+        "skills": [],
+        "cli": ["pandoc"],
+        "mcp": [],
+    },
+    {
+        "id": "writing",
+        "name": "Writing",
+        "description": "Draft, edit, and polish academic or professional writing.",
+        "system_prompt": (
+            "You are a writing coach and editor. Help draft, revise, "
+            "and polish documents."
+        ),
+        "skills": [],
+        "cli": ["pandoc"],
+        "mcp": [],
+    },
+    {
+        "id": "coding",
+        "name": "Coding",
+        "description": "Write, debug, and explain code.",
+        "system_prompt": (
+            "You are a coding assistant. Help write, debug, and explain code. "
+            "Use the computer-helper skill for running commands on the user's machine."
+        ),
+        "skills": ["computer-helper"],
+        "cli": ["git", "rg"],
+        "mcp": ["filesystem", "git"],
+    },
+]
+
 
 # ---------------------------------------------------------------------------
-# Minimal MCP stdio JSON-RPC client. Spawns the server, runs initialize and
-# tools/list, and exposes call_tool. We don't pull in the full MCP SDK — this
-# keeps the dependency footprint tiny.
+# MCP stdio client
 # ---------------------------------------------------------------------------
 
 class MCPStdioClient:
@@ -413,7 +478,7 @@ class MCPStdioClient:
         await self._call("initialize", {
             "protocolVersion": "2024-11-05",
             "capabilities": {},
-            "clientInfo": {"name": "BetterWebUI", "version": "0.1"},
+            "clientInfo": {"name": "BetterWebUI", "version": "0.2"},
         })
         await self._notify("notifications/initialized", {})
         result = await self._call("tools/list", {})
@@ -472,21 +537,16 @@ class MCPStdioClient:
 
 
 class MCPManager:
-    """Holds running MCPStdioClients keyed by server name. Reconcile against
-    the current persisted server list."""
-
     def __init__(self) -> None:
         self.clients: dict[str, MCPStdioClient] = {}
 
     async def reconcile(self) -> None:
         cfg = load_mcp_servers()
         wanted = {s["name"]: s for s in cfg.get("servers", []) if s.get("enabled", True)}
-        # Stop removed/disabled
         for name in list(self.clients):
             if name not in wanted:
                 await self.clients[name].stop()
                 del self.clients[name]
-        # Start newly added/enabled
         for name, s in wanted.items():
             if name in self.clients:
                 continue
@@ -537,11 +597,23 @@ class MCPManager:
             result = await client.call_tool(tool_name, args)
         except Exception as exc:
             return {"error": f"MCP call failed: {exc}"}
-        # The MCP tools/call result has a 'content' field; pass through.
         return result if isinstance(result, dict) else {"result": result}
 
 
 mcp_manager = MCPManager()
+
+# ---------------------------------------------------------------------------
+# Session-level in-memory stores
+# ---------------------------------------------------------------------------
+
+# Commands trusted for the duration of this server session
+_session_trusted_commands: set[str] = set()
+
+# Explanation cache keyed by command hash
+_command_explanation_cache: dict[str, str] = {}
+
+# Background task store: task_id -> {status, events, ...}
+_background_tasks: dict[str, dict] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -553,23 +625,19 @@ def list_skill_files() -> list[dict]:
     for path in sorted(SKILLS_DIR.glob("*.md")):
         try:
             post = frontmatter.load(path)
-            skills.append(
-                {
-                    "id": path.stem,
-                    "name": post.get("name", path.stem),
-                    "description": post.get("description", ""),
-                    "filename": path.name,
-                }
-            )
+            skills.append({
+                "id": path.stem,
+                "name": post.get("name", path.stem),
+                "description": post.get("description", ""),
+                "filename": path.name,
+            })
         except Exception as exc:
-            skills.append(
-                {
-                    "id": path.stem,
-                    "name": path.stem,
-                    "description": f"(could not parse: {exc})",
-                    "filename": path.name,
-                }
-            )
+            skills.append({
+                "id": path.stem,
+                "name": path.stem,
+                "description": f"(could not parse: {exc})",
+                "filename": path.name,
+            })
     return skills
 
 
@@ -586,8 +654,43 @@ def load_skill_content(skill_id: str) -> Optional[dict]:
     }
 
 
+def _lint_skills() -> list[dict]:
+    issues = []
+    for path in sorted(SKILLS_DIR.glob("*.md")):
+        try:
+            post = frontmatter.load(path)
+            if not post.get("name"):
+                issues.append({"type": "skill", "id": path.stem, "issue": "Missing 'name' in frontmatter"})
+            if not post.get("description"):
+                issues.append({"type": "skill", "id": path.stem, "issue": "Missing 'description' in frontmatter"})
+        except Exception as exc:
+            issues.append({"type": "skill", "id": path.stem, "issue": f"Parse error: {exc}"})
+    return issues
+
+
+def _lint_mcp() -> list[dict]:
+    issues = []
+    for s in load_mcp_servers().get("servers", []):
+        if not s.get("command"):
+            issues.append({"type": "mcp", "id": s.get("name", "?"), "issue": "Missing 'command'"})
+        cmd = s.get("command", "")
+        if cmd in ("npx", "node") and not shutil.which("npx") and not shutil.which("node"):
+            issues.append({"type": "mcp", "id": s["name"], "issue": "npx/node not found — install Node.js"})
+        if cmd in ("uvx", "uv") and not shutil.which("uvx") and not shutil.which("uv"):
+            issues.append({"type": "mcp", "id": s["name"], "issue": "uvx/uv not found — install uv"})
+    return issues
+
+
+def _lint_cli() -> list[dict]:
+    issues = []
+    for c in load_cli_tools().get("tools", []):
+        if "{args}" not in c.get("command_template", ""):
+            issues.append({"type": "cli", "id": c.get("id", "?"), "issue": "command_template does not contain {args}"})
+    return issues
+
+
 # ---------------------------------------------------------------------------
-# Tool definitions and the system-prompt suffix that explains how to use them
+# Tool definitions and system-prompt builders
 # ---------------------------------------------------------------------------
 
 TOOL_PROTOCOL = """
@@ -603,6 +706,20 @@ Output at most one tool call per assistant turn. Speak naturally to the user
 before and after tool calls. Never invent tool output — wait for the result.
 
 Available tools:
+
+- update_task_plan: update the visible task plan the user sees in the right-hand
+  panel. Call this when starting ANY multi-step task (to lay out the steps) and
+  after each step (to tick items done, mark in_progress, or flag blocked).
+  ALWAYS start a complex task by calling this first.
+  Args: {"items": [{"id": "step-1", "title": "Step description",
+  "status": "pending|in_progress|done|blocked", "note": "optional detail"}]}.
+
+- spawn_subagent: run up to 3 read-only parallel sub-tasks to research,
+  compare, or explore. Useful for "compare these rubrics", "research these
+  topics", "check these files". The main conversation pauses until all
+  subagents finish, then you get a combined summary.
+  Args: {"kind": "explore|compare", "prompt": "what to investigate",
+  "items": ["item1", "item2"] (optional for compare)}.
 
 - execute_shell: run a shell command on the user's computer. The host OS is
   detected automatically (bash on Linux/macOS, PowerShell on Windows). USER
@@ -620,7 +737,8 @@ Available tools:
   "multiple": false}. Use accept="image/*" or "text/*,.md,.csv" to filter.
 
 - write_file: send the user a file to download to their computer. The browser
-  saves it (REQUIRES APPROVAL). Args: {"filename": "name.ext", "content":
+  saves it (REQUIRES APPROVAL). If a project root is set, the file is also
+  checkpointed for undo. Args: {"filename": "name.ext", "content":
   "...", "mime": "text/plain"}.
 
 - load_skill: load the full content of a named skill so you can follow its
@@ -639,10 +757,25 @@ Available tools:
   "name": "tool_name", "arguments": {...}}.
 
 - cli_call: run one of the user's pre-registered CLI shortcuts. Routes
-  through execute_shell with approval. Args: {"id": "shortcut_id",
-  "args": "command-line arguments"}.
+  through execute_shell with approval (unless the shortcut has always-allow
+  policy). Args: {"id": "shortcut_id", "args": "command-line arguments"}.
 """.strip()
 
+PLAN_MODE_BLOCK = """
+⚠️ PLAN MODE IS ACTIVE.
+
+You may ONLY call: update_task_plan, read_file, load_skill.
+Do NOT call any side-effecting tool: execute_shell, write_file,
+generate_image, generate_audio, cli_call, mcp_call (if it writes).
+
+Your job in plan mode is to:
+1. Use update_task_plan to lay out a complete step-by-step plan.
+2. Explain your approach clearly in plain English.
+3. Tell the user to switch to "Approve-each" mode (the chip in the chat header)
+   when they are ready to execute.
+
+Do NOT execute anything — plan only.
+""".strip()
 
 RENDERING_PROTOCOL = r"""
 The user sees your replies rendered as Markdown with LaTeX/KaTeX for math.
@@ -721,11 +854,11 @@ def resolve_active_workspace(config: dict) -> Optional[dict]:
     return next((w for w in data["workspaces"] if w["id"] == wid), None)
 
 
-def build_system_prompt(config: dict, prompts: dict) -> str:
+def build_system_prompt(config: dict, prompts: dict, mode: str = "approve-each") -> str:
     parts: list[str] = []
     workspace = resolve_active_workspace(config)
 
-    # 1. The system prompt itself — workspace overrides default.
+    # 1. The system prompt itself
     prompt_id = (workspace or {}).get("system_prompt_id") or config.get("active_prompt_id") or "default"
     chosen = next(
         (p for p in prompts["prompts"] if p["id"] == prompt_id),
@@ -740,7 +873,12 @@ def build_system_prompt(config: dict, prompts: dict) -> str:
             + (f" {workspace['description']}" if workspace.get("description") else "")
         )
 
-    # 1.5 Response style.
+    # Plan mode block (injected before other tools if active)
+    effective_mode = mode or (workspace or {}).get("mode") or config.get("chat_mode", "approve-each")
+    if effective_mode == "plan":
+        parts.append(PLAN_MODE_BLOCK)
+
+    # Response style
     parts.append(
         "Always attempt a complete, useful response to the user's request before "
         "asking clarifying questions. If something is ambiguous, make a reasonable "
@@ -748,10 +886,10 @@ def build_system_prompt(config: dict, prompts: dict) -> str:
         "the end of your reply, after the substantive response."
     )
 
-    # 1.6 Rendering rules — prominent so the model leans on Markdown + LaTeX.
+    # Rendering rules
     parts.append(RENDERING_PROTOCOL)
 
-    # 2. Available skills.
+    # 2. Available skills
     if workspace:
         active_skill_ids = workspace.get("active_skills") or []
     else:
@@ -764,32 +902,29 @@ def build_system_prompt(config: dict, prompts: dict) -> str:
             if not active_skill_ids or s["id"] in active_skill_ids
         )
         if listing:
-            parts.append(
-                "Skills you may invoke via load_skill (id: when to use):\n" + listing
-            )
+            parts.append("Skills you may invoke via load_skill (id: when to use):\n" + listing)
 
-    # 3. Available MCP tools (only those whose server is running and, if a
-    #    workspace is active, listed in the workspace).
+    # 3. MCP tools
     allowed_servers = (workspace or {}).get("active_mcp_servers")
     mcp_tools = mcp_manager.list_all_tools(allowed_servers=allowed_servers)
     if mcp_tools:
         listing = "\n".join(
             f"- {t['server']}.{t['name']}: {t['description']}" for t in mcp_tools
         )
-        parts.append(
-            "MCP tools available via mcp_call (server.name: description):\n" + listing
-        )
+        parts.append("MCP tools available via mcp_call (server.name: description):\n" + listing)
 
-    # 4. Available CLI shortcuts.
+    # 4. CLI shortcuts
     cli_data = load_cli_tools()
     cli_ids = (workspace or {}).get("active_cli_tools")
     cli_listing = []
     for c in cli_data.get("tools", []):
         if cli_ids is not None and c["id"] not in cli_ids:
             continue
+        policy = c.get("approval_policy", "ask")
+        policy_note = " [always-allowed]" if policy == "always" else ""
         cli_listing.append(
             f"- {c['id']} ({c.get('name', c['id'])}): {c.get('description', '')} "
-            f"[template: {c.get('command_template', '')}]"
+            f"[template: {c.get('command_template', '')}]{policy_note}"
         )
     if cli_listing:
         parts.append(
@@ -803,11 +938,10 @@ def build_system_prompt(config: dict, prompts: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Tool-call parsing from model output
+# Tool-call parsing
 # ---------------------------------------------------------------------------
 
 def extract_tool_call(text: str) -> Optional[dict]:
-    """Find the first ```tool ...``` block and parse its JSON."""
     marker = "```tool"
     start = text.find(marker)
     if start == -1:
@@ -832,12 +966,10 @@ def extract_tool_call(text: str) -> Optional[dict]:
 
 
 # ---------------------------------------------------------------------------
-# Tool implementations
+# Approval / file-response state
 # ---------------------------------------------------------------------------
 
 class ApprovalState:
-    """Tracks pending tool approvals keyed by approval_id."""
-
     def __init__(self) -> None:
         self.events: dict[str, asyncio.Event] = {}
         self.results: dict[str, bool] = {}
@@ -866,10 +998,6 @@ approvals = ApprovalState()
 
 
 class FileResponseStore:
-    """Pending requests for the user to choose file(s) via the browser
-    file picker. Same wait/resolve pattern as ApprovalState, but the result
-    is a list of {filename, content_type, content_b64} payloads."""
-
     def __init__(self) -> None:
         self.events: dict[str, asyncio.Event] = {}
         self.results: dict[str, list[dict]] = {}
@@ -897,8 +1025,11 @@ class FileResponseStore:
 file_responses = FileResponseStore()
 
 
+# ---------------------------------------------------------------------------
+# Shell / OS helpers
+# ---------------------------------------------------------------------------
+
 def detect_shell() -> tuple[list[str], str]:
-    """Return (argv prefix, friendly name) for the host shell."""
     if platform.system() == "Windows":
         if shutil.which("pwsh"):
             return (["pwsh", "-NoProfile", "-Command"], "PowerShell")
@@ -951,10 +1082,44 @@ def _slug(text: str, fallback: str = "image") -> str:
     return (out or fallback)[:48]
 
 
+# ---------------------------------------------------------------------------
+# Checkpoint helpers (project file versioning)
+# ---------------------------------------------------------------------------
+
+def _checkpoint_file(workspace_id: str, filename: str, content: str) -> str:
+    """Save a checkpoint snapshot. Returns the checkpoint id."""
+    ckpt_dir = CHECKPOINTS_DIR / workspace_id / _slug(filename, "file")
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    ckpt_id = f"{int(time.time())}_{uuid.uuid4().hex[:6]}"
+    ckpt_path = ckpt_dir / f"{ckpt_id}.txt"
+    ckpt_path.write_text(content, encoding="utf-8")
+    return ckpt_id
+
+
+def _list_checkpoints(workspace_id: str, filename: str) -> list[dict]:
+    ckpt_dir = CHECKPOINTS_DIR / workspace_id / _slug(filename, "file")
+    if not ckpt_dir.exists():
+        return []
+    out = []
+    for p in sorted(ckpt_dir.glob("*.txt"), reverse=True)[:20]:
+        parts = p.stem.split("_", 1)
+        ts = int(parts[0]) if parts else 0
+        out.append({"id": p.stem, "filename": filename, "saved_at": ts})
+    return out
+
+
+def _get_checkpoint(workspace_id: str, filename: str, ckpt_id: str) -> Optional[str]:
+    ckpt_path = CHECKPOINTS_DIR / workspace_id / _slug(filename, "file") / f"{ckpt_id}.txt"
+    if not ckpt_path.exists():
+        return None
+    return ckpt_path.read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# OpenWebUI proxy helpers
+# ---------------------------------------------------------------------------
+
 async def call_openwebui_image(prompt: str, size: str, config: dict) -> dict:
-    """Generate an image and return its bytes inline as base64 — the browser
-    will download it to the user's Downloads folder. Nothing is saved on
-    the server."""
     base = normalize_base_url(config["base_url"])
     profile = active_profile(config)
     headers = {"Authorization": f"Bearer {config['api_key']}"}
@@ -962,28 +1127,17 @@ async def call_openwebui_image(prompt: str, size: str, config: dict) -> dict:
     if config.get("image_model"):
         payload["model"] = config["image_model"]
     async with httpx.AsyncClient(timeout=240.0) as client:
-        resp = await client.post(
-            f"{base}{profile['images']}", json=payload, headers=headers
-        )
+        resp = await client.post(f"{base}{profile['images']}", json=payload, headers=headers)
     if resp.status_code != 200:
-        raise HTTPException(
-            status_code=resp.status_code,
-            detail=f"Image generation failed: {resp.text[:500]}",
-        )
+        raise HTTPException(status_code=resp.status_code, detail=f"Image generation failed: {resp.text[:500]}")
     body = resp.json()
-    # Some backends return a bare list; others wrap it in {"data": [...]}.
     if isinstance(body, list):
         item = body[0] if body else {}
     else:
         item = (body.get("data") or [{}])[0] if isinstance(body, dict) else {}
     filename = f"{_slug(prompt)}-{uuid.uuid4().hex[:6]}.png"
     if "b64_json" in item:
-        return {
-            "filename": filename,
-            "mime": "image/png",
-            "data_b64": item["b64_json"],
-            "prompt": prompt,
-        }
+        return {"filename": filename, "mime": "image/png", "data_b64": item["b64_json"], "prompt": prompt}
     if "url" in item:
         async with httpx.AsyncClient(timeout=180.0) as client:
             img_resp = await client.get(item["url"])
@@ -1005,14 +1159,9 @@ async def call_openwebui_audio(text: str, voice: str, config: dict) -> dict:
     headers = {"Authorization": f"Bearer {config['api_key']}"}
     payload = {"input": text, "voice": voice or "alloy", "model": "tts-1"}
     async with httpx.AsyncClient(timeout=240.0) as client:
-        resp = await client.post(
-            f"{base}{profile['audio']}", json=payload, headers=headers
-        )
+        resp = await client.post(f"{base}{profile['audio']}", json=payload, headers=headers)
     if resp.status_code != 200:
-        raise HTTPException(
-            status_code=resp.status_code,
-            detail=f"Audio generation failed: {resp.text[:500]}",
-        )
+        raise HTTPException(status_code=resp.status_code, detail=f"Audio generation failed: {resp.text[:500]}")
     filename = f"{_slug(text, 'speech')}-{uuid.uuid4().hex[:6]}.mp3"
     return {
         "filename": filename,
@@ -1022,11 +1171,160 @@ async def call_openwebui_audio(text: str, voice: str, config: dict) -> dict:
     }
 
 
-async def execute_tool(
-    call: dict, config: dict, send_event
-) -> dict:
+async def chat_complete(messages: list, model: str, config: dict) -> tuple[str, dict]:
+    """Returns (text, usage_dict)."""
+    base = normalize_base_url(config["base_url"])
+    profile = active_profile(config)
+    headers = {"Authorization": f"Bearer {config['api_key']}"}
+    payload = {"model": model, "messages": messages, "stream": False}
+    t0 = time.time()
+    async with httpx.AsyncClient(timeout=300.0, follow_redirects=True) as client:
+        resp = await client.post(f"{base}{profile['chat']}", json=payload, headers=headers)
+    elapsed_ms = int((time.time() - t0) * 1000)
+    if resp.status_code != 200:
+        raise HTTPException(
+            status_code=resp.status_code,
+            detail=f"Chat call failed ({profile['name']}): {resp.text[:500]}",
+        )
+    try:
+        body = resp.json()
+    except (json.JSONDecodeError, ValueError):
+        raise HTTPException(status_code=502, detail="Chat endpoint returned non-JSON.")
+    try:
+        text = body["choices"][0]["message"]["content"] or ""
+    except (KeyError, IndexError):
+        text = json.dumps(body)
+    usage = body.get("usage") or {}
+    usage["elapsed_ms"] = elapsed_ms
+    return text, usage
+
+
+# ---------------------------------------------------------------------------
+# Subagent execution
+# ---------------------------------------------------------------------------
+
+async def run_subagent_loop(
+    prompt: str, model: str, config: dict, max_steps: int = 4
+) -> str:
+    """Run a read-only sub-loop. Returns final assistant text."""
+    sub_system = (
+        "You are a read-only research subagent. You may call read_file, load_skill, "
+        "and mcp_call on read-only servers. Do NOT call execute_shell, write_file, "
+        "generate_image, generate_audio, or cli_call. "
+        "Produce a concise summary of your findings when done.\n\n"
+        + RENDERING_PROTOCOL
+    )
+    history = [{"role": "user", "content": prompt}]
+    prompts = load_prompts()
+    for _ in range(max_steps):
+        messages = [{"role": "system", "content": sub_system}] + history
+        text, _ = await chat_complete(messages, model, config)
+        history.append({"role": "assistant", "content": text})
+        call = extract_tool_call(text)
+        if not call:
+            return text
+        # Only allow read-only tools
+        if call["tool"] in ("execute_shell", "write_file", "generate_image", "generate_audio", "cli_call"):
+            history.append({
+                "role": "user",
+                "content": f"[Tool '{call['tool']}' blocked — subagents are read-only]"
+            })
+            continue
+        if call["tool"] == "read_file":
+            result = {"error": "Subagents cannot use the file picker. Summarize from context instead."}
+        elif call["tool"] == "load_skill":
+            skill = load_skill_content(call["args"].get("skill_id", ""))
+            result = skill or {"error": "Skill not found."}
+        elif call["tool"] == "mcp_call":
+            result = await mcp_manager.call(
+                call["args"].get("server", ""),
+                call["args"].get("name", ""),
+                call["args"].get("arguments") or {},
+            )
+        else:
+            result = {"error": f"Unknown tool: {call['tool']}"}
+        history.append({
+            "role": "user",
+            "content": f"[Tool '{call['tool']}' result]\n```json\n{json.dumps(result, indent=2)[:4000]}\n```"
+        })
+    # Return last assistant turn
+    for m in reversed(history):
+        if m["role"] == "assistant":
+            return m["content"]
+    return "(subagent produced no output)"
+
+
+# ---------------------------------------------------------------------------
+# Permission / approval helpers
+# ---------------------------------------------------------------------------
+
+def _should_skip_approval(command: str, cli_id: Optional[str], config: dict) -> bool:
+    """Return True if this command/CLI can skip the approval dialog."""
+    if command in _session_trusted_commands:
+        return True
+    if cli_id:
+        cli_data = load_cli_tools()
+        cli = next((c for c in cli_data.get("tools", []) if c["id"] == cli_id), None)
+        if cli and cli.get("approval_policy") == "always":
+            return True
+    workspace = resolve_active_workspace(config)
+    if workspace and workspace.get("shell_approval_policy") == "always":
+        return True
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Tool execution
+# ---------------------------------------------------------------------------
+
+async def execute_tool(call: dict, config: dict, send_event, mode: str = "approve-each") -> dict:
     tool = call["tool"]
     args = call["args"]
+
+    # Plan mode: block side-effecting tools
+    if mode == "plan" and tool in (
+        "execute_shell", "write_file", "generate_image",
+        "generate_audio", "cli_call", "mcp_call",
+    ):
+        return {"error": f"Tool '{tool}' is blocked in plan mode. Switch to Approve-each to execute."}
+
+    if tool == "update_task_plan":
+        items = args.get("items", [])
+        await send_event("task_plan", {"items": items})
+        return {"ok": True, "items_count": len(items)}
+
+    if tool == "spawn_subagent":
+        kind = args.get("kind", "explore")
+        prompt = args.get("prompt", "")
+        items = args.get("items") or []
+        model = config.get("default_model", "")
+        if not model:
+            return {"error": "No default model set — cannot spawn subagents."}
+
+        # Build per-subagent prompts
+        if items and kind == "compare":
+            subprompts = [
+                f"Investigate and summarize: {item}\n\nContext: {prompt}"
+                for item in items[:3]
+            ]
+        else:
+            subprompts = [prompt]
+
+        await send_event("subagent_start", {"kind": kind, "count": len(subprompts)})
+        results = await asyncio.gather(
+            *[run_subagent_loop(sp, model, config) for sp in subprompts],
+            return_exceptions=True,
+        )
+        texts = []
+        for i, r in enumerate(results):
+            item_label = items[i] if i < len(items) else f"Task {i+1}"
+            if isinstance(r, Exception):
+                texts.append(f"**{item_label}**: Error — {r}")
+            else:
+                texts.append(f"**{item_label}**:\n{r}")
+        combined = "\n\n---\n\n".join(texts)
+        await send_event("subagent_result", {"kind": kind, "count": len(subprompts), "combined": combined})
+        return {"kind": kind, "results_count": len(subprompts), "combined": combined}
 
     if tool == "execute_shell":
         if not config.get("shell_enabled", True):
@@ -1035,24 +1333,25 @@ async def execute_tool(
         reason = args.get("reason", "")
         if not command:
             return {"error": "No command provided."}
-        aid = approvals.new()
-        await send_event(
-            "approval_request",
-            {
+
+        if _should_skip_approval(command, None, config):
+            await send_event("tool_running", {"tool": "execute_shell", "command": command, "auto_approved": True})
+        else:
+            aid = approvals.new()
+            await send_event("approval_request", {
                 "approval_id": aid,
                 "tool": "execute_shell",
                 "command": command,
                 "reason": reason,
                 "shell": detect_shell()[1],
-            },
-        )
-        approved = await approvals.wait(aid)
-        if not approved:
-            return {"error": "User denied this command."}
-        await send_event("tool_running", {"tool": "execute_shell", "command": command})
+            })
+            approved = await approvals.wait(aid)
+            if not approved:
+                return {"error": "User denied this command."}
+            await send_event("tool_running", {"tool": "execute_shell", "command": command})
+
         result = await run_shell(command)
-        # Auto-capture: if the command produced an image at the conventional
-        # output path, attach it to the result so it renders inline in chat.
+        # Auto-capture plot
         for _img_path in (Path("/tmp/bwui_plot.png"), ROOT / "bwui_plot.png"):
             if _img_path.exists():
                 try:
@@ -1067,15 +1366,12 @@ async def execute_tool(
 
     if tool == "read_file":
         rid = file_responses.new()
-        await send_event(
-            "file_request",
-            {
-                "request_id": rid,
-                "purpose": args.get("reason") or args.get("purpose") or "read",
-                "accept": args.get("accept", "*/*"),
-                "multiple": bool(args.get("multiple", False)),
-            },
-        )
+        await send_event("file_request", {
+            "request_id": rid,
+            "purpose": args.get("reason") or args.get("purpose") or "read",
+            "accept": args.get("accept", "*/*"),
+            "multiple": bool(args.get("multiple", False)),
+        })
         files = await file_responses.wait(rid)
         if not files:
             return {"error": "User cancelled the file picker (no files chosen)."}
@@ -1089,8 +1385,6 @@ async def execute_tool(
             if f.get("content") is not None:
                 entry["content"] = (f.get("content") or "")[:80000]
             elif f.get("data_b64"):
-                # Binary file — return base64 to the model in case it knows
-                # what to do with it (e.g. pass to a vision model). Cap size.
                 b64 = f["data_b64"]
                 entry["data_b64"] = b64[:200_000]
                 entry["truncated"] = len(b64) > 200_000
@@ -1098,35 +1392,52 @@ async def execute_tool(
         return {"files": out_files}
 
     if tool == "write_file":
-        # New behavior: stream the file to the browser as a download,
-        # rather than writing on the server. Path-based writes have been
-        # retired in favor of local download.
         filename = (args.get("filename") or args.get("path") or "file.txt").strip()
         filename = Path(filename).name or "file.txt"
         content = args.get("content", "")
         mime = args.get("mime", "text/plain")
         if not isinstance(content, str):
             content = str(content)
+
+        # Checkpoint if workspace has a project root
+        workspace = resolve_active_workspace(config)
+        project_root = (workspace or {}).get("project_root", "")
+        checkpoint_id = None
+        if project_root and workspace:
+            dest = Path(project_root) / filename
+            if dest.exists():
+                checkpoint_id = _checkpoint_file(
+                    workspace["id"], filename, dest.read_text(encoding="utf-8", errors="replace")
+                )
+
         aid = approvals.new()
-        await send_event(
-            "approval_request",
-            {
-                "approval_id": aid,
-                "tool": "write_file",
-                "filename": filename,
-                "mime": mime,
-                "preview": content[:1000],
-                "byte_count": len(content.encode("utf-8")),
-            },
-        )
+        await send_event("approval_request", {
+            "approval_id": aid,
+            "tool": "write_file",
+            "filename": filename,
+            "mime": mime,
+            "preview": content[:1000],
+            "byte_count": len(content.encode("utf-8")),
+            "checkpoint_id": checkpoint_id,
+        })
         approved = await approvals.wait(aid)
         if not approved:
             return {"error": "User denied this file write."}
+
+        # If workspace has a project_root, also write to disk there
+        if project_root and workspace:
+            dest = Path(project_root) / filename
+            try:
+                dest.write_text(content, encoding="utf-8")
+            except Exception:
+                pass
+
         return {
             "filename": filename,
             "mime": mime,
             "bytes_written": len(content.encode("utf-8")),
             "data_b64": base64.b64encode(content.encode("utf-8")).decode("ascii"),
+            "checkpoint_id": checkpoint_id,
         }
 
     if tool == "load_skill":
@@ -1138,11 +1449,7 @@ async def execute_tool(
 
     if tool == "generate_image":
         try:
-            return await call_openwebui_image(
-                args.get("prompt", ""),
-                args.get("size", "1024x1024"),
-                config,
-            )
+            return await call_openwebui_image(args.get("prompt", ""), args.get("size", "1024x1024"), config)
         except HTTPException as exc:
             return {"error": exc.detail}
 
@@ -1175,22 +1482,24 @@ async def execute_tool(
             return {"error": f"CLI shortcut '{cli_id}' is not configured."}
         template = cli.get("command_template", "{args}")
         command = template.replace("{args}", cli_args)
-        # Reuse the execute_shell approval flow.
-        aid = approvals.new()
-        await send_event(
-            "approval_request",
-            {
+
+        if _should_skip_approval(command, cli_id, config):
+            await send_event("tool_running", {"tool": "cli_call", "command": command, "auto_approved": True})
+        else:
+            aid = approvals.new()
+            await send_event("approval_request", {
                 "approval_id": aid,
                 "tool": "execute_shell",
                 "command": command,
                 "reason": f"CLI shortcut '{cli_id}': {cli.get('description', '')}",
                 "shell": detect_shell()[1],
-            },
-        )
-        approved = await approvals.wait(aid)
-        if not approved:
-            return {"error": "User denied this command."}
-        await send_event("tool_running", {"tool": "cli_call", "command": command})
+                "cli_id": cli_id,
+            })
+            approved = await approvals.wait(aid)
+            if not approved:
+                return {"error": "User denied this command."}
+            await send_event("tool_running", {"tool": "cli_call", "command": command})
+
         return await run_shell(command)
 
     return {"error": f"Unknown tool: {tool}"}
@@ -1200,12 +1509,8 @@ async def execute_tool(
 # Context-window management
 # ---------------------------------------------------------------------------
 
-# 1 token ≈ 4 chars of English text (rough approximation).
-# Set CONTEXT_TOKEN_LIMIT to match the model you're using.
-# Common values: 4_000, 8_000, 16_000, 32_000, 128_000.
-# We default to 32 K — conservative enough to work with almost any model.
 CONTEXT_TOKEN_LIMIT = 32_000
-_CONTEXT_CHAR_BUDGET = int(CONTEXT_TOKEN_LIMIT * 0.80 * 4)  # 80 % safety margin
+_CONTEXT_CHAR_BUDGET = int(CONTEXT_TOKEN_LIMIT * 0.80 * 4)
 
 
 def _count_chars(messages: list) -> int:
@@ -1222,34 +1527,25 @@ def _count_chars(messages: list) -> int:
 
 
 def trim_to_context(history: list, system_prompt: str) -> tuple[list, int]:
-    """Remove the oldest messages until the estimated token usage fits within
-    _CONTEXT_CHAR_BUDGET.  Always keeps at least the most recent 2 messages.
-    Returns (trimmed_history, number_of_messages_dropped)."""
     budget = max(_CONTEXT_CHAR_BUDGET - len(system_prompt), 4_000)
     total = _count_chars(history)
     if total <= budget:
         return history, 0
-
     trimmed = list(history)
     n_dropped = 0
-
     while total > budget and len(trimmed) > 2:
         removed = trimmed.pop(0)
         total -= _count_chars([removed])
         n_dropped += 1
-
-    # Ensure the history still starts with a user turn; shed any orphaned
-    # assistant messages left at the front by the loop above.
     while trimmed and trimmed[0].get("role") != "user":
         total -= _count_chars([trimmed[0]])
         trimmed.pop(0)
         n_dropped += 1
-
     return trimmed, n_dropped
 
 
 # ---------------------------------------------------------------------------
-# OpenWebUI proxy (chat completion + model listing)
+# OpenWebUI model listing
 # ---------------------------------------------------------------------------
 
 async def fetch_models(config: dict) -> list[dict]:
@@ -1257,18 +1553,13 @@ async def fetch_models(config: dict) -> list[dict]:
     if not base:
         raise HTTPException(400, "Set the OpenWebUI URL first.")
     api_key = config.get("api_key", "")
-
     profile = config.get("api_profile")
     if not profile:
         profile = await discover_profile(base, api_key)
         if not profile:
             raise HTTPException(
                 status_code=502,
-                detail=(
-                    "Couldn't find a working API endpoint at that URL. "
-                    "Check the URL is your OpenWebUI root (e.g. http://localhost:3000) "
-                    "and your API key has model access."
-                ),
+                detail="Couldn't find a working API endpoint at that URL.",
             )
         config["api_profile"] = profile
         config["base_url"] = base
@@ -1282,7 +1573,6 @@ async def fetch_models(config: dict) -> list[dict]:
             raise HTTPException(status_code=502, detail=f"Cannot reach OpenWebUI: {exc}")
 
     if resp.status_code != 200:
-        # Cached profile may be stale (e.g. server upgraded). Try to rediscover.
         new_profile = await discover_profile(base, api_key)
         if new_profile and new_profile != profile:
             config["api_profile"] = new_profile
@@ -1292,18 +1582,10 @@ async def fetch_models(config: dict) -> list[dict]:
             status_code=resp.status_code,
             detail=f"OpenWebUI returned {resp.status_code}: {resp.text[:300]}",
         )
-
     try:
         body = resp.json()
     except (json.JSONDecodeError, ValueError):
-        raise HTTPException(
-            status_code=502,
-            detail=(
-                f"Got a non-JSON response from {profile['models']}. "
-                "The URL probably points at a web page rather than the API."
-            ),
-        )
-
+        raise HTTPException(status_code=502, detail="Got a non-JSON response from the models endpoint.")
     raw = body.get("data") if isinstance(body, dict) else body
     out = []
     for m in raw or []:
@@ -1312,33 +1594,6 @@ async def fetch_models(config: dict) -> list[dict]:
             continue
         out.append({"id": mid, "name": m.get("name") or mid})
     return out
-
-
-async def chat_complete(messages: list, model: str, config: dict) -> str:
-    base = normalize_base_url(config["base_url"])
-    profile = active_profile(config)
-    headers = {"Authorization": f"Bearer {config['api_key']}"}
-    payload = {"model": model, "messages": messages, "stream": False}
-    async with httpx.AsyncClient(timeout=300.0, follow_redirects=True) as client:
-        resp = await client.post(
-            f"{base}{profile['chat']}", json=payload, headers=headers
-        )
-    if resp.status_code != 200:
-        raise HTTPException(
-            status_code=resp.status_code,
-            detail=f"Chat call failed ({profile['name']}): {resp.text[:500]}",
-        )
-    try:
-        body = resp.json()
-    except (json.JSONDecodeError, ValueError):
-        raise HTTPException(
-            status_code=502,
-            detail="Chat endpoint returned non-JSON. Try saving Settings again to re-detect the API.",
-        )
-    try:
-        return body["choices"][0]["message"]["content"] or ""
-    except (KeyError, IndexError):
-        return json.dumps(body)
 
 
 # ---------------------------------------------------------------------------
@@ -1350,7 +1605,6 @@ app = FastAPI(title="BetterWebUI")
 
 @app.on_event("startup")
 async def _startup() -> None:
-    # Bring up any MCP servers the user has configured (best-effort).
     try:
         await mcp_manager.reconcile()
     except Exception as exc:
@@ -1389,6 +1643,9 @@ class ConfigPatch(BaseModel):
     auto_approve_safe: Optional[bool] = None
     shell_enabled: Optional[bool] = None
     consensus_runs: Optional[int] = None
+    chat_mode: Optional[str] = None
+    onboarding_done: Optional[bool] = None
+    display: Optional[dict] = None
 
 
 def _public_config(cfg: dict) -> dict:
@@ -1426,11 +1683,8 @@ async def set_config(patch: ConfigPatch):
             cfg[k] = v
         else:
             cfg[k] = v
-
-    # Connection details changed — invalidate cached profile and rediscover.
     if url_changed or key_changed:
         cfg["api_profile"] = None
-
     if cfg.get("base_url") and cfg.get("api_key") and not cfg.get("api_profile"):
         try:
             profile = await discover_profile(cfg["base_url"], cfg["api_key"])
@@ -1438,7 +1692,6 @@ async def set_config(patch: ConfigPatch):
                 cfg["api_profile"] = profile
         except Exception:
             pass
-
     save_json(CONFIG_PATH, cfg)
     return _public_config(cfg)
 
@@ -1455,6 +1708,32 @@ async def get_models():
     except HTTPException as exc:
         return {"models": [], "error": str(exc.detail)}
     return {"models": models}
+
+
+@app.get("/api/recommend-model")
+async def recommend_model(use_case: str = "general"):
+    cfg = load_config()
+    try:
+        models = await fetch_models(cfg)
+    except HTTPException:
+        return {"recommendation": None}
+    if not models:
+        return {"recommendation": None}
+    # Simple heuristic: prefer models with "gpt-4" or "claude" in name for complex tasks,
+    # smaller models for grading/simple tasks
+    heavy = ["gpt-4", "claude-opus", "claude-3-5", "llama-3.3", "mixtral-8x22"]
+    light = ["gpt-3.5", "claude-haiku", "llama-3.1-8b", "phi", "mistral-7b"]
+    if use_case in ("research", "coding", "writing"):
+        for h in heavy:
+            m = next((x for x in models if h in x["id"].lower()), None)
+            if m:
+                return {"recommendation": m, "reason": f"This model handles complex {use_case} tasks well."}
+    else:
+        for l in light:
+            m = next((x for x in models if l in x["id"].lower()), None)
+            if m:
+                return {"recommendation": m, "reason": f"This efficient model works great for {use_case}."}
+    return {"recommendation": models[0], "reason": "Using the first available model."}
 
 
 # --- System prompts ---
@@ -1528,9 +1807,7 @@ class SkillIn(BaseModel):
 @app.post("/api/skills")
 async def create_skill(s: SkillIn):
     safe_id = "".join(c for c in s.id if c.isalnum() or c in "-_").strip("-_") or "skill"
-    body = (
-        f"---\nname: {s.name}\ndescription: {s.description}\n---\n\n{s.content}\n"
-    )
+    body = f"---\nname: {s.name}\ndescription: {s.description}\n---\n\n{s.content}\n"
     (SKILLS_DIR / f"{safe_id}.md").write_text(body, encoding="utf-8")
     return {"id": safe_id}
 
@@ -1548,6 +1825,8 @@ async def delete_skill(skill_id: str):
 class ApprovalIn(BaseModel):
     approval_id: str
     approved: bool
+    trust_session: Optional[bool] = False
+    command: Optional[str] = None
 
 
 @app.post("/api/approve")
@@ -1555,6 +1834,29 @@ async def approve(a: ApprovalIn):
     ok = approvals.resolve(a.approval_id, a.approved)
     if not ok:
         raise HTTPException(404, "Unknown approval id")
+    if a.approved and a.trust_session and a.command:
+        _session_trusted_commands.add(a.command)
+    return {"ok": True}
+
+
+class SessionTrustIn(BaseModel):
+    command: str
+
+
+@app.post("/api/session/trust")
+async def session_trust(t: SessionTrustIn):
+    _session_trusted_commands.add(t.command)
+    return {"ok": True, "trusted_count": len(_session_trusted_commands)}
+
+
+@app.get("/api/session/trust")
+async def list_session_trust():
+    return {"commands": list(_session_trusted_commands)}
+
+
+@app.delete("/api/session/trust")
+async def clear_session_trust():
+    _session_trusted_commands.clear()
     return {"ok": True}
 
 
@@ -1562,7 +1864,7 @@ async def approve(a: ApprovalIn):
 
 class FileResponseIn(BaseModel):
     request_id: str
-    files: list  # [{filename, content_type, size, content?, data_b64?}, ...]
+    files: list
 
 
 @app.post("/api/file-response")
@@ -1585,6 +1887,9 @@ class WorkspaceIn(BaseModel):
     active_cli_tools: Optional[list[str]] = None
     files: Optional[list[dict]] = None
     default_model: Optional[str] = None
+    project_root: Optional[str] = None
+    mode: Optional[str] = None
+    shell_approval_policy: Optional[str] = None
 
 
 @app.get("/api/workspaces")
@@ -1612,9 +1917,7 @@ async def upsert_workspace(w: WorkspaceIn):
     payload.setdefault("active_cli_tools", [])
     payload.setdefault("files", [])
     payload["updated_at"] = int(time.time())
-    existing_idx = next(
-        (i for i, x in enumerate(data["workspaces"]) if x["id"] == wid), None
-    )
+    existing_idx = next((i for i, x in enumerate(data["workspaces"]) if x["id"] == wid), None)
     if existing_idx is not None:
         data["workspaces"][existing_idx] = {**data["workspaces"][existing_idx], **payload}
     else:
@@ -1634,6 +1937,266 @@ async def delete_workspace(wid: str):
         cfg["active_workspace_id"] = ""
         save_json(CONFIG_PATH, cfg)
     return {"ok": True}
+
+
+@app.get("/api/workspaces/{wid}/export")
+async def export_workspace(wid: str):
+    data = load_workspaces()
+    w = next((x for x in data["workspaces"] if x["id"] == wid), None)
+    if not w:
+        raise HTTPException(404, "Workspace not found")
+    prompts = load_prompts()
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        # Manifest
+        manifest = {
+            "version": "1",
+            "name": w["name"],
+            "description": w.get("description", ""),
+            "exported_at": int(time.time()),
+            "active_skills": w.get("active_skills", []),
+            "active_mcp_servers": w.get("active_mcp_servers", []),
+            "active_cli_tools": w.get("active_cli_tools", []),
+            "mode": w.get("mode", "approve-each"),
+        }
+        zf.writestr("manifest.json", json.dumps(manifest, indent=2))
+        # System prompt
+        pid = w.get("system_prompt_id")
+        if pid:
+            p = next((x for x in prompts["prompts"] if x["id"] == pid), None)
+            if p:
+                zf.writestr("system_prompt.json", json.dumps(p, indent=2))
+        # Skills
+        for sid in w.get("active_skills", []):
+            skill = load_skill_content(sid)
+            if skill:
+                path = SKILLS_DIR / f"{sid}.md"
+                if path.exists():
+                    zf.write(path, f"skills/{sid}.md")
+        # MCP stubs (no secrets)
+        mcp_data = load_mcp_servers()
+        mcp_stubs = []
+        for sname in w.get("active_mcp_servers", []):
+            s = next((x for x in mcp_data.get("servers", []) if x["name"] == sname), None)
+            if s:
+                stub = {k: v for k, v in s.items() if k not in ("env",)}
+                stub["env_keys"] = list((s.get("env") or {}).keys())
+                mcp_stubs.append(stub)
+        zf.writestr("mcp_servers.json", json.dumps({"servers": mcp_stubs}, indent=2))
+        # CLI tools
+        cli_data = load_cli_tools()
+        cli_items = [c for c in cli_data.get("tools", []) if c["id"] in w.get("active_cli_tools", [])]
+        zf.writestr("cli_tools.json", json.dumps({"tools": cli_items}, indent=2))
+    buf.seek(0)
+    safe_name = _slug(w["name"], "workspace")
+    return Response(
+        content=buf.read(),
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{safe_name}.bwui"'},
+    )
+
+
+@app.post("/api/workspaces/import")
+async def import_workspace(file: UploadFile = File(...)):
+    content = await file.read()
+    try:
+        buf = io.BytesIO(content)
+        with zipfile.ZipFile(buf, "r") as zf:
+            names = zf.namelist()
+            manifest = json.loads(zf.read("manifest.json"))
+            # Import system prompt if present
+            prompt_id = None
+            if "system_prompt.json" in names:
+                p = json.loads(zf.read("system_prompt.json"))
+                p_data = load_prompts()
+                existing = next((x for x in p_data["prompts"] if x["id"] == p["id"]), None)
+                if not existing:
+                    p_data["prompts"].append(p)
+                    save_json(PROMPTS_PATH, p_data)
+                prompt_id = p["id"]
+            # Import skills
+            for name in names:
+                if name.startswith("skills/") and name.endswith(".md"):
+                    skill_bytes = zf.read(name)
+                    dest = SKILLS_DIR / Path(name).name
+                    dest.write_bytes(skill_bytes)
+            # Import CLI tools
+            if "cli_tools.json" in names:
+                imported_cli = json.loads(zf.read("cli_tools.json"))
+                cli_data = load_cli_tools()
+                existing_ids = {c["id"] for c in cli_data.get("tools", [])}
+                for c in imported_cli.get("tools", []):
+                    if c["id"] not in existing_ids:
+                        cli_data["tools"].append(c)
+                save_json(CLI_PATH, cli_data)
+        # Create the workspace
+        wid = uuid.uuid4().hex[:8]
+        ws_data = load_workspaces()
+        ws_data["workspaces"].append({
+            "id": wid,
+            "name": manifest.get("name", "Imported Workspace"),
+            "description": manifest.get("description", ""),
+            "system_prompt_id": prompt_id,
+            "active_skills": manifest.get("active_skills", []),
+            "active_mcp_servers": manifest.get("active_mcp_servers", []),
+            "active_cli_tools": manifest.get("active_cli_tools", []),
+            "files": [],
+            "mode": manifest.get("mode", "approve-each"),
+            "created_at": int(time.time()),
+            "updated_at": int(time.time()),
+        })
+        save_json(WORKSPACES_PATH, ws_data)
+        return {"id": wid, "name": manifest.get("name")}
+    except Exception as exc:
+        raise HTTPException(400, f"Invalid workspace bundle: {exc}")
+
+
+# --- Onboarding ---
+
+@app.get("/api/onboarding/templates")
+async def onboarding_templates():
+    return {"templates": ONBOARDING_TEMPLATES}
+
+
+class OnboardingCompleteIn(BaseModel):
+    template_id: Optional[str] = None
+    workspace_name: Optional[str] = None
+
+
+@app.post("/api/onboarding/complete")
+async def onboarding_complete(body: OnboardingCompleteIn):
+    cfg = load_config()
+    cfg["onboarding_done"] = True
+    save_json(CONFIG_PATH, cfg)
+
+    if body.template_id:
+        tmpl = next((t for t in ONBOARDING_TEMPLATES if t["id"] == body.template_id), None)
+        if tmpl:
+            # Create skill stubs if they don't exist (they should be in skills/ already)
+            # Create workspace
+            ws_data = load_workspaces()
+            wid = uuid.uuid4().hex[:8]
+            ws_name = body.workspace_name or tmpl["name"]
+            # Upsert system prompt
+            p_data = load_prompts()
+            pid = f"onboarding-{tmpl['id']}"
+            if not any(x["id"] == pid for x in p_data["prompts"]):
+                p_data["prompts"].append({"id": pid, "name": ws_name, "content": tmpl["system_prompt"]})
+                save_json(PROMPTS_PATH, p_data)
+            ws_data["workspaces"].append({
+                "id": wid,
+                "name": ws_name,
+                "description": tmpl["description"],
+                "system_prompt_id": pid,
+                "active_skills": tmpl.get("skills", []),
+                "active_mcp_servers": tmpl.get("mcp", []),
+                "active_cli_tools": tmpl.get("cli", []),
+                "files": [],
+                "mode": "approve-each",
+                "created_at": int(time.time()),
+                "updated_at": int(time.time()),
+            })
+            save_json(WORKSPACES_PATH, ws_data)
+            # Set as active
+            cfg["active_workspace_id"] = wid
+            save_json(CONFIG_PATH, cfg)
+            return {"ok": True, "workspace_id": wid}
+    return {"ok": True}
+
+
+# --- Project (file tree + checkpoints) ---
+
+@app.get("/api/project/tree")
+async def project_tree():
+    cfg = load_config()
+    workspace = resolve_active_workspace(cfg)
+    if not workspace:
+        return {"files": [], "error": "No active workspace."}
+    root = workspace.get("project_root", "")
+    if not root:
+        return {"files": [], "error": "No project root set on this workspace."}
+    root_path = Path(root)
+    if not root_path.is_dir():
+        return {"files": [], "error": f"Project root '{root}' is not a directory."}
+    files = []
+    try:
+        for p in sorted(root_path.rglob("*"))[:500]:
+            if p.is_file() and not any(part.startswith(".") for part in p.parts):
+                rel = str(p.relative_to(root_path))
+                files.append({
+                    "path": rel,
+                    "size": p.stat().st_size,
+                    "modified_at": int(p.stat().st_mtime),
+                    "ext": p.suffix.lower(),
+                })
+    except Exception as exc:
+        return {"files": [], "error": str(exc)}
+    return {"files": files, "root": root}
+
+
+@app.get("/api/project/file")
+async def project_file(path: str):
+    cfg = load_config()
+    workspace = resolve_active_workspace(cfg)
+    if not workspace:
+        raise HTTPException(400, "No active workspace.")
+    root = workspace.get("project_root", "")
+    if not root:
+        raise HTTPException(400, "No project root set.")
+    full = Path(root) / path
+    # Prevent path traversal
+    try:
+        full.resolve().relative_to(Path(root).resolve())
+    except ValueError:
+        raise HTTPException(403, "Path outside project root.")
+    if not full.exists():
+        raise HTTPException(404, "File not found.")
+    try:
+        content = full.read_text(encoding="utf-8", errors="replace")
+        is_binary = False
+    except Exception:
+        content = base64.b64encode(full.read_bytes()).decode("ascii")
+        is_binary = True
+    return {
+        "path": path,
+        "content": content,
+        "is_binary": is_binary,
+        "size": full.stat().st_size,
+        "modified_at": int(full.stat().st_mtime),
+    }
+
+
+@app.get("/api/project/checkpoints")
+async def list_project_checkpoints(filename: str):
+    cfg = load_config()
+    workspace = resolve_active_workspace(cfg)
+    if not workspace:
+        return {"checkpoints": []}
+    return {"checkpoints": _list_checkpoints(workspace["id"], filename)}
+
+
+class RevertIn(BaseModel):
+    filename: str
+    checkpoint_id: str
+
+
+@app.post("/api/project/revert")
+async def revert_project_file(r: RevertIn):
+    cfg = load_config()
+    workspace = resolve_active_workspace(cfg)
+    if not workspace:
+        raise HTTPException(400, "No active workspace.")
+    content = _get_checkpoint(workspace["id"], r.filename, r.checkpoint_id)
+    if content is None:
+        raise HTTPException(404, "Checkpoint not found.")
+    root = workspace.get("project_root", "")
+    if root:
+        dest = Path(root) / r.filename
+        try:
+            dest.write_text(content, encoding="utf-8")
+        except Exception as exc:
+            raise HTTPException(500, f"Could not write file: {exc}")
+    return {"ok": True, "filename": r.filename, "bytes": len(content)}
 
 
 # --- MCP servers ---
@@ -1659,15 +2222,13 @@ async def list_mcp_servers_endpoint():
     out = []
     for s in cfg.get("servers", []):
         st = status_by_name.get(s["name"])
-        out.append(
-            {
-                **s,
-                "running": (st or {}).get("running", False),
-                "error": (st or {}).get("error"),
-                "tool_count": (st or {}).get("tool_count", 0),
-                "tools": (st or {}).get("tools", []),
-            }
-        )
+        out.append({
+            **s,
+            "running": (st or {}).get("running", False),
+            "error": (st or {}).get("error"),
+            "tool_count": (st or {}).get("tool_count", 0),
+            "tools": (st or {}).get("tools", []),
+        })
     return {"servers": out}
 
 
@@ -1675,9 +2236,7 @@ async def list_mcp_servers_endpoint():
 async def upsert_mcp_server(s: MCPServerIn):
     data = load_mcp_servers()
     payload = s.model_dump(exclude_none=True)
-    existing = next(
-        (i for i, x in enumerate(data["servers"]) if x["name"] == s.name), None
-    )
+    existing = next((i for i, x in enumerate(data["servers"]) if x["name"] == s.name), None)
     if existing is not None:
         data["servers"][existing] = {**data["servers"][existing], **payload}
     else:
@@ -1710,6 +2269,7 @@ class CliToolIn(BaseModel):
     description: Optional[str] = ""
     command_template: str
     examples: Optional[list[str]] = None
+    approval_policy: Optional[str] = "ask"
 
 
 @app.get("/api/cli/registry")
@@ -1743,7 +2303,7 @@ async def delete_cli_tool(tid: str):
     return {"ok": True}
 
 
-# --- File uploads (for multimodal input) ---
+# --- File uploads ---
 
 @app.post("/api/upload")
 async def upload_file(file: UploadFile = File(...)):
@@ -1752,11 +2312,68 @@ async def upload_file(file: UploadFile = File(...)):
     async with aiofiles.open(dest, "wb") as f:
         while chunk := await file.read(1024 * 64):
             await f.write(chunk)
-    return {
-        "url": f"/uploads/{safe_name}",
-        "filename": file.filename,
-        "content_type": file.content_type,
-    }
+    return {"url": f"/uploads/{safe_name}", "filename": file.filename, "content_type": file.content_type}
+
+
+# --- Voice transcription ---
+
+@app.post("/api/transcribe")
+async def transcribe_audio(file: UploadFile = File(...)):
+    cfg = load_config()
+    if not cfg.get("api_key") or not cfg.get("base_url"):
+        raise HTTPException(400, "Set your OpenWebUI URL and API key first.")
+    profile = active_profile(cfg)
+    base = normalize_base_url(cfg["base_url"])
+    transcribe_url = f"{base}{profile.get('transcribe', '/api/v1/audio/transcriptions')}"
+    headers = {"Authorization": f"Bearer {cfg['api_key']}"}
+    audio_bytes = await file.read()
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        try:
+            resp = await client.post(
+                transcribe_url,
+                headers=headers,
+                files={"file": (file.filename or "audio.webm", audio_bytes, file.content_type or "audio/webm")},
+                data={"model": "whisper-1"},
+            )
+        except httpx.HTTPError as exc:
+            raise HTTPException(502, f"Transcription request failed: {exc}")
+    if resp.status_code != 200:
+        raise HTTPException(resp.status_code, f"Transcription failed: {resp.text[:300]}")
+    try:
+        body = resp.json()
+        return {"text": body.get("text", "")}
+    except Exception:
+        return {"text": resp.text}
+
+
+# --- Command explanation ---
+
+class ExplainCommandIn(BaseModel):
+    command: str
+
+
+@app.post("/api/explain-command")
+async def explain_command(body: ExplainCommandIn):
+    cmd = body.command.strip()
+    if not cmd:
+        raise HTTPException(400, "Command is required.")
+    key = hashlib.md5(cmd.encode()).hexdigest()[:16]
+    if key in _command_explanation_cache:
+        return {"explanation": _command_explanation_cache[key], "cached": True}
+    cfg = load_config()
+    model = cfg.get("default_model", "")
+    if not model:
+        return {"explanation": "No model configured — cannot explain commands."}
+    messages = [
+        {"role": "system", "content": "You are a plain-English explainer for shell commands. Keep your explanation to one or two sentences that a non-technical person can understand. Do not include any code or technical jargon."},
+        {"role": "user", "content": f"Explain this command:\n\n{cmd}"},
+    ]
+    try:
+        text, _ = await chat_complete(messages, model, cfg)
+        _command_explanation_cache[key] = text
+        return {"explanation": text}
+    except Exception as exc:
+        return {"explanation": f"Could not explain: {exc}"}
 
 
 # --- Conversations ---
@@ -1766,15 +2383,48 @@ async def list_conversations():
     data = load_conversations()
     summary = []
     for cid, conv in data["conversations"].items():
-        summary.append(
-            {
-                "id": cid,
-                "title": conv.get("title", "Untitled"),
-                "updated_at": conv.get("updated_at", 0),
-            }
-        )
-    summary.sort(key=lambda x: x["updated_at"], reverse=True)
+        summary.append({
+            "id": cid,
+            "title": conv.get("title", "Untitled"),
+            "updated_at": conv.get("updated_at", 0),
+            "pinned": conv.get("pinned", False),
+            "workspace_id": conv.get("workspace_id", ""),
+            "tags": conv.get("tags", []),
+        })
+    summary.sort(key=lambda x: (not x["pinned"], -x["updated_at"]))
     return {"conversations": summary}
+
+
+@app.get("/api/conversations/search")
+async def search_conversations(q: str = ""):
+    data = load_conversations()
+    q_lower = q.lower().strip()
+    results = []
+    for cid, conv in data["conversations"].items():
+        if not q_lower:
+            results.append({"id": cid, "title": conv.get("title", ""), "updated_at": conv.get("updated_at", 0)})
+            continue
+        title = conv.get("title", "").lower()
+        msgs_text = " ".join(
+            m.get("content", "") for m in conv.get("messages", []) if isinstance(m.get("content"), str)
+        ).lower()
+        if q_lower in title or q_lower in msgs_text:
+            # Find first matching snippet
+            idx = msgs_text.find(q_lower)
+            snippet = ""
+            if idx != -1:
+                raw_text = " ".join(
+                    m.get("content", "") for m in conv.get("messages", []) if isinstance(m.get("content"), str)
+                )
+                snippet = raw_text[max(0, idx - 40) : idx + 80]
+            results.append({
+                "id": cid,
+                "title": conv.get("title", ""),
+                "updated_at": conv.get("updated_at", 0),
+                "snippet": snippet,
+            })
+    results.sort(key=lambda x: -x["updated_at"])
+    return {"results": results[:50]}
 
 
 @app.get("/api/conversations/{cid}")
@@ -1794,28 +2444,130 @@ async def delete_conversation(cid: str):
     return {"ok": True}
 
 
-def save_conversation(cid: str, title: str, messages: list) -> None:
+class PinIn(BaseModel):
+    pinned: bool
+
+
+@app.post("/api/conversations/{cid}/pin")
+async def pin_conversation(cid: str, body: PinIn):
     data = load_conversations()
+    conv = data["conversations"].get(cid)
+    if not conv:
+        raise HTTPException(404, "Not found")
+    conv["pinned"] = body.pinned
+    save_json(CONVERSATIONS_PATH, data)
+    return {"ok": True}
+
+
+class TagIn(BaseModel):
+    tags: list[str]
+
+
+@app.post("/api/conversations/{cid}/tags")
+async def tag_conversation(cid: str, body: TagIn):
+    data = load_conversations()
+    conv = data["conversations"].get(cid)
+    if not conv:
+        raise HTTPException(404, "Not found")
+    conv["tags"] = body.tags
+    save_json(CONVERSATIONS_PATH, data)
+    return {"ok": True}
+
+
+class ForkIn(BaseModel):
+    from_message_index: int
+    title: Optional[str] = None
+
+
+@app.post("/api/conversations/{cid}/fork")
+async def fork_conversation(cid: str, body: ForkIn):
+    data = load_conversations()
+    conv = data["conversations"].get(cid)
+    if not conv:
+        raise HTTPException(404, "Not found")
+    messages = conv.get("messages", [])
+    forked_messages = messages[: body.from_message_index + 1]
+    new_cid = uuid.uuid4().hex
+    title = body.title or f"{conv.get('title', 'Conversation')} (fork)"
+    data["conversations"][new_cid] = {
+        "id": new_cid,
+        "title": title,
+        "messages": forked_messages,
+        "parent_id": cid,
+        "updated_at": int(time.time()),
+        "created_at": int(time.time()),
+    }
+    save_json(CONVERSATIONS_PATH, data)
+    return {"id": new_cid, "title": title}
+
+
+def save_conversation(cid: str, title: str, messages: list, task_plan: Optional[list] = None, workspace_id: str = "") -> None:
+    data = load_conversations()
+    existing = data["conversations"].get(cid, {})
     data["conversations"][cid] = {
+        **existing,
         "id": cid,
         "title": title,
         "messages": messages,
+        "task_plan": task_plan or [],
+        "workspace_id": workspace_id,
         "updated_at": int(time.time()),
     }
+    if "created_at" not in data["conversations"][cid]:
+        data["conversations"][cid]["created_at"] = int(time.time())
     save_json(CONVERSATIONS_PATH, data)
+
+
+# --- Linting ---
+
+@app.get("/api/lint")
+async def lint():
+    issues = _lint_skills() + _lint_mcp() + _lint_cli()
+    return {"issues": issues, "ok": len(issues) == 0}
+
+
+# --- Branding ---
+
+@app.get("/api/branding")
+async def get_branding():
+    return load_json(BRANDING_PATH, {"logo": None, "primary_color": None, "welcome": None, "institution": None})
+
+
+# --- Background tasks ---
+
+@app.get("/api/tasks")
+async def list_tasks():
+    return {"tasks": [
+        {
+            "id": tid,
+            "title": t.get("title", ""),
+            "status": t.get("status", "unknown"),
+            "created_at": t.get("created_at", 0),
+            "conversation_id": t.get("conversation_id", ""),
+        }
+        for tid, t in _background_tasks.items()
+    ]}
+
+
+@app.get("/api/tasks/{tid}")
+async def get_task(tid: str):
+    t = _background_tasks.get(tid)
+    if not t:
+        raise HTTPException(404, "Task not found")
+    return t
 
 
 # --- Chat (the main loop) ---
 
 class ChatRequest(BaseModel):
     conversation_id: Optional[str] = None
-    messages: list  # full history from the client (role/content/attachments)
+    messages: list
     model: Optional[str] = None
     title: Optional[str] = None
+    mode: Optional[str] = None
+    background: Optional[bool] = False
 
 
-# Roles OpenAI/OpenWebUI's chat completions API accepts. Anything else is a
-# UI-only annotation we created on the client and must NOT be forwarded.
 _VALID_ROLES = {"system", "user", "assistant", "function", "tool", "developer"}
 
 
@@ -1824,11 +2576,7 @@ def to_openai_messages(history: list, system_prompt: str) -> list:
     for m in history:
         role = m.get("role", "user")
         if role not in _VALID_ROLES:
-            # "system-event" and similar UI-only messages are dropped here.
             continue
-        # "tool" messages without a tool_call_id will also be rejected; if
-        # they're our pure-UI tool displays (no tool_call_id), demote them
-        # into a synthetic user message so the model still sees the result.
         if role == "tool" and not m.get("tool_call_id"):
             role = "user"
             content = f"[Tool result]\n{m.get('content', '')}"
@@ -1837,7 +2585,6 @@ def to_openai_messages(history: list, system_prompt: str) -> list:
         content = m.get("content", "")
         attachments = m.get("attachments") or []
         if attachments and role == "user":
-            # Encode as multimodal content array per OpenAI spec
             parts = [{"type": "text", "text": content}] if content else []
             for a in attachments:
                 ctype = a.get("content_type", "")
@@ -1845,9 +2592,7 @@ def to_openai_messages(history: list, system_prompt: str) -> list:
                 if ctype.startswith("image/"):
                     parts.append({"type": "image_url", "image_url": {"url": url}})
                 else:
-                    parts.append(
-                        {"type": "text", "text": f"[Attachment: {a.get('filename', url)}]"}
-                    )
+                    parts.append({"type": "text", "text": f"[Attachment: {a.get('filename', url)}]"})
             out.append({"role": role, "content": parts})
         else:
             out.append({"role": role, "content": content})
@@ -1864,78 +2609,79 @@ async def chat(req: ChatRequest):
         raise HTTPException(400, "Pick a model first.")
     prompts = load_prompts()
     cid = req.conversation_id or uuid.uuid4().hex
+    effective_mode = req.mode or cfg.get("chat_mode", "approve-each")
+    workspace = resolve_active_workspace(cfg)
+    workspace_id = (workspace or {}).get("id", "")
 
     queue: asyncio.Queue = asyncio.Queue()
+    current_task_plan: list = []
 
     async def send_event(event: str, data: dict) -> None:
         await queue.put({"event": event, "data": data})
 
     async def run_loop() -> None:
-        # Defensive intake filter: never let UI-only roles ("system-event",
-        # ad-hoc tool displays without tool_call_id) enter the canonical
-        # history that we persist and feed back to the model.
+        nonlocal current_task_plan
         history = [
             m for m in req.messages
             if isinstance(m, dict) and m.get("role") in {"user", "assistant"}
         ]
-        system_prompt = build_system_prompt(cfg, prompts)
+        system_prompt = build_system_prompt(cfg, prompts, effective_mode)
         try:
-            for _step in range(8):  # safety cap on tool iterations
+            for _step in range(12):  # higher cap for subagent-heavy tasks
                 history, n_dropped = trim_to_context(history, system_prompt)
                 if n_dropped:
-                    await send_event(
-                        "notice",
-                        {"message": f"Context trimmed: {n_dropped} older message(s) removed to fit the model's context window."},
-                    )
+                    await send_event("notice", {"message": f"Context trimmed: {n_dropped} older message(s) removed."})
                 openai_messages = to_openai_messages(history, system_prompt)
                 consensus_runs = max(1, min(10, cfg.get("consensus_runs", 1)))
-                await send_event("status", {"message": "Thinking..."})
+                await send_event("status", {"message": "Thinking…"})
                 if consensus_runs > 1:
                     raw_responses = await asyncio.gather(
                         *[chat_complete(openai_messages, model, cfg) for _ in range(consensus_runs)],
                         return_exceptions=True,
                     )
-                    valid = [r for r in raw_responses if isinstance(r, str)]
+                    valid = [(r[0], r[1]) for r in raw_responses if isinstance(r, tuple)]
                     if len(valid) < 2:
-                        text = valid[0] if valid else ""
+                        text, usage = valid[0] if valid else ("", {})
                     else:
-                        numbered = "\n\n".join(
-                            f"Response {i + 1}:\n{r}" for i, r in enumerate(valid)
-                        )
-                        synthesis_messages = list(openai_messages) + [
-                            {
-                                "role": "user",
-                                "content": (
-                                    f"The preceding query was answered independently "
-                                    f"{len(valid)} times. Synthesize the responses below "
-                                    "into a single unified reply. Favor content where the "
-                                    "responses agree; where they disagree, choose the most "
-                                    "well-reasoned position. Eliminate redundancy but "
-                                    "preserve all important information.\n\n"
-                                    + numbered
-                                ),
-                            }
-                        ]
-                        text = await chat_complete(synthesis_messages, model, cfg)
+                        numbered = "\n\n".join(f"Response {i+1}:\n{r[0]}" for i, r in enumerate(valid))
+                        synthesis_messages = list(openai_messages) + [{
+                            "role": "user",
+                            "content": (
+                                f"The preceding query was answered independently {len(valid)} times. "
+                                "Synthesize the responses into a single unified reply. "
+                                "Favor content where the responses agree.\n\n" + numbered
+                            ),
+                        }]
+                        text, usage = await chat_complete(synthesis_messages, model, cfg)
                 else:
-                    text = await chat_complete(openai_messages, model, cfg)
-                await send_event("assistant_text", {"text": text})
+                    text, usage = await chat_complete(openai_messages, model, cfg)
+
+                # Emit telemetry badge
+                tokens_in = usage.get("prompt_tokens", 0)
+                tokens_out = usage.get("completion_tokens", 0)
+                elapsed = usage.get("elapsed_ms", 0)
+                await send_event("assistant_text", {
+                    "text": text,
+                    "telemetry": {
+                        "tokens_in": tokens_in,
+                        "tokens_out": tokens_out,
+                        "elapsed_ms": elapsed,
+                    },
+                })
                 history.append({"role": "assistant", "content": text})
 
                 call = extract_tool_call(text)
                 if not call:
                     break
 
-                await send_event(
-                    "tool_call",
-                    {"tool": call["tool"], "args": call["args"]},
-                )
-                result = await execute_tool(call, cfg, send_event)
+                await send_event("tool_call", {"tool": call["tool"], "args": call["args"]})
+                result = await execute_tool(call, cfg, send_event, effective_mode)
                 await send_event("tool_result", {"tool": call["tool"], "result": result})
 
-                # The model only needs the metadata of generated/picked binary
-                # content, not the raw base64 — that would explode token
-                # usage and hit context limits.
+                # Persist task plan updates
+                if call["tool"] == "update_task_plan":
+                    current_task_plan = result.get("items", call["args"].get("items", []))
+
                 result_for_model = dict(result) if isinstance(result, dict) else result
                 if isinstance(result_for_model, dict):
                     if "data_b64" in result_for_model:
@@ -1946,23 +2692,28 @@ async def chat(req: ChatRequest):
                             if isinstance(f, dict) and "data_b64" in f:
                                 size = len(f["data_b64"])
                                 f["data_b64"] = f"<{size} chars of base64 omitted>"
-                history.append(
-                    {
-                        "role": "user",
-                        "content": (
-                            f"[Tool '{call['tool']}' result]\n"
-                            f"```json\n{json.dumps(result_for_model, indent=2)[:8000]}\n```"
-                        ),
-                    }
-                )
+                    if "combined" in result_for_model and len(str(result_for_model.get("combined", ""))) > 8000:
+                        result_for_model["combined"] = result_for_model["combined"][:8000] + "… [truncated]"
+                history.append({
+                    "role": "user",
+                    "content": (
+                        f"[Tool '{call['tool']}' result]\n"
+                        f"```json\n{json.dumps(result_for_model, indent=2)[:8000]}\n```"
+                    ),
+                })
+
             title = req.title or (
                 history[0]["content"][:60] if history and history[0].get("content") else "Conversation"
             )
-            save_conversation(cid, title, history)
-            await send_event("done", {"conversation_id": cid, "messages": history})
+            save_conversation(cid, title, history, current_task_plan, workspace_id)
+            await send_event("done", {
+                "conversation_id": cid,
+                "messages": history,
+                "task_plan": current_task_plan,
+            })
         except HTTPException as exc:
             await send_event("error", {"message": str(exc.detail)})
-        except Exception as exc:  # pragma: no cover
+        except Exception as exc:
             await send_event("error", {"message": f"{type(exc).__name__}: {exc}"})
         finally:
             await queue.put(None)
@@ -1987,6 +2738,7 @@ async def chat(req: ChatRequest):
 @app.get("/api/health")
 async def health():
     mcp_status = mcp_manager.status()
+    lint_issues = _lint_skills() + _lint_mcp() + _lint_cli()
     return {
         "ok": True,
         "platform": platform.system(),
@@ -1996,6 +2748,8 @@ async def health():
         "mcp_servers": len(mcp_status),
         "mcp_running": sum(1 for s in mcp_status if s.get("running")),
         "cli_tools": len(load_cli_tools()["tools"]),
+        "lint_issues": len(lint_issues),
+        "session_trusted_commands": len(_session_trusted_commands),
     }
 
 

@@ -18,9 +18,15 @@ const state = {
   messages: [],
   attachments: [],
   busy: false,
-  // Keyed by filename → { url, mime, filename }. Blob URLs created here
-  // survive the `done` re-render so images/audio stay visible in-chat.
   fileStore: {},
+  taskPlan: [],          // current plan items from backend
+  convSearchQuery: "",   // conversation search filter
+  micListening: false,   // voice input state
+  rightRailVisible: false,
+  planPaneVisible: false,
+  filesPaneVisible: false,
+  // last-turn telemetry
+  lastTelemetry: null,
 };
 
 // ---------------------------------------------------------------------------
@@ -49,7 +55,7 @@ function escape(s) {
 }
 
 // ---------------------------------------------------------------------------
-// Local-download helpers (for generated/written files)
+// Local-download helpers
 // ---------------------------------------------------------------------------
 
 function b64ToBlob(b64, mime) {
@@ -59,8 +65,6 @@ function b64ToBlob(b64, mime) {
   return new Blob([arr], { type: mime || "application/octet-stream" });
 }
 
-// Store a blob in the browser's fileStore and return its object URL.
-// The Download link in the chat is how the user saves it — no auto-click.
 function storeFile(blob, filename, mime) {
   const url = URL.createObjectURL(blob);
   state.fileStore[filename] = { url, mime: mime || blob.type || "application/octet-stream", filename };
@@ -68,8 +72,6 @@ function storeFile(blob, filename, mime) {
 }
 
 async function fileToContentEntry(file) {
-  // Read text-ish files as text; binary as base64. The model will receive
-  // text content directly and base64 only for binary attachments.
   const isText =
     file.type.startsWith("text/") ||
     /\.(md|markdown|csv|tsv|json|ya?ml|log|txt|py|js|ts|tsx|jsx|html|css|java|c|cpp|h|sh|tex|bib)$/i.test(file.name);
@@ -94,21 +96,12 @@ async function fileToContentEntry(file) {
 // Markdown + KaTeX rendering
 // ---------------------------------------------------------------------------
 
-// Private-use Unicode codepoints used as math-stash delimiters. They never
-// appear in real content, survive `marked` and `DOMPurify` untouched, and
-// don't depend on surrounding whitespace (the previous " MATH0 " marker
-// failed when math hugged a paragraph edge or punctuation: marked
-// normalized the spaces away and the restoration regex stopped matching).
 const MATH_STASH_OPEN = "";
 const MATH_STASH_CLOSE = "";
 const MATH_STASH_RE = new RegExp(MATH_STASH_OPEN + "(\\d+)" + MATH_STASH_CLOSE, "g");
 
 function renderMarkdownWithMath(text) {
-  // 1. Strip the tool-call block (it's noise to the user).
   text = String(text || "").replace(/```tool[\s\S]*?```/g, "");
-
-  // 2. Protect math regions from markdown processing — otherwise underscores
-  //    and asterisks inside formulas get parsed as italics/bold.
   const stash = [];
   const stashOne = (s) => {
     stash.push(s);
@@ -120,26 +113,16 @@ function renderMarkdownWithMath(text) {
     .replace(/\\\([\s\S]+?\\\)/g, stashOne)
     .replace(/(?<![\w\d])\$[^$\n]+?\$(?![\w\d])/g, stashOne);
 
-  // 3. Markdown → HTML.
   let html = "";
   if (window.marked) {
     html = marked.parse(text, { breaks: true, gfm: true });
   } else {
     html = escape(text).replace(/\n/g, "<br/>");
   }
-
-  // 4. Sanitize.
   if (window.DOMPurify) {
-    html = DOMPurify.sanitize(html, {
-      ADD_ATTR: ["target", "rel"],
-    });
+    html = DOMPurify.sanitize(html, { ADD_ATTR: ["target", "rel"] });
   }
-
-  // 5. Restore math. The escaped source is the ELEMENT'S innerHTML; KaTeX
-  //    auto-render later reads textContent, which decodes back to the raw
-  //    LaTeX so $...$ delimiters are seen.
   html = html.replace(MATH_STASH_RE, (_, i) => escape(stash[+i]));
-
   return html;
 }
 
@@ -162,6 +145,53 @@ function renderMathIn(el) {
 }
 
 // ---------------------------------------------------------------------------
+// Display settings
+// ---------------------------------------------------------------------------
+
+function applyDisplaySettings(display) {
+  const body = document.body;
+  // Font size
+  body.classList.remove("font-sm", "font-md", "font-lg", "font-xl");
+  body.classList.add("font-" + (display.font_size || "md"));
+  // Line height
+  body.classList.remove("lh-normal", "lh-relaxed", "lh-loose");
+  body.classList.add("lh-" + (display.line_height || "normal"));
+  // Dyslexic font
+  body.classList.toggle("dyslexic-font", !!display.dyslexic_font);
+  // High contrast
+  body.classList.toggle("high-contrast", !!display.high_contrast);
+  // Reduce motion
+  body.classList.toggle("reduce-motion", !!display.reduce_motion);
+}
+
+function loadDisplaySettingsUI(display) {
+  if (!display) return;
+  const fs = $("#cfg-font-size");
+  const lh = $("#cfg-line-height");
+  const dy = $("#cfg-dyslexic");
+  const hc = $("#cfg-high-contrast");
+  const rm = $("#cfg-reduce-motion");
+  if (fs) fs.value = display.font_size || "md";
+  if (lh) lh.value = display.line_height || "normal";
+  if (dy) dy.checked = !!display.dyslexic_font;
+  if (hc) hc.checked = !!display.high_contrast;
+  if (rm) rm.checked = !!display.reduce_motion;
+}
+
+async function saveDisplay() {
+  const display = {
+    font_size: $("#cfg-font-size").value,
+    line_height: $("#cfg-line-height").value,
+    dyslexic_font: $("#cfg-dyslexic").checked,
+    high_contrast: $("#cfg-high-contrast").checked,
+    reduce_motion: $("#cfg-reduce-motion").checked,
+  };
+  await api("/api/config", { method: "POST", json: { display } });
+  applyDisplaySettings(display);
+  flash("Display settings saved.", "good");
+}
+
+// ---------------------------------------------------------------------------
 // Settings tab
 // ---------------------------------------------------------------------------
 
@@ -175,6 +205,12 @@ async function loadConfig() {
   $("#cfg-tts-voice").value = state.config.tts_voice || "alloy";
   $("#cfg-consensus-runs").value = state.config.consensus_runs ?? 1;
   $("#cfg-shell-enabled").checked = state.config.shell_enabled !== false;
+  // Mode select
+  const ms = $("#mode-select");
+  if (ms) ms.value = state.config.chat_mode || "normal";
+  // Display
+  loadDisplaySettingsUI(state.config.display || {});
+  applyDisplaySettings(state.config.display || {});
   renderConnectionStatus(state.config);
   await loadHealth();
 }
@@ -236,7 +272,7 @@ async function saveDefaults() {
   await api("/api/config", { method: "POST", json: patch });
   await loadConfig();
   await refreshModels();
-  flash("Defaults saved.");
+  flash("Defaults saved.", "good");
 }
 
 // ---------------------------------------------------------------------------
@@ -341,6 +377,7 @@ async function loadSkills() {
   const data = await api("/api/skills");
   state.skills = data.skills || [];
   renderSkillList();
+  await loadLintWarnings();
 }
 
 function renderSkillList() {
@@ -377,6 +414,23 @@ function renderSkillList() {
       await loadSkills();
     }
   };
+}
+
+async function loadLintWarnings() {
+  try {
+    const lint = await api("/api/lint");
+    renderLintSection("skill-lint-warnings", lint.skills || []);
+    renderLintSection("mcp-lint-warnings", lint.mcp || []);
+    renderLintSection("cli-lint-warnings", lint.cli || []);
+  } catch (e) { /* lint endpoint may not exist yet */ }
+}
+
+function renderLintSection(elId, warnings) {
+  const el = document.getElementById(elId);
+  if (!el) return;
+  if (!warnings.length) { el.hidden = true; return; }
+  el.hidden = false;
+  el.innerHTML = `<strong>⚠ Issues found:</strong><ul>${warnings.map((w) => `<li>${escape(w)}</li>`).join("")}</ul>`;
 }
 
 function openNewSkillDialog() {
@@ -461,6 +515,7 @@ function renderWorkspaceList() {
       <div class="list-actions">
         <button data-action="activate" data-id="${w.id}">Use</button>
         <button data-action="edit" data-id="${w.id}">Edit</button>
+        <button data-action="export" data-id="${w.id}" title="Export as .bwui bundle">↓</button>
         <button data-action="delete" data-id="${w.id}">Delete</button>
       </div>`;
     ul.appendChild(li);
@@ -471,6 +526,7 @@ function renderWorkspaceList() {
     const id = btn.dataset.id;
     if (btn.dataset.action === "activate") return activateWorkspace(id);
     if (btn.dataset.action === "edit") return openWorkspaceDialog(state.workspaces.find((x) => x.id === id));
+    if (btn.dataset.action === "export") return exportWorkspace(id);
     if (btn.dataset.action === "delete") {
       if (!confirm("Delete this workspace?")) return;
       await api(`/api/workspaces/${id}`, { method: "DELETE" });
@@ -478,6 +534,32 @@ function renderWorkspaceList() {
       await loadConfig();
     }
   };
+}
+
+async function exportWorkspace(id) {
+  const w = state.workspaces.find((x) => x.id === id);
+  const res = await fetch(`/api/workspaces/${encodeURIComponent(id)}/export`);
+  if (!res.ok) { flash("Export failed.", "warn"); return; }
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `${(w?.name || id).replace(/\s+/g, "_")}.bwui`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+  flash("Workspace exported.", "good");
+}
+
+async function importWorkspace(file) {
+  const fd = new FormData();
+  fd.append("file", file);
+  const res = await fetch("/api/workspaces/import", { method: "POST", body: fd });
+  if (!res.ok) { flash("Import failed: " + (await res.text()), "warn"); return; }
+  const data = await res.json();
+  await loadWorkspaces();
+  flash(`Workspace "${data.name}" imported.`, "good");
 }
 
 function populateWorkspaceSelect() {
@@ -498,8 +580,9 @@ async function activateWorkspace(id) {
   });
   await loadConfig();
   await loadWorkspaces();
-  // Workspace switch starts a fresh chat by default
   newChat();
+  // Refresh file tree for the new workspace
+  if (state.filesPaneVisible) refreshFileTree();
 }
 
 function openWorkspaceDialog(workspace) {
@@ -514,6 +597,8 @@ function openWorkspaceDialog(workspace) {
     active_cli_tools: [],
     files: [],
     default_model: "",
+    project_root: "",
+    mode: "normal",
   };
   const skillsList = state.skills
     .map(
@@ -561,6 +646,10 @@ function openWorkspaceDialog(workspace) {
           ${state.models.map((m) => `<option value="${m.id}" ${m.id === w.default_model ? "selected" : ""}>${escape(m.name)}</option>`).join("")}
         </select>
       </label>
+      <label>Project root <em>(optional — for file tree &amp; checkpoints)</em>
+        <input id="dlg-project-root" type="text" value="${escape(w.project_root || "")}" placeholder="/Users/you/my-project" />
+        <small>Absolute path to a folder. The file tree pane will show its contents.</small>
+      </label>
 
       <h3>Skills available in this workspace</h3>
       <div class="check-grid">${skillsList || '<p class="hint">No skills yet.</p>'}</div>
@@ -572,7 +661,7 @@ function openWorkspaceDialog(workspace) {
       <div class="check-grid">${cliList || '<p class="hint">No CLI shortcuts configured. Add them under Tools.</p>'}</div>
 
       <h3>Persistent files</h3>
-      <p class="hint">Files added here travel with every chat in this workspace (attached to the first message). Useful for syllabi, rubrics, drafts.</p>
+      <p class="hint">Files added here travel with every chat in this workspace.</p>
       <div id="dlg-files">${filesPreview}</div>
       <label class="upload-label inline">
         + Add file
@@ -591,6 +680,7 @@ function openWorkspaceDialog(workspace) {
             description: $("#dlg-desc").value.trim(),
             system_prompt_id: $("#dlg-prompt").value || null,
             default_model: $("#dlg-model").value || null,
+            project_root: $("#dlg-project-root").value.trim() || null,
             active_skills: collectChecked("skill"),
             active_mcp_servers: collectChecked("mcp"),
             active_cli_tools: collectChecked("cli"),
@@ -599,7 +689,6 @@ function openWorkspaceDialog(workspace) {
           if (!body.name) return;
           const res = await api("/api/workspaces", { method: "POST", json: body });
           await loadWorkspaces();
-          // Auto-activate new workspaces
           if (isNew) await activateWorkspace(res.id);
           closeDialog();
         },
@@ -607,7 +696,6 @@ function openWorkspaceDialog(workspace) {
     ],
   });
 
-  // Wire file additions/removals into a mutable working list
   let pendingWorkspaceFiles = [...(w.files || [])];
   const renderFiles = () => {
     $("#dlg-files").innerHTML = pendingWorkspaceFiles
@@ -940,7 +1028,7 @@ function openCliCustomDialog() {
 }
 
 // ---------------------------------------------------------------------------
-// Conversations
+// Conversations: search, pin, tag, fork
 // ---------------------------------------------------------------------------
 
 async function loadConversations() {
@@ -952,25 +1040,42 @@ async function loadConversations() {
 function renderConversationList() {
   const ul = $("#conversation-list");
   ul.innerHTML = "";
-  if (!state.conversations.length) {
-    ul.innerHTML = '<p class="hint" style="padding: 8px;">No chats yet.</p>';
+  let convs = state.conversations;
+  const q = state.convSearchQuery.trim().toLowerCase();
+  if (q) {
+    convs = convs.filter((c) =>
+      (c.title || "").toLowerCase().includes(q) ||
+      (c.tags || []).some((t) => t.toLowerCase().includes(q))
+    );
+  }
+  if (!convs.length) {
+    ul.innerHTML = `<p class="hint" style="padding: 8px;">${q ? "No results." : "No chats yet."}</p>`;
     return;
   }
-  for (const c of state.conversations) {
+  // Pinned first
+  convs = [...convs.filter((c) => c.pinned), ...convs.filter((c) => !c.pinned)];
+  for (const c of convs) {
     const li = document.createElement("li");
     if (c.id === state.currentConversationId) li.classList.add("active");
+    const tags = (c.tags || []).map((t) => `<span class="tag-badge">${escape(t)}</span>`).join("");
     li.innerHTML = `
-      <div class="list-item-title">${escape(c.title || "Untitled")}</div>
+      <div class="list-item-title">
+        <div>${escape(c.title || "Untitled")}</div>
+        <div class="conv-meta">
+          ${c.pinned ? '<span class="pin-badge" title="Pinned">📌</span>' : ""}
+          ${tags}
+        </div>
+      </div>
       <div class="list-actions">
+        <button data-action="pin" data-id="${c.id}" title="${c.pinned ? "Unpin" : "Pin"}">📌</button>
+        <button data-action="fork" data-id="${c.id}" title="Fork this conversation">⎇</button>
         <button data-action="delete" data-id="${c.id}" title="Delete">×</button>
       </div>`;
     li.onclick = (e) => {
       const btn = e.target.closest("button");
-      if (btn?.dataset.action === "delete") {
-        e.stopPropagation();
-        deleteConversation(c.id);
-        return;
-      }
+      if (btn?.dataset.action === "delete") { e.stopPropagation(); deleteConversation(c.id); return; }
+      if (btn?.dataset.action === "pin") { e.stopPropagation(); pinConversation(c.id, !c.pinned); return; }
+      if (btn?.dataset.action === "fork") { e.stopPropagation(); forkConversation(c.id); return; }
       openConversation(c.id);
     };
     ul.appendChild(li);
@@ -981,7 +1086,9 @@ async function openConversation(id) {
   const conv = await api(`/api/conversations/${id}`);
   state.currentConversationId = id;
   state.messages = conv.messages || [];
+  state.taskPlan = conv.task_plan || [];
   renderMessages();
+  renderPlan();
   renderConversationList();
 }
 
@@ -992,12 +1099,32 @@ async function deleteConversation(id) {
   await loadConversations();
 }
 
+async function pinConversation(id, pin) {
+  await api(`/api/conversations/${id}/pin`, { method: "POST", json: { pinned: pin } });
+  await loadConversations();
+}
+
+async function forkConversation(id) {
+  const conv = await api(`/api/conversations/${id}`);
+  const msgCount = (conv.messages || []).length;
+  const forkAt = msgCount > 1 ? msgCount - 1 : msgCount;
+  const forked = await api(`/api/conversations/${id}/fork`, {
+    method: "POST",
+    json: { fork_at: forkAt },
+  });
+  await loadConversations();
+  await openConversation(forked.id);
+  flash("Forked into a new conversation.", "good");
+}
+
 function newChat() {
   state.currentConversationId = null;
   state.messages = [];
   state.attachments = [];
+  state.taskPlan = [];
   renderMessages();
   renderAttachments();
+  renderPlan();
   renderConversationList();
 }
 
@@ -1045,20 +1172,37 @@ function appendMessage(m) {
       m.role === "assistant" ? "Assistant" : m.role === "user" ? "You" : m.role;
   }
 
+  // Per-message action buttons (read-aloud, fork)
+  if (m.role === "assistant" && !m._placeholder) {
+    const roleEl = tpl.querySelector(".role");
+    const acts = document.createElement("div");
+    acts.className = "message-actions";
+    acts.innerHTML = `<button class="read-aloud-btn" title="Read aloud" aria-label="Read this message aloud">🔊</button>`;
+    if (m.telemetry) {
+      acts.innerHTML += `<span class="telemetry-badge">${m.telemetry.tokens_in ?? "?"}→${m.telemetry.tokens_out ?? "?"}t · ${m.telemetry.elapsed_ms ?? "?"}ms</span>`;
+    }
+    roleEl.appendChild(acts);
+  }
+
   const content = tpl.querySelector(".content");
   if (m._placeholder) {
     content.innerHTML =
       '<span class="typing-dots"><span></span><span></span><span></span></span>';
   } else if (m.role === "assistant") {
-    content.innerHTML = renderMarkdownWithMath(m.content || "");
+    // Render subagent cards before the main content
+    let mainText = m.content || "";
+    content.innerHTML = renderMarkdownWithMath(mainText);
+    if (m.subagents?.length) {
+      for (const sa of m.subagents) {
+        content.appendChild(buildSubagentCard(sa));
+      }
+    }
   } else if (isToolResult) {
     content.textContent = m.content || "";
   } else {
     content.innerHTML = renderMarkdownWithMath(m.content || "");
   }
 
-  // For backend-synced tool result messages (role:"user", content:"[Tool..."),
-  // look up the fileStore so images/audio survive the `done` re-render.
   let effectiveAttachments = m.attachments || [];
   if (isToolResult && m.role === "user" && !effectiveAttachments.length) {
     const fm = (m.content || "").match(/"filename":\s*"([^"]+)"/);
@@ -1108,11 +1252,74 @@ function appendMessage(m) {
   }
 
   container.appendChild(tpl);
-  // Render math after the node is in the DOM
   const newEl = container.lastElementChild;
+
+  // Wire read-aloud button
+  const readBtn = newEl?.querySelector(".read-aloud-btn");
+  if (readBtn) {
+    readBtn.onclick = () => readAloud(newEl, m.content || "", readBtn);
+  }
+
   if (newEl && m.role === "assistant") renderMathIn(newEl);
   container.scrollTop = container.scrollHeight;
   return newEl;
+}
+
+function buildSubagentCard(sa) {
+  const card = document.createElement("div");
+  card.className = "subagent-card";
+  const collapsed = document.createElement("details");
+  const summary = document.createElement("summary");
+  summary.className = "subagent-header";
+  summary.innerHTML = `<span>${escape(sa.kind || "subagent")}: ${escape(sa.item || "")}</span>`;
+  const body = document.createElement("div");
+  body.className = "subagent-body";
+  body.textContent = sa.summary || sa.result || "(no result)";
+  collapsed.appendChild(summary);
+  collapsed.appendChild(body);
+  card.appendChild(collapsed);
+  return card;
+}
+
+// ---------------------------------------------------------------------------
+// Read aloud
+// ---------------------------------------------------------------------------
+
+async function readAloud(msgEl, text, btn) {
+  if (btn.classList.contains("reading")) {
+    // Toggle off: stop any playing audio in this message
+    const audio = msgEl.querySelector("audio[data-tts]");
+    if (audio) { audio.pause(); audio.remove(); }
+    btn.classList.remove("reading");
+    btn.title = "Read aloud";
+    return;
+  }
+  btn.classList.add("reading");
+  btn.title = "Stop reading";
+  try {
+    const res = await fetch("/api/tts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: text.slice(0, 4096) }),
+    });
+    if (!res.ok) throw new Error(await res.text());
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const audio = document.createElement("audio");
+    audio.dataset.tts = "1";
+    audio.autoplay = true;
+    audio.src = url;
+    audio.onended = () => {
+      audio.remove();
+      URL.revokeObjectURL(url);
+      btn.classList.remove("reading");
+      btn.title = "Read aloud";
+    };
+    msgEl.querySelector(".content").appendChild(audio);
+  } catch (e) {
+    btn.classList.remove("reading");
+    flash("Read aloud failed: " + e.message, "warn");
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1123,10 +1330,7 @@ async function attachFile(file) {
   const fd = new FormData();
   fd.append("file", file);
   const res = await fetch("/api/upload", { method: "POST", body: fd });
-  if (!res.ok) {
-    flash("Upload failed.", "warn");
-    return;
-  }
+  if (!res.ok) { flash("Upload failed.", "warn"); return; }
   const a = await res.json();
   state.attachments.push(a);
   renderAttachments();
@@ -1138,12 +1342,285 @@ function renderAttachments() {
   state.attachments.forEach((a, i) => {
     const span = document.createElement("span");
     span.className = "pill";
-    span.innerHTML = `${escape(a.filename)} <button data-i="${i}" title="Remove">×</button>`;
+    span.innerHTML = `${escape(a.filename)} <button data-i="${i}" title="Remove" aria-label="Remove ${escape(a.filename)}">×</button>`;
     span.querySelector("button").onclick = () => {
       state.attachments.splice(i, 1);
       renderAttachments();
     };
     wrap.appendChild(span);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Voice input (SpeechRecognition)
+// ---------------------------------------------------------------------------
+
+let recognition = null;
+
+function initMic() {
+  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SpeechRecognition) {
+    const btn = $("#mic-btn");
+    if (btn) { btn.hidden = true; }
+    return;
+  }
+  recognition = new SpeechRecognition();
+  recognition.continuous = false;
+  recognition.interimResults = true;
+  recognition.lang = navigator.language || "en-US";
+
+  recognition.onresult = (e) => {
+    let transcript = "";
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      transcript += e.results[i][0].transcript;
+    }
+    const input = $("#composer-input");
+    if (input) input.value = transcript;
+  };
+
+  recognition.onend = () => {
+    state.micListening = false;
+    const btn = $("#mic-btn");
+    if (btn) { btn.classList.remove("listening"); btn.setAttribute("aria-pressed", "false"); }
+  };
+
+  recognition.onerror = (e) => {
+    state.micListening = false;
+    const btn = $("#mic-btn");
+    if (btn) { btn.classList.remove("listening"); btn.setAttribute("aria-pressed", "false"); }
+    if (e.error !== "no-speech") flash("Microphone error: " + e.error, "warn");
+  };
+}
+
+function toggleMic() {
+  if (!recognition) {
+    // Fallback: proxy to OpenWebUI transcription
+    flash("Voice input is not supported in this browser.", "warn");
+    return;
+  }
+  const btn = $("#mic-btn");
+  if (state.micListening) {
+    recognition.stop();
+  } else {
+    recognition.start();
+    state.micListening = true;
+    if (btn) { btn.classList.add("listening"); btn.setAttribute("aria-pressed", "true"); }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Task plan pane
+// ---------------------------------------------------------------------------
+
+function renderPlan() {
+  const list = $("#plan-list");
+  if (!list) return;
+  list.innerHTML = "";
+  if (!state.taskPlan.length) {
+    list.innerHTML = `<li class="plan-item pending"><span class="plan-item-text" style="font-style:italic;color:var(--ink-faint)">No plan yet.</span></li>`;
+    return;
+  }
+  const icons = { pending: "○", in_progress: "◉", done: "✓", blocked: "⚠" };
+  for (const item of state.taskPlan) {
+    const li = document.createElement("li");
+    li.className = `plan-item ${item.status || "pending"}`;
+    li.innerHTML = `
+      <span class="plan-item-icon" aria-label="${escape(item.status || "pending")}">${icons[item.status] || "○"}</span>
+      <span class="plan-item-text">
+        ${escape(item.title || "")}
+        ${item.note ? `<div class="plan-item-note">${escape(item.note)}</div>` : ""}
+      </span>`;
+    list.appendChild(li);
+  }
+}
+
+function setRightRailVisible(show) {
+  state.rightRailVisible = show;
+  const rail = $("#right-rail");
+  if (!rail) return;
+  rail.hidden = !show;
+}
+
+function setPlanPaneVisible(show) {
+  state.planPaneVisible = show;
+  const pane = $("#plan-pane");
+  if (!pane) return;
+  pane.hidden = !show;
+  const btn = $("#toggle-plan-btn");
+  if (btn) btn.setAttribute("aria-pressed", show ? "true" : "false");
+  updateRightRailVisibility();
+}
+
+function setFilesPaneVisible(show) {
+  state.filesPaneVisible = show;
+  const pane = $("#files-pane");
+  if (!pane) return;
+  pane.hidden = !show;
+  const btn = $("#toggle-files-btn");
+  if (btn) btn.setAttribute("aria-pressed", show ? "true" : "false");
+  if (show) refreshFileTree();
+  updateRightRailVisibility();
+}
+
+function updateRightRailVisibility() {
+  setRightRailVisible(state.planPaneVisible || state.filesPaneVisible);
+}
+
+// ---------------------------------------------------------------------------
+// File tree pane
+// ---------------------------------------------------------------------------
+
+async function refreshFileTree() {
+  const ws = state.workspaces.find((w) => w.id === state.config?.active_workspace_id);
+  const root = ws?.project_root;
+  const hint = $("#file-tree-hint");
+  const ul = $("#file-tree");
+  if (!root) {
+    if (hint) hint.hidden = false;
+    if (ul) ul.innerHTML = "";
+    return;
+  }
+  if (hint) hint.hidden = true;
+  try {
+    const data = await api(`/api/project/tree?workspace_id=${encodeURIComponent(ws.id)}`);
+    renderFileTree(ul, data.entries || []);
+  } catch (e) {
+    if (ul) ul.innerHTML = `<li style="color:var(--ink-faint);font-size:12px;padding:6px 8px;">Could not load file tree.</li>`;
+  }
+}
+
+function renderFileTree(ul, entries) {
+  ul.innerHTML = "";
+  for (const entry of entries) {
+    const li = document.createElement("li");
+    if (entry.type === "dir") {
+      li.innerHTML = `<details><summary class="file-tree-item dir"><span class="file-tree-icon">📁</span>${escape(entry.name)}</summary><ul class="file-tree" data-path="${escape(entry.path)}"></ul></details>`;
+      const sub = li.querySelector("ul");
+      const details = li.querySelector("details");
+      details.addEventListener("toggle", async () => {
+        if (details.open && sub.children.length === 0) {
+          try {
+            const ws = state.workspaces.find((w) => w.id === state.config?.active_workspace_id);
+            const data = await api(`/api/project/tree?workspace_id=${encodeURIComponent(ws?.id || "")}&path=${encodeURIComponent(entry.path)}`);
+            renderFileTree(sub, data.entries || []);
+          } catch (e) { /* silent */ }
+        }
+      });
+    } else {
+      li.innerHTML = `<div class="file-tree-item" role="button" tabindex="0" data-path="${escape(entry.path)}"><span class="file-tree-icon">📄</span>${escape(entry.name)}</div>`;
+      li.querySelector(".file-tree-item").onclick = () => openProjectFile(entry.path);
+      li.querySelector(".file-tree-item").onkeydown = (e) => {
+        if (e.key === "Enter" || e.key === " ") openProjectFile(entry.path);
+      };
+    }
+    ul.appendChild(li);
+  }
+}
+
+async function openProjectFile(path) {
+  const ws = state.workspaces.find((w) => w.id === state.config?.active_workspace_id);
+  try {
+    const data = await api(`/api/project/file?workspace_id=${encodeURIComponent(ws?.id || "")}&path=${encodeURIComponent(path)}`);
+    const name = path.split("/").pop() || path;
+    showDialog({
+      title: name,
+      wide: true,
+      body: `<pre style="max-height:400px;overflow:auto;">${escape(data.content || "")}</pre>`,
+      actions: [{ label: "Close", action: "cancel" }],
+    });
+  } catch (e) {
+    flash("Could not open file.", "warn");
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Approval dialog (shell + write) — with explain expander + trust session
+// ---------------------------------------------------------------------------
+
+function askApproval(req) {
+  return new Promise((resolve) => {
+    let title, body;
+    if (req.tool === "execute_shell") {
+      title = `Run a ${req.shell} command?`;
+      body = `
+        <div class="danger-banner"><strong>Caution.</strong> The assistant wants to run a command on your computer. Read it carefully before approving.</div>
+        ${req.reason ? `<p><b>Why:</b> ${escape(req.reason)}</p>` : ""}
+        <p><b>Command:</b></p>
+        <pre>${escape(req.command)}</pre>
+        <details class="explain-expander" id="explain-details">
+          <summary>Explain this in plain English</summary>
+          <div class="explain-body" id="explain-body"><span class="spinner"></span> Loading explanation…</div>
+        </details>
+        <label class="trust-session-wrap">
+          <input type="checkbox" id="trust-session-cb" />
+          Trust this command for the rest of the session (won't ask again)
+        </label>
+      `;
+    } else if (req.tool === "write_file") {
+      title = `Accept file from assistant?`;
+      body = `
+        <p>The assistant wants to share a file <b>(${req.byte_count} bytes)</b>. Approve to add it to the chat, where you can preview and download it.</p>
+        <p><b>Filename:</b> <code>${escape(req.filename)}</code></p>
+        <p><b>Preview:</b></p>
+        <pre>${escape(req.preview || "")}</pre>
+      `;
+    } else {
+      title = `Allow ${req.tool}?`;
+      body = `<pre>${escape(JSON.stringify(req, null, 2))}</pre>`;
+    }
+
+    showDialog({
+      title,
+      body,
+      actions: [
+        {
+          label: "Deny",
+          action: () => {
+            closeDialog();
+            resolve({ approved: false });
+          },
+        },
+        {
+          label: "Approve",
+          primary: true,
+          action: async () => {
+            const trustCb = document.getElementById("trust-session-cb");
+            const trustSession = trustCb ? trustCb.checked : false;
+            if (trustSession && req.command) {
+              try {
+                await api("/api/session/trust", {
+                  method: "POST",
+                  json: { command: req.command },
+                });
+              } catch (e) { /* non-critical */ }
+            }
+            closeDialog();
+            resolve({ approved: true, trust_session: trustSession, command: req.command });
+          },
+        },
+      ],
+    });
+
+    // Wire explain-details toggle
+    setTimeout(() => {
+      const det = document.getElementById("explain-details");
+      if (!det || req.tool !== "execute_shell") return;
+      let explained = false;
+      det.addEventListener("toggle", async () => {
+        if (!det.open || explained) return;
+        explained = true;
+        const bodyEl = document.getElementById("explain-body");
+        try {
+          const data = await api("/api/explain-command", {
+            method: "POST",
+            json: { command: req.command },
+          });
+          if (bodyEl) bodyEl.textContent = data.explanation || "No explanation available.";
+        } catch (e) {
+          if (bodyEl) bodyEl.textContent = "Could not fetch explanation.";
+        }
+      });
+    }, 50);
   });
 }
 
@@ -1156,8 +1633,6 @@ async function send() {
   const text = $("#composer-input").value.trim();
   if (!text && !state.attachments.length) return;
 
-  // If a workspace is active and this is the first message, prepend its
-  // persistent files as attachments.
   let attachments = state.attachments.slice();
   const ws = state.workspaces.find((w) => w.id === state.config?.active_workspace_id);
   if (ws && state.messages.length === 0 && Array.isArray(ws.files)) {
@@ -1177,20 +1652,22 @@ async function send() {
     return;
   }
 
+  const chatMode = $("#mode-select")?.value || state.config?.chat_mode || "normal";
+
   state.busy = true;
   const sendBtn = $("#send-btn");
   sendBtn.disabled = true;
   sendBtn.innerHTML = '<span class="spinner"></span>';
 
-  // Animated typing bubble — visible immediately, before the server responds.
   const placeholder = { role: "assistant", content: "", _placeholder: true };
   state.messages.push(placeholder);
   appendMessage(placeholder);
   const placeholderEl = $("#messages").lastElementChild;
 
+  // Track active subagent cards for current turn
+  const subagentSummaries = [];
+
   try {
-    // Only user/assistant turns travel back to the API. Pure-UI message
-    // types ("system-event", in-chat tool-result displays) are stripped.
     const sendable = state.messages.filter(
       (m) => !m._placeholder && (m.role === "user" || m.role === "assistant"),
     );
@@ -1201,6 +1678,7 @@ async function send() {
         conversation_id: state.currentConversationId,
         messages: sendable,
         model,
+        mode: chatMode,
       }),
     });
     if (!res.ok) {
@@ -1212,16 +1690,45 @@ async function send() {
 
     await consumeSSE(res, async (event, data) => {
       if (event === "assistant_text") {
-        const msg = { role: "assistant", content: data.text };
+        const telemetry = data.usage
+          ? { tokens_in: data.usage.prompt_tokens, tokens_out: data.usage.completion_tokens, elapsed_ms: data.elapsed_ms }
+          : null;
+        const msg = { role: "assistant", content: data.text, telemetry, subagents: subagentSummaries.slice() };
         state.messages.push(msg);
         appendMessage(msg);
+        if (telemetry) showTelemetryLine(telemetry);
+        return;
+      }
+      if (event === "task_plan") {
+        state.taskPlan = data.plan || [];
+        renderPlan();
+        // Auto-show the plan pane when we get a plan
+        if (state.taskPlan.length && !state.planPaneVisible) setPlanPaneVisible(true);
+        return;
+      }
+      if (event === "subagent_start") {
+        const sysMsg = { role: "system-event", content: `↪ Starting ${data.kind} subagent: ${data.item || ""}` };
+        state.messages.push(sysMsg);
+        appendMessage(sysMsg);
+        return;
+      }
+      if (event === "subagent_result") {
+        subagentSummaries.push({ kind: data.kind, item: data.item, summary: data.summary, result: data.result });
+        const sysMsg = { role: "system-event", content: `✓ Subagent "${data.item || data.kind}" done.` };
+        state.messages.push(sysMsg);
+        appendMessage(sysMsg);
         return;
       }
       if (event === "approval_request") {
-        const approved = await askApproval(data);
+        const result = await askApproval(data);
         await api("/api/approve", {
           method: "POST",
-          json: { approval_id: data.approval_id, approved },
+          json: {
+            approval_id: data.approval_id,
+            approved: result.approved !== undefined ? result.approved : result,
+            trust_session: result.trust_session,
+            command: result.command,
+          },
         });
         return;
       }
@@ -1249,13 +1756,13 @@ async function send() {
       }
       if (event === "done") {
         state.currentConversationId = data.conversation_id;
-        // Re-sync from the backend's canonical history. The backend
-        // includes synthetic "[Tool 'X' result]" user messages, which the
-        // renderer recognizes and styles as tool blocks. This keeps the
-        // model's tool-result context for follow-up turns.
         if (Array.isArray(data.messages)) {
           state.messages = data.messages;
           renderMessages();
+        }
+        if (data.task_plan) {
+          state.taskPlan = data.task_plan;
+          renderPlan();
         }
         await loadConversations();
         return;
@@ -1279,11 +1786,18 @@ async function send() {
   }
 }
 
+function showTelemetryLine(t) {
+  const el = $("#telemetry-line");
+  if (!el) return;
+  el.hidden = false;
+  el.textContent = `${t.tokens_in ?? "?"}→${t.tokens_out ?? "?"}t · ${t.elapsed_ms ?? "?"}ms`;
+  clearTimeout(el._timer);
+  el._timer = setTimeout(() => { el.hidden = true; }, 8000);
+}
+
 async function handleToolResult(data) {
   const r = data.result || {};
 
-  // Generated/written files: store blob URL in fileStore for inline rendering
-  // and user-initiated download; no automatic download to disk.
   if (r.data_b64 && r.filename) {
     const mime = r.mime || "application/octet-stream";
     const blob = b64ToBlob(r.data_b64, mime);
@@ -1299,10 +1813,11 @@ async function handleToolResult(data) {
     };
     state.messages.push(sysMsg);
     appendMessage(sysMsg);
+    // Refresh file tree after a write
+    if (state.filesPaneVisible) refreshFileTree();
     return;
   }
 
-  // Text summary for shell results
   if (data.tool === "execute_shell" || data.tool === "cli_call") {
     const text =
       `Exit ${r.exit_code} (${r.shell || ""}, ${r.duration_ms || 0}ms)\n` +
@@ -1314,7 +1829,6 @@ async function handleToolResult(data) {
     return;
   }
 
-  // read_file results: summarize without re-rendering all content
   if (data.tool === "read_file") {
     if (r.error) {
       const sysMsg = { role: "system-event", content: r.error };
@@ -1329,7 +1843,6 @@ async function handleToolResult(data) {
     return;
   }
 
-  // Default: show JSON-ish summary
   const sysMsg = { role: "tool", content: JSON.stringify(r, null, 2).slice(0, 3000) };
   state.messages.push(sysMsg);
   appendMessage(sysMsg);
@@ -1365,7 +1878,7 @@ async function consumeSSE(res, onEvent) {
 }
 
 // ---------------------------------------------------------------------------
-// File-request dialog (open file picker, send back contents)
+// File-request dialog
 // ---------------------------------------------------------------------------
 
 async function handleFileRequest(req) {
@@ -1412,58 +1925,7 @@ async function handleFileRequest(req) {
 }
 
 // ---------------------------------------------------------------------------
-// Approval dialog (shell + write)
-// ---------------------------------------------------------------------------
-
-function askApproval(req) {
-  return new Promise((resolve) => {
-    let title, body;
-    if (req.tool === "execute_shell") {
-      title = `Run a ${req.shell} command?`;
-      body = `
-        <div class="danger-banner"><strong>Caution.</strong> The assistant wants to run a command on your computer. Read it carefully before approving.</div>
-        ${req.reason ? `<p><b>Why:</b> ${escape(req.reason)}</p>` : ""}
-        <p><b>Command:</b></p>
-        <pre>${escape(req.command)}</pre>
-      `;
-    } else if (req.tool === "write_file") {
-      title = `Accept file from assistant?`;
-      body = `
-        <p>The assistant wants to share a file <b>(${req.byte_count} bytes)</b>. Approve to add it to the chat, where you can preview and download it.</p>
-        <p><b>Filename:</b> <code>${escape(req.filename)}</code></p>
-        <p><b>Preview:</b></p>
-        <pre>${escape(req.preview || "")}</pre>
-      `;
-    } else {
-      title = `Allow ${req.tool}?`;
-      body = `<pre>${escape(JSON.stringify(req, null, 2))}</pre>`;
-    }
-    showDialog({
-      title,
-      body,
-      actions: [
-        {
-          label: "Deny",
-          action: () => {
-            closeDialog();
-            resolve(false);
-          },
-        },
-        {
-          label: "Approve",
-          primary: true,
-          action: () => {
-            closeDialog();
-            resolve(true);
-          },
-        },
-      ],
-    });
-  });
-}
-
-// ---------------------------------------------------------------------------
-// Generic dialog
+// Generic dialog (with focus trap)
 // ---------------------------------------------------------------------------
 
 function showDialog({ title, body, actions, wide }) {
@@ -1471,6 +1933,9 @@ function showDialog({ title, body, actions, wide }) {
   const root = $("#dialog-root");
   const wrap = document.createElement("div");
   wrap.className = "dialog-backdrop";
+  wrap.setAttribute("role", "alertdialog");
+  wrap.setAttribute("aria-modal", "true");
+  wrap.setAttribute("aria-label", title);
   wrap.innerHTML = `
     <div class="dialog ${wide ? "wide" : ""}">
       <h2>${escape(title)}</h2>
@@ -1489,6 +1954,26 @@ function showDialog({ title, body, actions, wide }) {
     actionsEl.appendChild(btn);
   }
   root.appendChild(wrap);
+  // Focus first button
+  const firstBtn = wrap.querySelector("button");
+  if (firstBtn) firstBtn.focus();
+  // Trap focus inside dialog
+  wrap.addEventListener("keydown", trapFocus);
+}
+
+function trapFocus(e) {
+  if (e.key !== "Tab") return;
+  const focusable = Array.from(e.currentTarget.querySelectorAll(
+    'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+  )).filter((el) => !el.disabled && el.offsetParent !== null);
+  if (!focusable.length) return;
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  if (e.shiftKey) {
+    if (document.activeElement === first) { last.focus(); e.preventDefault(); }
+  } else {
+    if (document.activeElement === last) { first.focus(); e.preventDefault(); }
+  }
 }
 
 function closeDialog() {
@@ -1506,8 +1991,6 @@ function flash(msg, level = "info") {
   t.className = `toast ${level}`;
   t.textContent = msg;
   host.appendChild(t);
-  // Force a reflow so the entry transition runs
-  // eslint-disable-next-line no-unused-expressions
   t.offsetHeight;
   t.classList.add("visible");
   setTimeout(() => {
@@ -1517,25 +2000,196 @@ function flash(msg, level = "info") {
 }
 
 // ---------------------------------------------------------------------------
+// Onboarding wizard
+// ---------------------------------------------------------------------------
+
+async function checkOnboarding() {
+  const cfg = state.config;
+  if (cfg?.onboarding_done) return;
+  // Show wizard
+  const overlay = $("#onboarding-overlay");
+  if (overlay) overlay.hidden = false;
+  // Load use-case templates
+  try {
+    const data = await api("/api/onboarding/templates");
+    renderUseCaseGrid(data.templates || []);
+  } catch (e) { /* endpoint may not exist */ }
+}
+
+function renderUseCaseGrid(templates) {
+  const grid = $("#use-case-grid");
+  if (!grid) return;
+  grid.innerHTML = "";
+  const icons = { grading: "📝", research: "🔬", "course-prep": "📚", writing: "✍️", coding: "💻" };
+  for (const t of templates) {
+    const card = document.createElement("div");
+    card.className = "use-case-card";
+    card.setAttribute("role", "option");
+    card.setAttribute("tabindex", "0");
+    card.setAttribute("aria-selected", "false");
+    card.dataset.id = t.id;
+    card.innerHTML = `<span class="use-case-icon">${icons[t.id] || "📋"}</span>${escape(t.name)}`;
+    card.onclick = () => {
+      grid.querySelectorAll(".use-case-card").forEach((c) => {
+        c.classList.remove("selected");
+        c.setAttribute("aria-selected", "false");
+      });
+      card.classList.add("selected");
+      card.setAttribute("aria-selected", "true");
+      const btn = $("#ob-usecase-btn");
+      if (btn) { btn.disabled = false; btn.dataset.useCase = t.id; }
+    };
+    card.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") card.click(); };
+    grid.appendChild(card);
+  }
+}
+
+async function onboardingConnect() {
+  const url = $("#ob-url")?.value.trim();
+  const key = $("#ob-key")?.value.trim();
+  if (!url || !key) { flash("Enter a URL and API key.", "warn"); return; }
+  const status = $("#ob-status");
+  if (status) status.textContent = "Testing…";
+  try {
+    const result = await api("/api/config", { method: "POST", json: { base_url: url, api_key: key } });
+    if (!result.api_profile_label) {
+      if (status) { status.textContent = "Could not connect. Check the URL and key."; status.className = "status-line warn"; }
+      return;
+    }
+    state.config = result;
+    if (status) { status.textContent = `Connected via ${result.api_profile_label}.`; status.className = "status-line good"; }
+    await refreshModels();
+    // Move to step 2
+    setTimeout(() => {
+      $("#onboarding-step-1").hidden = true;
+      $("#onboarding-step-2").hidden = false;
+    }, 600);
+  } catch (e) {
+    if (status) { status.textContent = "Error: " + e.message; status.className = "status-line warn"; }
+  }
+}
+
+async function onboardingComplete(useCaseId) {
+  try {
+    const data = await api("/api/onboarding/complete", { method: "POST", json: { use_case: useCaseId } });
+    const msg = $("#ob-done-msg");
+    if (msg) msg.textContent = `Your "${data.workspace_name || useCaseId}" workspace has been created. Click "Start chatting" to begin.`;
+    $("#onboarding-step-2").hidden = true;
+    $("#onboarding-step-3").hidden = false;
+    await loadConfig();
+    await loadWorkspaces();
+    await loadPrompts();
+    await loadSkills();
+  } catch (e) {
+    flash("Onboarding error: " + e.message, "warn");
+  }
+}
+
+function onboardingFinish() {
+  const overlay = $("#onboarding-overlay");
+  if (overlay) overlay.hidden = true;
+  flash("Welcome to BetterWebUI!", "good");
+}
+
+// ---------------------------------------------------------------------------
+// Keyboard shortcuts
+// ---------------------------------------------------------------------------
+
+let _gKeyPending = false;
+let _gKeyTimer = null;
+
+function handleGlobalKey(e) {
+  // Don't intercept when typing in inputs
+  const tag = document.activeElement?.tagName?.toLowerCase();
+  if (tag === "input" || tag === "textarea" || tag === "select") {
+    // Only intercept Ctrl+Enter in textarea
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey) && tag === "textarea") {
+      e.preventDefault();
+      send();
+    }
+    return;
+  }
+
+  // Escape closes dialogs and modals
+  if (e.key === "Escape") {
+    closeDialog();
+    $("#shortcut-sheet").hidden = true;
+    return;
+  }
+
+  // ? opens shortcut sheet
+  if (e.key === "?") {
+    const sheet = $("#shortcut-sheet");
+    if (sheet) sheet.hidden = !sheet.hidden;
+    return;
+  }
+
+  // N = new chat
+  if (e.key === "n" || e.key === "N") { newChat(); return; }
+
+  // P = toggle plan pane
+  if (e.key === "p" || e.key === "P") { setPlanPaneVisible(!state.planPaneVisible); return; }
+
+  // F = toggle files pane
+  if (e.key === "f" || e.key === "F") { setFilesPaneVisible(!state.filesPaneVisible); return; }
+
+  // G-chord navigation
+  if (e.key === "g" || e.key === "G") {
+    _gKeyPending = true;
+    clearTimeout(_gKeyTimer);
+    _gKeyTimer = setTimeout(() => { _gKeyPending = false; }, 1000);
+    return;
+  }
+  if (_gKeyPending) {
+    _gKeyPending = false;
+    clearTimeout(_gKeyTimer);
+    const chordMap = { c: "chats", w: "workspaces", s: "skills", t: "tools", x: "settings", p: "prompts" };
+    const target = chordMap[e.key.toLowerCase()];
+    if (target) switchTab(target);
+    return;
+  }
+}
+
+function switchTab(tabName) {
+  $$(".tab").forEach((b) => {
+    const active = b.dataset.tab === tabName;
+    b.classList.toggle("active", active);
+    b.setAttribute("aria-selected", active ? "true" : "false");
+  });
+  $$(".tab-panel").forEach((p) => p.classList.remove("active"));
+  const panel = $(`#tab-${tabName}`);
+  if (panel) panel.classList.add("active");
+}
+
+// ---------------------------------------------------------------------------
 // Tabs and wiring
 // ---------------------------------------------------------------------------
 
 function wireTabs() {
   $$(".tab").forEach((btn) =>
     btn.addEventListener("click", () => {
-      $$(".tab").forEach((b) => b.classList.remove("active"));
+      $$(".tab").forEach((b) => {
+        b.classList.remove("active");
+        b.setAttribute("aria-selected", "false");
+      });
       $$(".tab-panel").forEach((p) => p.classList.remove("active"));
       btn.classList.add("active");
+      btn.setAttribute("aria-selected", "true");
       $(`#tab-${btn.dataset.tab}`).classList.add("active");
     }),
   );
 }
 
 function wireEvents() {
+  // Core chat
   $("#new-chat-btn").onclick = newChat;
   $("#send-btn").onclick = send;
   $("#composer-input").addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && !e.shiftKey) {
+    if (e.key === "Enter" && !e.shiftKey && !e.ctrlKey && !e.metaKey) {
+      e.preventDefault();
+      send();
+    }
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
       e.preventDefault();
       send();
     }
@@ -1545,10 +2199,19 @@ function wireEvents() {
     if (f) attachFile(f);
     e.target.value = "";
   });
+
+  // Mic
+  $("#mic-btn")?.addEventListener("click", toggleMic);
+
+  // Settings
   $("#save-connection").onclick = saveConnection;
   $("#save-defaults").onclick = saveDefaults;
+  $("#save-display")?.addEventListener("click", saveDisplay);
 
+  // Prompts
   $("#new-prompt-btn").onclick = () => openPromptDialog(null);
+
+  // Skills
   $("#new-skill-btn").onclick = openNewSkillDialog;
   $("#upload-skill").addEventListener("change", (e) => {
     const f = e.target.files[0];
@@ -1556,20 +2219,83 @@ function wireEvents() {
     e.target.value = "";
   });
 
+  // Workspaces
   $("#new-workspace-btn").onclick = () => openWorkspaceDialog(null);
   $("#workspace-select").onchange = (e) => activateWorkspace(e.target.value);
+  $("#import-workspace-btn")?.addEventListener("click", () => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = ".bwui";
+    input.onchange = (e) => { if (e.target.files[0]) importWorkspace(e.target.files[0]); };
+    input.click();
+  });
 
+  // MCP / CLI
   $("#mcp-from-registry-btn").onclick = openMcpRegistryDialog;
   $("#mcp-custom-btn").onclick = openMcpCustomDialog;
   $("#cli-from-registry-btn").onclick = openCliRegistryDialog;
   $("#cli-custom-btn").onclick = openCliCustomDialog;
 
-  $("#chat-model-select").onchange = () => {};
+  // Right-rail toggles
+  $("#toggle-plan-btn")?.addEventListener("click", () => setPlanPaneVisible(!state.planPaneVisible));
+  $("#toggle-files-btn")?.addEventListener("click", () => setFilesPaneVisible(!state.filesPaneVisible));
+  $("#plan-pane-close")?.addEventListener("click", () => setPlanPaneVisible(false));
+  $("#files-pane-close")?.addEventListener("click", () => setFilesPaneVisible(false));
+
+  // Conversation search
+  $("#search-toggle-btn")?.addEventListener("click", () => {
+    const wrap = $("#conv-search-wrap");
+    if (!wrap) return;
+    wrap.hidden = !wrap.hidden;
+    if (!wrap.hidden) $("#conv-search")?.focus();
+    else { state.convSearchQuery = ""; renderConversationList(); }
+  });
+  $("#conv-search")?.addEventListener("input", (e) => {
+    state.convSearchQuery = e.target.value;
+    renderConversationList();
+  });
+
+  // Mode select
+  $("#mode-select")?.addEventListener("change", async (e) => {
+    const mode = e.target.value;
+    try {
+      await api("/api/config", { method: "POST", json: { chat_mode: mode } });
+    } catch (_) { /* non-critical */ }
+  });
+
+  // Keyboard shortcuts modal
+  $("#shortcut-help-btn")?.addEventListener("click", () => {
+    const sheet = $("#shortcut-sheet");
+    if (sheet) sheet.hidden = false;
+  });
+  $("#shortcut-sheet")?.querySelector(".modal-close")?.addEventListener("click", () => {
+    $("#shortcut-sheet").hidden = true;
+  });
+
+  // Global keyboard shortcuts
+  document.addEventListener("keydown", handleGlobalKey);
+
+  // Onboarding wizard buttons
+  $("#ob-connect-btn")?.addEventListener("click", onboardingConnect);
+  $("#ob-back-btn")?.addEventListener("click", () => {
+    $("#onboarding-step-2").hidden = true;
+    $("#onboarding-step-1").hidden = false;
+  });
+  $("#ob-usecase-btn")?.addEventListener("click", (e) => {
+    const id = e.target.dataset.useCase;
+    if (id) onboardingComplete(id);
+  });
+  $("#ob-finish-btn")?.addEventListener("click", onboardingFinish);
 }
+
+// ---------------------------------------------------------------------------
+// Init
+// ---------------------------------------------------------------------------
 
 async function init() {
   wireTabs();
   wireEvents();
+  initMic();
   await loadConfig();
   await Promise.all([
     refreshModels(),
@@ -1582,8 +2308,10 @@ async function init() {
   ]);
   populateWorkspaceSelect();
   newChat();
+  // Check if onboarding is needed
+  await checkOnboarding();
 }
 
 init().catch((e) => {
-  document.body.innerHTML = `<pre style="padding: 30px;">Init failed: ${escape(e.message)}</pre>`;
+  document.body.innerHTML = `<pre style="padding: 30px;">Init failed: ${escape(e.message)}\n\n${e.stack || ""}</pre>`;
 });
