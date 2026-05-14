@@ -73,7 +73,6 @@ class TestRegistry:
 
     def test_env_override_clk(self, monkeypatch):
         monkeypatch.setenv("CLK_BASE_URL", "http://my-clk:9999")
-        # Re-import to pick up env change
         import importlib, services.registry as reg
         importlib.reload(reg)
         svcs = reg.get_services()
@@ -334,7 +333,8 @@ class TestHealthCheck:
         async def fake_health(self):
             return healthy_response
 
-        with patch("services.clients.ServiceClient.health", new=fake_health):
+        with patch("services.clients.ServiceClient.health", new=fake_health), \
+             patch("services.state.is_enabled", return_value=True):
             from services.health import check_all_services
             results = run(check_all_services())
 
@@ -348,17 +348,17 @@ class TestHealthCheck:
 
         async def fake_health(self):
             call_count["n"] += 1
-            if call_count["n"] == 1:  # first call (clk) fails
+            if call_count["n"] == 1:
                 raise ConnectionRefusedError("connection refused")
             return {"status": "ok"}
 
-        with patch("services.clients.ServiceClient.health", new=fake_health):
+        with patch("services.clients.ServiceClient.health", new=fake_health), \
+             patch("services.state.is_enabled", return_value=True):
             import importlib
             import services.health as health_mod
             importlib.reload(health_mod)
             results = run(health_mod.check_all_services())
 
-        # At least one service should be down
         statuses = [v["ok"] for v in results.values()]
         assert False in statuses
 
@@ -366,7 +366,8 @@ class TestHealthCheck:
         async def fake_health(self):
             raise ConnectionRefusedError("connection refused")
 
-        with patch("services.clients.ServiceClient.health", new=fake_health):
+        with patch("services.clients.ServiceClient.health", new=fake_health), \
+             patch("services.state.is_enabled", return_value=True):
             import importlib
             import services.health as health_mod
             importlib.reload(health_mod)
@@ -381,7 +382,8 @@ class TestHealthCheck:
         async def fake_health(self):
             raise RuntimeError("timeout talking to service")
 
-        with patch("services.clients.ServiceClient.health", new=fake_health):
+        with patch("services.clients.ServiceClient.health", new=fake_health), \
+             patch("services.state.is_enabled", return_value=True):
             import importlib
             import services.health as health_mod
             importlib.reload(health_mod)
@@ -438,7 +440,8 @@ class TestServicesRoutes:
 
     def test_clk_list_workflows(self, app_client):
         workflows = {"workflows": ["research", "summarize"]}
-        with patch("services.routes.get_clk_client") as mock_factory:
+        with patch("services.state.is_enabled", return_value=True), \
+             patch("services.routes.get_clk_client") as mock_factory:
             mock_client = AsyncMock()
             mock_client.list_workflows.return_value = workflows
             mock_factory.return_value = mock_client
@@ -448,7 +451,8 @@ class TestServicesRoutes:
 
     def test_clk_start_research(self, app_client):
         task_resp = {"task_id": "t-abc"}
-        with patch("services.routes.get_clk_client") as mock_factory:
+        with patch("services.state.is_enabled", return_value=True), \
+             patch("services.routes.get_clk_client") as mock_factory:
             mock_client = AsyncMock()
             mock_client.start_research.return_value = task_resp
             mock_factory.return_value = mock_client
@@ -468,7 +472,8 @@ class TestServicesRoutes:
 
     def test_clk_get_task(self, app_client):
         task_data = {"status": "running", "progress": 0.5}
-        with patch("services.routes.get_clk_client") as mock_factory:
+        with patch("services.state.is_enabled", return_value=True), \
+             patch("services.routes.get_clk_client") as mock_factory:
             mock_client = AsyncMock()
             mock_client.get_task.return_value = task_data
             mock_factory.return_value = mock_client
@@ -478,7 +483,8 @@ class TestServicesRoutes:
 
     def test_clk_list_artifacts(self, app_client):
         artifacts = {"artifacts": [{"name": "report.md"}]}
-        with patch("services.routes.get_clk_client") as mock_factory:
+        with patch("services.state.is_enabled", return_value=True), \
+             patch("services.routes.get_clk_client") as mock_factory:
             mock_client = AsyncMock()
             mock_client.list_artifacts.return_value = artifacts
             mock_factory.return_value = mock_client
@@ -487,7 +493,8 @@ class TestServicesRoutes:
         assert r.json() == artifacts
 
     def test_clk_cancel_task(self, app_client):
-        with patch("services.routes.get_clk_client") as mock_factory:
+        with patch("services.state.is_enabled", return_value=True), \
+             patch("services.routes.get_clk_client") as mock_factory:
             mock_client = AsyncMock()
             mock_client.cancel_task.return_value = {"cancelled": True}
             mock_factory.return_value = mock_client
@@ -498,7 +505,8 @@ class TestServicesRoutes:
     # -- AutoGUI routes --
 
     def test_autogui_start_task(self, app_client):
-        with patch("services.routes.get_autogui_client") as mock_factory:
+        with patch("services.state.is_enabled", return_value=True), \
+             patch("services.routes.get_autogui_client") as mock_factory:
             mock_client = AsyncMock()
             mock_client.start_task.return_value = {"task_id": "gui-1"}
             mock_factory.return_value = mock_client
@@ -507,7 +515,8 @@ class TestServicesRoutes:
         assert r.json()["task_id"] == "gui-1"
 
     def test_autogui_get_task(self, app_client):
-        with patch("services.routes.get_autogui_client") as mock_factory:
+        with patch("services.state.is_enabled", return_value=True), \
+             patch("services.routes.get_autogui_client") as mock_factory:
             mock_client = AsyncMock()
             mock_client.get_task.return_value = {"status": "done"}
             mock_factory.return_value = mock_client
@@ -516,7 +525,8 @@ class TestServicesRoutes:
         assert r.json()["status"] == "done"
 
     def test_autogui_cancel_task(self, app_client):
-        with patch("services.routes.get_autogui_client") as mock_factory:
+        with patch("services.state.is_enabled", return_value=True), \
+             patch("services.routes.get_autogui_client") as mock_factory:
             mock_client = AsyncMock()
             mock_client.cancel_task.return_value = {"cancelled": True}
             mock_factory.return_value = mock_client
@@ -524,7 +534,8 @@ class TestServicesRoutes:
         assert r.status_code == 200
 
     def test_autogui_list_tools(self, app_client):
-        with patch("services.routes.get_autogui_client") as mock_factory:
+        with patch("services.state.is_enabled", return_value=True), \
+             patch("services.routes.get_autogui_client") as mock_factory:
             mock_client = AsyncMock()
             mock_client.list_tools.return_value = {"tools": ["click", "type"]}
             mock_factory.return_value = mock_client
@@ -536,7 +547,8 @@ class TestServicesRoutes:
 
     def test_osso_windows(self, app_client):
         windows_data = {"windows": [{"index": 0, "title": "Desktop"}]}
-        with patch("services.routes.get_osso_client") as mock_factory:
+        with patch("services.state.is_enabled", return_value=True), \
+             patch("services.routes.get_osso_client") as mock_factory:
             mock_client = AsyncMock()
             mock_client.windows.return_value = windows_data
             mock_factory.return_value = mock_client
@@ -546,7 +558,8 @@ class TestServicesRoutes:
 
     def test_osso_description_default_mode(self, app_client):
         desc_data = {"description": "A desktop"}
-        with patch("services.routes.get_osso_client") as mock_factory:
+        with patch("services.state.is_enabled", return_value=True), \
+             patch("services.routes.get_osso_client") as mock_factory:
             mock_client = AsyncMock()
             mock_client.description.return_value = desc_data
             mock_factory.return_value = mock_client
@@ -555,7 +568,8 @@ class TestServicesRoutes:
         mock_client.description.assert_awaited_once_with(None, "accessibility")
 
     def test_osso_description_with_params(self, app_client):
-        with patch("services.routes.get_osso_client") as mock_factory:
+        with patch("services.state.is_enabled", return_value=True), \
+             patch("services.routes.get_osso_client") as mock_factory:
             mock_client = AsyncMock()
             mock_client.description.return_value = {"description": "Notepad"}
             mock_factory.return_value = mock_client
@@ -564,7 +578,8 @@ class TestServicesRoutes:
         mock_client.description.assert_awaited_once_with(1, "vision")
 
     def test_osso_structure(self, app_client):
-        with patch("services.routes.get_osso_client") as mock_factory:
+        with patch("services.state.is_enabled", return_value=True), \
+             patch("services.routes.get_osso_client") as mock_factory:
             mock_client = AsyncMock()
             mock_client.structure.return_value = {"elements": []}
             mock_factory.return_value = mock_client
@@ -572,7 +587,8 @@ class TestServicesRoutes:
         assert r.status_code == 200
 
     def test_osso_screenshot(self, app_client):
-        with patch("services.routes.get_osso_client") as mock_factory:
+        with patch("services.state.is_enabled", return_value=True), \
+             patch("services.routes.get_osso_client") as mock_factory:
             mock_client = AsyncMock()
             mock_client.screenshot.return_value = {"image": "base64data"}
             mock_factory.return_value = mock_client
@@ -581,7 +597,8 @@ class TestServicesRoutes:
         assert r.json()["image"] == "base64data"
 
     def test_osso_action(self, app_client):
-        with patch("services.routes.get_osso_client") as mock_factory:
+        with patch("services.state.is_enabled", return_value=True), \
+             patch("services.routes.get_osso_client") as mock_factory:
             mock_client = AsyncMock()
             mock_client.action.return_value = {"ok": True}
             mock_factory.return_value = mock_client
@@ -590,7 +607,8 @@ class TestServicesRoutes:
         assert r.json()["ok"] is True
 
     def test_osso_capabilities(self, app_client):
-        with patch("services.routes.get_osso_client") as mock_factory:
+        with patch("services.state.is_enabled", return_value=True), \
+             patch("services.routes.get_osso_client") as mock_factory:
             mock_client = AsyncMock()
             mock_client.capabilities.return_value = {"capabilities": ["screenshot"]}
             mock_factory.return_value = mock_client
@@ -619,3 +637,189 @@ class TestServicesRoutes:
             assert "function" in tool
             assert "name" in tool["function"]
             assert "description" in tool["function"]
+
+
+# ===========================================================================
+# Service enable / disable
+# ===========================================================================
+
+class TestServiceEnableDisable:
+    """Test /api/services/{name}/enable and /api/services/{name}/disable."""
+
+    @pytest.fixture()
+    def app_client(self):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from services.routes import register_routes
+
+        app = FastAPI()
+        register_routes(app)
+        return TestClient(app, raise_server_exceptions=True)
+
+    def test_enable_returns_ok(self, app_client):
+        with patch("services.state.set_enabled") as mock_set:
+            r = app_client.post("/api/services/clk/enable")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["ok"] is True
+        assert data["service"] == "clk"
+        assert data["enabled"] is True
+        mock_set.assert_called_once_with("clk", True)
+
+    def test_disable_returns_ok(self, app_client):
+        with patch("services.state.set_enabled") as mock_set:
+            r = app_client.post("/api/services/clk/disable")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["ok"] is True
+        assert data["service"] == "clk"
+        assert data["enabled"] is False
+        mock_set.assert_called_once_with("clk", False)
+
+    def test_enable_unknown_service_returns_404(self, app_client):
+        r = app_client.post("/api/services/nonexistent/enable")
+        assert r.status_code == 404
+
+    def test_disable_unknown_service_returns_404(self, app_client):
+        r = app_client.post("/api/services/nonexistent/disable")
+        assert r.status_code == 404
+
+    def test_status_returns_all_services(self, app_client):
+        fake_state = {"clk": True, "autogui": False, "osso": True}
+        with patch("services.state.get_all", return_value=fake_state):
+            r = app_client.get("/api/services/status")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["services"]["clk"]["enabled"] is True
+        assert data["services"]["autogui"]["enabled"] is False
+        assert data["services"]["osso"]["enabled"] is True
+
+    def test_disabled_service_returns_503(self, app_client):
+        with patch("services.state.is_enabled", return_value=False):
+            r = app_client.get("/api/services/clk/workflows")
+        assert r.status_code == 503
+
+    def test_enabled_service_proxies_normally(self, app_client):
+        with patch("services.state.is_enabled", return_value=True), \
+             patch("services.routes.get_clk_client") as mock_factory:
+            mock_client = AsyncMock()
+            mock_client.list_workflows.return_value = {"workflows": []}
+            mock_factory.return_value = mock_client
+            r = app_client.get("/api/services/clk/workflows")
+        assert r.status_code == 200
+
+    def test_disabled_autogui_returns_503(self, app_client):
+        with patch("services.state.is_enabled", return_value=False):
+            r = app_client.post("/api/services/autogui/task", json={"task": "click"})
+        assert r.status_code == 503
+
+    def test_disabled_osso_returns_503(self, app_client):
+        with patch("services.state.is_enabled", return_value=False):
+            r = app_client.get("/api/services/osso/windows")
+        assert r.status_code == 503
+
+    def test_all_valid_services_can_be_enabled(self, app_client):
+        for name in ("clk", "autogui", "osso"):
+            with patch("services.state.set_enabled"):
+                r = app_client.post(f"/api/services/{name}/enable")
+            assert r.status_code == 200, f"{name} enable failed"
+
+    def test_all_valid_services_can_be_disabled(self, app_client):
+        for name in ("clk", "autogui", "osso"):
+            with patch("services.state.set_enabled"):
+                r = app_client.post(f"/api/services/{name}/disable")
+            assert r.status_code == 200, f"{name} disable failed"
+
+
+# ===========================================================================
+# State persistence
+# ===========================================================================
+
+class TestServiceState:
+    """Test services/state.py directly using a temp file path."""
+
+    def test_default_all_enabled(self, tmp_path, monkeypatch):
+        import services.state as st
+        monkeypatch.setattr(st, "_STATE_PATH", tmp_path / "services_state.json")
+        assert st.is_enabled("clk") is True
+        assert st.is_enabled("autogui") is True
+        assert st.is_enabled("osso") is True
+
+    def test_set_and_get_disabled(self, tmp_path, monkeypatch):
+        import services.state as st
+        monkeypatch.setattr(st, "_STATE_PATH", tmp_path / "services_state.json")
+        st.set_enabled("clk", False)
+        assert st.is_enabled("clk") is False
+        assert st.is_enabled("autogui") is True
+
+    def test_re_enable_after_disable(self, tmp_path, monkeypatch):
+        import services.state as st
+        monkeypatch.setattr(st, "_STATE_PATH", tmp_path / "services_state.json")
+        st.set_enabled("autogui", False)
+        st.set_enabled("autogui", True)
+        assert st.is_enabled("autogui") is True
+
+    def test_get_all_returns_all_keys(self, tmp_path, monkeypatch):
+        import services.state as st
+        monkeypatch.setattr(st, "_STATE_PATH", tmp_path / "services_state.json")
+        result = st.get_all()
+        assert set(result.keys()) == {"clk", "autogui", "osso"}
+
+    def test_unknown_service_defaults_to_enabled(self, tmp_path, monkeypatch):
+        import services.state as st
+        monkeypatch.setattr(st, "_STATE_PATH", tmp_path / "services_state.json")
+        assert st.is_enabled("unknown_service") is True
+
+    def test_state_persists_across_calls(self, tmp_path, monkeypatch):
+        import services.state as st
+        monkeypatch.setattr(st, "_STATE_PATH", tmp_path / "services_state.json")
+        st.set_enabled("osso", False)
+        assert st.is_enabled("osso") is False
+
+    def test_corrupted_state_file_falls_back_to_defaults(self, tmp_path, monkeypatch):
+        import services.state as st
+        state_path = tmp_path / "services_state.json"
+        monkeypatch.setattr(st, "_STATE_PATH", state_path)
+        state_path.write_text("not valid json", encoding="utf-8")
+        assert st.is_enabled("clk") is True
+
+
+# ===========================================================================
+# Health with disabled services
+# ===========================================================================
+
+class TestHealthWithDisabledServices:
+    """Health check must respect enabled/disabled state."""
+
+    def test_disabled_service_shows_enabled_false_not_error(self):
+        def fake_is_enabled(name):
+            return name != "clk"
+
+        healthy_response = {"status": "ok"}
+
+        async def fake_health(self):
+            return healthy_response
+
+        with patch("services.state.is_enabled", side_effect=fake_is_enabled), \
+             patch("services.clients.ServiceClient.health", new=fake_health):
+            import importlib
+            import services.health as hmod
+            importlib.reload(hmod)
+            results = run(hmod.check_all_services())
+
+        assert results["clk"]["ok"] is True
+        assert results["clk"]["enabled"] is False
+        assert "error" not in results["clk"]
+        assert results["autogui"]["enabled"] is True
+        assert results["osso"]["enabled"] is True
+
+    def test_all_disabled_health_still_ok(self):
+        with patch("services.state.is_enabled", return_value=False):
+            import importlib
+            import services.health as hmod
+            importlib.reload(hmod)
+            results = run(hmod.check_all_services())
+
+        for name, val in results.items():
+            assert val["ok"] is True, f"{name} should report ok when disabled"
+            assert val["enabled"] is False
