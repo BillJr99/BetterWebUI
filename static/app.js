@@ -27,6 +27,8 @@ const state = {
   filesPaneVisible: false,
   // last-turn telemetry
   lastTelemetry: null,
+  // Callback invoked by global Escape to cancel a pending modal (askApproval / handleFileRequest / diff)
+  pendingDialogCancel: null,
 };
 
 // ---------------------------------------------------------------------------
@@ -1287,9 +1289,14 @@ function buildSubagentCard(sa) {
 
 async function readAloud(msgEl, text, btn) {
   if (btn.classList.contains("reading")) {
-    // Toggle off: stop any playing audio in this message
+    // Toggle off: stop any playing audio in this message and revoke its blob URL
     const audio = msgEl.querySelector("audio[data-tts]");
-    if (audio) { audio.pause(); audio.remove(); }
+    if (audio) {
+      audio.pause();
+      const src = audio.src;
+      audio.remove();
+      if (src && src.startsWith("blob:")) URL.revokeObjectURL(src);
+    }
     btn.classList.remove("reading");
     btn.title = "Read aloud";
     return;
@@ -1549,7 +1556,9 @@ async function askApproval(req) {
       let oldHtml = "<em>(new file)</em>";
       try {
         const existing = await api(`/api/project/file?path=${encodeURIComponent(req.filename)}`);
-        if (!existing.is_binary) {
+        if (existing.is_binary) {
+          oldHtml = `<em>(binary file, ${existing.size ?? "?"} bytes — preview not available)</em>`;
+        } else {
           oldHtml = `<pre>${escape(existing.content.slice(0, 3000))}</pre>`;
         }
       } catch { /* file doesn't exist yet */ }
@@ -1563,9 +1572,11 @@ async function askApproval(req) {
       }
       modal.hidden = false;
       acceptBtn.focus();
-      const cleanup = () => { modal.hidden = true; };
+      const cleanup = () => { modal.hidden = true; state.pendingDialogCancel = null; };
       acceptBtn.onclick = () => { cleanup(); resolve({ approved: true }); };
       rejectBtn.onclick = () => { cleanup(); resolve({ approved: false }); };
+      // Escape (via global handler) cancels with deny
+      state.pendingDialogCancel = () => { cleanup(); resolve({ approved: false }); };
     });
   }
 
@@ -1600,6 +1611,7 @@ async function askApproval(req) {
           label: "Deny",
           action: () => {
             closeDialog();
+            state.pendingDialogCancel = null;
             resolve({ approved: false });
           },
         },
@@ -1618,11 +1630,17 @@ async function askApproval(req) {
               } catch (e) { /* non-critical */ }
             }
             closeDialog();
+            state.pendingDialogCancel = null;
             resolve({ approved: true, trust_session: trustSession, command: req.command });
           },
         },
       ],
     });
+    // Escape cancels with deny so the backend isn't left waiting
+    state.pendingDialogCancel = () => {
+      closeDialog();
+      resolve({ approved: false });
+    };
 
     // Wire explain-details toggle
     setTimeout(() => {
@@ -1924,6 +1942,7 @@ async function handleFileRequest(req) {
           label: "Skip",
           action: () => {
             closeDialog();
+            state.pendingDialogCancel = null;
             resolve([]);
           },
         },
@@ -1937,7 +1956,13 @@ async function handleFileRequest(req) {
       preview.innerHTML = `<p class="hint">Reading ${fs.length} file${fs.length === 1 ? "" : "s"}…</p>`;
       const entries = await Promise.all(fs.map(fileToContentEntry));
       closeDialog();
+      state.pendingDialogCancel = null;
       resolve(entries);
+    };
+    // Escape resolves as "skipped" so the backend isn't left waiting
+    state.pendingDialogCancel = () => {
+      closeDialog();
+      resolve([]);
     };
   });
 
@@ -2135,7 +2160,15 @@ function handleGlobalKey(e) {
 
   // Escape closes dialogs and modals
   if (e.key === "Escape") {
-    closeDialog();
+    // If a modal is awaiting user resolution (approval / file-pick / diff), cancel it
+    // explicitly so the pending Promise resolves and the backend isn't left waiting.
+    if (typeof state.pendingDialogCancel === "function") {
+      const cancel = state.pendingDialogCancel;
+      state.pendingDialogCancel = null;
+      try { cancel(); } catch (_) { /* ignore */ }
+    } else {
+      closeDialog();
+    }
     const sheet = $("#shortcut-sheet"); if (sheet) sheet.hidden = true;
     const diff = $("#diff-modal"); if (diff && !diff.hidden) diff.hidden = true;
     const onboarding = $("#onboarding-overlay"); if (onboarding && !onboarding.hidden) onboarding.hidden = true;

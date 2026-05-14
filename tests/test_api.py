@@ -746,6 +746,16 @@ class TestProjectApi:
         r = client.get("/api/project/file?path=../config.json")
         assert r.status_code == 403
 
+    def test_tree_path_traversal_denied(self, client, isolated_dirs):
+        self._setup_workspace_dir(isolated_dirs)
+        r = client.get("/api/project/tree?path=../")
+        assert r.status_code == 403
+
+    def test_tree_non_directory_target(self, client, isolated_dirs):
+        self._setup_workspace_dir(isolated_dirs)
+        r = client.get("/api/project/tree?path=hello.txt")
+        assert r.status_code == 400
+
     def test_checkpoints_empty(self, client, isolated_dirs):
         self._setup_workspace_dir(isolated_dirs)
         r = client.get("/api/project/checkpoints?filename=hello.txt")

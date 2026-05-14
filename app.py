@@ -769,7 +769,7 @@ PLAN_MODE_BLOCK = """
 
 You may ONLY call: update_task_plan, read_file, load_skill.
 Do NOT call any side-effecting tool: execute_shell, write_file,
-generate_image, generate_audio, cli_call, mcp_call (if it writes).
+generate_image, generate_audio, cli_call, mcp_call.
 
 Your job in plan mode is to:
 1. Use update_task_plan to lay out a complete step-by-step plan.
@@ -2152,12 +2152,14 @@ async def project_tree(path: str = ""):
         try:
             target.relative_to(root_path)
         except ValueError:
-            return {"entries": [], "root": root, "error": "Path outside root."}
+            raise HTTPException(403, "Path outside project root.")
     else:
         target = root_path
 
+    if not target.exists():
+        raise HTTPException(404, "Path not found.")
     if not target.is_dir():
-        return {"entries": [], "root": root, "error": f"'{target}' is not a directory."}
+        raise HTTPException(400, f"'{path or '.'}' is not a directory.")
 
     entries = []
     try:
@@ -2177,7 +2179,7 @@ async def project_tree(path: str = ""):
                     "ext": p.suffix.lower(),
                 })
     except Exception as exc:
-        return {"entries": [], "root": root, "error": str(exc)}
+        raise HTTPException(500, f"Could not list directory: {exc}")
     return {"entries": entries, "root": root}
 
 
