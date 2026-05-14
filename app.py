@@ -2077,14 +2077,29 @@ async def upsert_workspace(w: WorkspaceIn):
         try:
             normalized = candidate_path.resolve()
             normalized.relative_to(base)
-            # Persist the normalized absolute path so downstream code uses a
-            # consistent value regardless of what the user typed.
-            w.project_root = str(normalized)
         except (ValueError, OSError):
             raise HTTPException(
                 400,
                 f"project_root must be inside the workspace directory ({base}).",
             )
+        # Create the directory if it doesn't exist yet so /api/project/tree
+        # and execute_shell can use it immediately without "no such directory"
+        # surprises. The path is already proven safe (under WORKSPACE_DIR).
+        try:
+            normalized.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise HTTPException(
+                400,
+                f"Could not create project_root '{normalized}': {exc}",
+            )
+        if not normalized.is_dir():
+            raise HTTPException(
+                400,
+                f"project_root '{normalized}' exists but is not a directory.",
+            )
+        # Persist the normalized absolute path so downstream code uses a
+        # consistent value regardless of what the user typed.
+        w.project_root = str(normalized)
     data = load_workspaces()
     wid = w.id or "".join(c for c in w.name.lower() if c.isalnum() or c in "-_ ").strip().replace(" ", "-") or uuid.uuid4().hex[:8]
     payload = w.model_dump(exclude_none=True)
@@ -2392,7 +2407,16 @@ async def project_tree(request: Request, path: str = ""):
         for p in sorted(target.iterdir()):
             if p.name.startswith("."):
                 continue
+            # Skip symlinks entirely so a link inside the project root that
+            # points outside doesn't leak the target's metadata (size/mtime)
+            # in the listing. /api/project/file already blocks reading them.
+            if p.is_symlink():
+                continue
             rel = str(p.relative_to(root_path))
+            # Use lstat to be explicit about not following links; the
+            # is_symlink() check above already filters them, but lstat keeps
+            # the metadata accurate for the entry we list.
+            st = p.lstat()
             if p.is_dir():
                 entries.append({"type": "dir", "name": p.name, "path": rel})
             else:
@@ -2400,8 +2424,8 @@ async def project_tree(request: Request, path: str = ""):
                     "type": "file",
                     "name": p.name,
                     "path": rel,
-                    "size": p.stat().st_size,
-                    "modified_at": int(p.stat().st_mtime),
+                    "size": st.st_size,
+                    "modified_at": int(st.st_mtime),
                     "ext": p.suffix.lower(),
                 })
     except Exception as exc:

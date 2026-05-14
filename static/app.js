@@ -1217,8 +1217,10 @@ function appendMessage(m) {
     content.innerHTML =
       '<span class="typing-dots"><span></span><span></span><span></span></span>';
   } else if (m.role === "assistant") {
-    // Render subagent cards before the main content
-    let mainText = m.content || "";
+    // Render the main answer first, then append subagent cards below as
+    // collapsible "supporting research" sections. Reads top-down: final
+    // synthesis, then the parallel research that informed it.
+    const mainText = m.content || "";
     content.innerHTML = renderMarkdownWithMath(mainText);
     if (m.subagents?.length) {
       for (const sa of m.subagents) {
