@@ -67,15 +67,24 @@ class _FrontmatterPost:
 
 def _load_frontmatter(path: Path) -> _FrontmatterPost:
     text = path.read_text(encoding="utf-8")
-    if text.startswith("---"):
-        end = text.find("\n---", 4)
-        if end != -1:
-            try:
-                meta = yaml.safe_load(text[4:end]) or {}
-            except yaml.YAMLError:
-                meta = {}
-            return _FrontmatterPost(meta, text[end + 4:].lstrip("\n"))
-    return _FrontmatterPost({}, text)
+    lines = text.splitlines(keepends=True)
+    if not lines or lines[0].rstrip("\r\n") != "---":
+        return _FrontmatterPost({}, text)
+    end_idx = None
+    for i in range(1, len(lines)):
+        if lines[i].rstrip("\r\n") == "---":
+            end_idx = i
+            break
+    if end_idx is None:
+        return _FrontmatterPost({}, text)
+    front_text = "".join(lines[1:end_idx])
+    content = "".join(lines[end_idx + 1:])
+    try:
+        raw = yaml.safe_load(front_text)
+    except yaml.YAMLError:
+        raw = None
+    meta = raw if isinstance(raw, dict) else {}
+    return _FrontmatterPost(meta, content)
 
 
 # ---------------------------------------------------------------------------
@@ -1590,6 +1599,8 @@ async def execute_tool(call: dict, config: dict, send_event, mode: str = "approv
         dest = Path(project_root) / filename
         if not dest.exists():
             return {"error": f"File '{filename}' not found in the workspace."}
+        if not dest.is_file():
+            return {"error": f"'{filename}' is not a regular file and cannot be deleted with this tool."}
 
         if mode != "trusted":
             aid = approvals.new()
@@ -1597,7 +1608,7 @@ async def execute_tool(call: dict, config: dict, send_event, mode: str = "approv
                 "approval_id": aid,
                 "tool": "delete_file",
                 "filename": filename,
-                "dest_path": str(dest),
+                "dest_path": filename,
                 "reason": args.get("reason", ""),
             })
             approved = await approvals.wait(aid)
@@ -1608,7 +1619,7 @@ async def execute_tool(call: dict, config: dict, send_event, mode: str = "approv
             dest.unlink()
         except OSError as exc:
             return {"error": f"Could not delete '{filename}': {exc}"}
-        return {"deleted": filename, "path": str(dest)}
+        return {"deleted": filename, "path": filename}
 
     if tool == "load_skill":
         skill_id = args.get("skill_id", "")
