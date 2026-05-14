@@ -183,8 +183,13 @@ function loadDisplaySettingsUI(display) {
   const dy = $("#cfg-dyslexic");
   const hc = $("#cfg-high-contrast");
   const rm = $("#cfg-reduce-motion");
-  if (fs) fs.value = display.font_size || "md";
-  if (lh) lh.value = display.line_height || "normal";
+  // Clamp persisted values to the supported set so the select UI doesn't
+  // end up blank when config holds an older/unexpected value while
+  // applyDisplaySettings has already coerced the applied class to the default.
+  const fontSize = _FONT_SIZE_VALUES.includes(display.font_size) ? display.font_size : "md";
+  const lineHeight = _LINE_HEIGHT_VALUES.includes(display.line_height) ? display.line_height : "normal";
+  if (fs) fs.value = fontSize;
+  if (lh) lh.value = lineHeight;
   if (dy) dy.checked = !!display.dyslexic_font;
   if (hc) hc.checked = !!display.high_contrast;
   if (rm) rm.checked = !!display.reduce_motion;
@@ -1061,7 +1066,8 @@ function renderConversationList() {
     );
   }
   if (!convs.length) {
-    ul.innerHTML = `<p class="hint" style="padding: 8px;">${q ? "No results." : "No chats yet."}</p>`;
+    // Empty-state must be a list item so the markup remains valid inside <ul>.
+    ul.innerHTML = `<li class="hint" role="presentation" style="padding: 8px; list-style: none;">${q ? "No results." : "No chats yet."}</li>`;
     return;
   }
   // Pinned first
@@ -1525,7 +1531,6 @@ function renderFileTree(ul, entries) {
       details.addEventListener("toggle", async () => {
         if (details.open && sub.children.length === 0) {
           try {
-            const ws = state.workspaces.find((w) => w.id === state.config?.active_workspace_id);
             const data = await api(`/api/project/tree?path=${encodeURIComponent(entry.path)}`);
             renderFileTree(sub, data.entries || []);
           } catch (e) { /* silent */ }
@@ -2191,15 +2196,20 @@ let _gKeyPending = false;
 let _gKeyTimer = null;
 
 function handleGlobalKey(e) {
-  // Don't intercept when typing in inputs
+  // Don't intercept when typing in inputs — with two exceptions:
+  //  - Ctrl/Cmd+Enter in textareas still sends the message
+  //  - Escape always falls through so it can close approval dialogs,
+  //    diff modals, and the file picker even when an input has focus
+  //    (without this the Esc cancel/deny path becomes unreachable for
+  //    keyboard users mid-form).
   const tag = document.activeElement?.tagName?.toLowerCase();
   if (tag === "input" || tag === "textarea" || tag === "select") {
-    // Only intercept Ctrl+Enter in textarea
     if (e.key === "Enter" && (e.ctrlKey || e.metaKey) && tag === "textarea") {
       e.preventDefault();
       send();
+      return;
     }
-    return;
+    if (e.key !== "Escape") return;
   }
 
   // Escape closes dialogs and modals

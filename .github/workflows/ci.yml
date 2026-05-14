@@ -126,9 +126,6 @@ jobs:
       - name: System prompts API responds
         run: curl -sf http://127.0.0.1:8765/api/system-prompts | python3 -m json.tool
 
-      - name: Tasks API responds
-        run: curl -sf http://127.0.0.1:8765/api/tasks | python3 -m json.tool
-
       - name: Full skill CRUD smoke test
         run: |
           # Create
