@@ -538,10 +538,10 @@ function renderWorkspaceList() {
         </div>
       </div>
       <div class="list-actions">
-        <button data-action="activate" data-id="${w.id}">Use</button>
-        <button data-action="edit" data-id="${w.id}">Edit</button>
-        <button data-action="export" data-id="${w.id}" title="Export as .bwui bundle">↓</button>
-        <button data-action="delete" data-id="${w.id}">Delete</button>
+        <button data-action="activate" data-id="${w.id}" aria-label="Use workspace ${escape(w.name)}">Use</button>
+        <button data-action="edit" data-id="${w.id}" aria-label="Edit workspace ${escape(w.name)}">Edit</button>
+        <button data-action="export" data-id="${w.id}" title="Export as .bwui bundle" aria-label="Export workspace ${escape(w.name)} as .bwui bundle">↓</button>
+        <button data-action="delete" data-id="${w.id}" aria-label="Delete workspace ${escape(w.name)}">Delete</button>
       </div>`;
     ul.appendChild(li);
   }
@@ -1095,9 +1095,9 @@ function renderConversationList() {
         </div>
       </div>
       <div class="list-actions">
-        <button data-action="pin" data-id="${c.id}" title="${c.pinned ? "Unpin" : "Pin"}">📌</button>
-        <button data-action="fork" data-id="${c.id}" title="Fork this conversation">⎇</button>
-        <button data-action="delete" data-id="${c.id}" title="Delete">×</button>
+        <button data-action="pin" data-id="${c.id}" title="${c.pinned ? "Unpin" : "Pin"}" aria-label="${c.pinned ? "Unpin" : "Pin"} conversation ${escape(c.title || "")}" aria-pressed="${c.pinned ? "true" : "false"}">📌</button>
+        <button data-action="fork" data-id="${c.id}" title="Fork this conversation" aria-label="Fork conversation ${escape(c.title || "")}">⎇</button>
+        <button data-action="delete" data-id="${c.id}" title="Delete" aria-label="Delete conversation ${escape(c.title || "")}">×</button>
       </div>`;
     li.onclick = (e) => {
       const btn = e.target instanceof Element ? e.target.closest("button") : null;
@@ -1514,10 +1514,15 @@ async function refreshFileTree() {
   const ul = $("#file-tree");
   try {
     const data = await api("/api/project/tree");
-    // Surface the hint when the workspace has no project_root configured yet,
-    // even though the request succeeded. Keep it visible only in that case.
+    // Three distinct states surfaced by the backend:
+    //   project_root_clamped=true → configured but invalid (silently fell back)
+    //   project_root_set=false    → not configured yet
+    //   project_root_set=true     → configured and honored (hide hint)
     if (hint) {
-      if (data.project_root_set === false) {
+      if (data.project_root_clamped) {
+        hint.hidden = false;
+        hint.textContent = "This workspace's project root is invalid (outside the workspace directory). Update it in the workspace settings.";
+      } else if (data.project_root_set === false) {
         hint.hidden = false;
         hint.textContent = "No project root set for this workspace. Open the workspace settings to point it at a folder.";
       } else {
@@ -1936,26 +1941,34 @@ function showTelemetryLine(t) {
 async function handleToolResult(data) {
   const r = data.result || {};
 
-  if (r.data_b64 && r.filename) {
+  // write_file result: backend sends data_b64 only on failure (so the user
+  // can still recover the bytes via download). On success, the file is on
+  // disk at project_root and the file-tree pane shows it — no SSE-bloating
+  // base64 in that path.
+  const isWriteResult = data.tool === "write_file" && r.filename;
+  if (isWriteResult || (r.data_b64 && r.filename)) {
     const mime = r.mime || "application/octet-stream";
-    const blob = b64ToBlob(r.data_b64, mime);
-    const url = storeFile(blob, r.filename, mime);
     const label =
       mime.startsWith("image/") ? "Image" :
       mime.startsWith("audio/") ? "Audio" :
       mime.startsWith("video/") ? "Video" : "File";
-    let content = `${label} ready: ${r.filename}`;
-    if (r.write_error) {
-      content += `\n⚠️ On-disk write failed: ${r.write_error}. ` +
-        `You can still download the generated file from the link below.`;
+    const attachments = [];
+    let content;
+    if (r.data_b64) {
+      const blob = b64ToBlob(r.data_b64, mime);
+      const url = storeFile(blob, r.filename, mime);
+      attachments.push({ url, content_type: mime, filename: r.filename });
+      content = `${label} ready: ${r.filename}`;
+      if (r.write_error) {
+        content += `\n⚠️ On-disk write failed: ${r.write_error}. ` +
+          `You can still download the generated file from the link below.`;
+      }
+    } else {
+      // Successful write with no inlined bytes — point the user at the file
+      // tree where the saved file now lives.
+      content = `${label} saved: ${r.filename} (open from the Files pane to view).`;
     }
-    // Always keep the blob URL so the user can download/preview even if the
-    // on-disk save failed; we only skip the file-tree refresh in that case.
-    const sysMsg = {
-      role: "tool",
-      content,
-      attachments: [{ url, content_type: mime, filename: r.filename }],
-    };
+    const sysMsg = { role: "tool", content, attachments };
     state.messages.push(sysMsg);
     appendMessage(sysMsg);
     // Refresh file tree only when the write actually succeeded
