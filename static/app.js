@@ -1846,11 +1846,16 @@ async function handleToolResult(data) {
       mime.startsWith("audio/") ? "Audio" :
       mime.startsWith("video/") ? "Video" : "File";
     let content = `${label} ready: ${r.filename}`;
-    if (r.write_error) content += `\n⚠️ On-disk write failed: ${r.write_error}`;
+    if (r.write_error) {
+      content += `\n⚠️ On-disk write failed: ${r.write_error}. ` +
+        `You can still download the generated file from the link below.`;
+    }
+    // Always keep the blob URL so the user can download/preview even if the
+    // on-disk save failed; we only skip the file-tree refresh in that case.
     const sysMsg = {
       role: "tool",
       content,
-      attachments: r.write_error ? [] : [{ url, content_type: mime, filename: r.filename }],
+      attachments: [{ url, content_type: mime, filename: r.filename }],
     };
     state.messages.push(sysMsg);
     appendMessage(sysMsg);

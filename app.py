@@ -1212,13 +1212,19 @@ async def run_subagent_loop(
 ) -> str:
     """Run a read-only sub-loop. Returns final assistant text."""
     sub_system = (
-        "You are a read-only research subagent. You may call read_file, load_skill, "
-        "and mcp_call on read-only servers. Do NOT call execute_shell, write_file, "
-        "generate_image, generate_audio, or cli_call. "
+        "You are a read-only research subagent. You may call load_skill only. "
+        "Do NOT call execute_shell, write_file, generate_image, generate_audio, "
+        "cli_call, mcp_call, or read_file. Summarize from your existing context. "
         "Produce a concise summary of your findings when done.\n\n"
         + RENDERING_PROTOCOL
     )
     history = [{"role": "user", "content": prompt}]
+    # Subagents are strictly read-only: mcp_call is blocked entirely because we
+    # cannot statically guarantee any given MCP tool is side-effect-free.
+    blocked_tools = (
+        "execute_shell", "write_file", "generate_image",
+        "generate_audio", "cli_call", "mcp_call",
+    )
     for _ in range(max_steps):
         messages = [{"role": "system", "content": sub_system}] + history
         text, _ = await chat_complete(messages, model, config)
@@ -1227,7 +1233,7 @@ async def run_subagent_loop(
         if not call:
             return text
         # Only allow read-only tools
-        if call["tool"] in ("execute_shell", "write_file", "generate_image", "generate_audio", "cli_call"):
+        if call["tool"] in blocked_tools:
             history.append({
                 "role": "user",
                 "content": f"[Tool '{call['tool']}' blocked — subagents are read-only]"
@@ -1238,12 +1244,6 @@ async def run_subagent_loop(
         elif call["tool"] == "load_skill":
             skill = load_skill_content(call["args"].get("skill_id", ""))
             result = skill or {"error": "Skill not found."}
-        elif call["tool"] == "mcp_call":
-            result = await mcp_manager.call(
-                call["args"].get("server", ""),
-                call["args"].get("name", ""),
-                call["args"].get("arguments") or {},
-            )
         else:
             result = {"error": f"Unknown tool: {call['tool']}"}
         history.append({
@@ -1294,7 +1294,7 @@ async def execute_tool(call: dict, config: dict, send_event, mode: str = "approv
     if tool == "update_task_plan":
         items = args.get("items", [])
         await send_event("task_plan", {"items": items})
-        return {"ok": True, "items_count": len(items)}
+        return {"ok": True, "items_count": len(items), "items": items}
 
     if tool == "spawn_subagent":
         kind = args.get("kind", "explore")
@@ -2204,12 +2204,18 @@ async def project_file(path: str):
         # Read at most the cap+1 bytes to detect truncation without loading huge files
         with full.open("rb") as fh:
             raw = fh.read(_MAX_PROJECT_FILE_BYTES)
-        try:
-            content = raw.decode("utf-8", errors="replace")
-            is_binary = False
-        except Exception:
+        # NUL byte heuristic + strict UTF-8 decode: anything that fails either
+        # check is treated as binary so the diff modal's binary guard works.
+        if b"\x00" in raw:
             content = base64.b64encode(raw).decode("ascii")
             is_binary = True
+        else:
+            try:
+                content = raw.decode("utf-8", errors="strict")
+                is_binary = False
+            except UnicodeDecodeError:
+                content = base64.b64encode(raw).decode("ascii")
+                is_binary = True
     except Exception:
         content = base64.b64encode(full.read_bytes()[:_MAX_PROJECT_FILE_BYTES]).decode("ascii")
         is_binary = True
