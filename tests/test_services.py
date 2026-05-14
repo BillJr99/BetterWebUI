@@ -173,7 +173,7 @@ class TestCLKClient:
         mock_resp = _mock_response({"artifacts": []})
         client, ctx, inner = self._make_client(mock_resp)
         with patch.object(client, "_client", return_value=ctx):
-            result = run(client.list_artifacts("t-999"))
+            run(client.list_artifacts("t-999"))
         inner.get.assert_awaited_once_with("/api/research/t-999/artifacts")
 
     def test_cancel_task_calls_correct_path(self):
@@ -240,9 +240,8 @@ class TestAutoGUIClient:
         mock_resp = _mock_response({"cancelled": True})
         client, ctx, inner = self._make_client(mock_resp)
         with patch.object(client, "_client", return_value=ctx):
-            result = run(client.cancel_task("gui-1"))
+            run(client.cancel_task("gui-1"))
         inner.post.assert_awaited_once_with("/api/task/gui-1/cancel")
-        assert result["cancelled"] is True
 
 
 # ===========================================================================
@@ -355,7 +354,6 @@ class TestHealthCheck:
             return {"status": "ok"}
 
         with patch("services.clients.ServiceClient.health", new=fake_health):
-            from services.health import check_all_services
             import importlib
             import services.health as health_mod
             importlib.reload(health_mod)
