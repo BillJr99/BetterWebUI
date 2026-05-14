@@ -57,7 +57,7 @@
 
         <div class="onboarding-step" id="onboarding-step-3" hidden>
           <h2>You're ready!</h2>
-          <p id="ob-done-msg">Your workspace has been created. Click "Start chatting" to begin.</p>
+          <p id="ob-done-msg">Your workspace has been created. Click “Start chatting” to begin.</p>
           <div class="onboarding-actions">
             <button id="ob-finish-btn" class="primary">Start chatting →</button>
           </div>
@@ -164,7 +164,7 @@
           <button id="new-prompt-btn">+ New prompt</button>
         </div>
         <p class="hint">
-          System prompts shape the assistant's role and tone. Pick the one
+          System prompts shape the assistant’s role and tone. Pick the one
           to use as the active voice.
         </p>
         <ul id="prompt-list" aria-label="Prompts"></ul>
@@ -179,7 +179,7 @@
         <p class="hint">
           MCP servers extend the assistant with new tools — file systems,
           GitHub, web fetch, search, memory. Some require Node.js or
-          Python's <code>uv</code> to be installed.
+          Python’s <code>uv</code> to be installed.
         </p>
         <div id="mcp-lint-warnings" class="lint-warnings" aria-live="polite" hidden></div>
         <ul id="mcp-server-list" aria-label="MCP servers"></ul>
@@ -233,6 +233,22 @@
         </label>
 
         <button id="save-defaults" class="primary">Save defaults</button>
+
+        <h2>Services</h2>
+        <p class="hint">Enable or disable integrated services. Disabled services return an error for all API calls until re-enabled.</p>
+        <label class="checkbox">
+          <input id="svc-clk-enabled" type="checkbox" checked />
+          CognitiveLoopKernel (CLK) <small>— research &amp; reasoning workflows</small>
+        </label>
+        <label class="checkbox">
+          <input id="svc-autogui-enabled" type="checkbox" checked />
+          AutoGUI <small>— desktop GUI automation</small>
+        </label>
+        <label class="checkbox">
+          <input id="svc-osso-enabled" type="checkbox" checked />
+          OSScreenObserver (OSSO) <small>— screen capture &amp; observation</small>
+        </label>
+        <p class="status-line" id="services-toggle-status" aria-live="polite"></p>
 
         <h2>Display</h2>
         <label>Font size
