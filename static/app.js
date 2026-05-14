@@ -18,9 +18,17 @@ const state = {
   messages: [],
   attachments: [],
   busy: false,
-  // Keyed by filename → { url, mime, filename }. Blob URLs created here
-  // survive the `done` re-render so images/audio stay visible in-chat.
   fileStore: {},
+  taskPlan: [],          // current plan items from backend
+  convSearchQuery: "",   // conversation search filter
+  micListening: false,   // voice input state
+  rightRailVisible: false,
+  planPaneVisible: false,
+  filesPaneVisible: false,
+  // last-turn telemetry
+  lastTelemetry: null,
+  // Callback invoked by global Escape to cancel a pending modal (askApproval / handleFileRequest / diff)
+  pendingDialogCancel: null,
 };
 
 // ---------------------------------------------------------------------------
@@ -35,7 +43,10 @@ async function api(path, opts = {}) {
   });
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(`${res.status}: ${text}`);
+    const err = new Error(`${res.status}: ${text}`);
+    err.status = res.status;
+    err.body = text;
+    throw err;
   }
   return res.json();
 }
@@ -49,7 +60,7 @@ function escape(s) {
 }
 
 // ---------------------------------------------------------------------------
-// Local-download helpers (for generated/written files)
+// Local-download helpers
 // ---------------------------------------------------------------------------
 
 function b64ToBlob(b64, mime) {
@@ -59,8 +70,6 @@ function b64ToBlob(b64, mime) {
   return new Blob([arr], { type: mime || "application/octet-stream" });
 }
 
-// Store a blob in the browser's fileStore and return its object URL.
-// The Download link in the chat is how the user saves it — no auto-click.
 function storeFile(blob, filename, mime) {
   const url = URL.createObjectURL(blob);
   state.fileStore[filename] = { url, mime: mime || blob.type || "application/octet-stream", filename };
@@ -68,8 +77,6 @@ function storeFile(blob, filename, mime) {
 }
 
 async function fileToContentEntry(file) {
-  // Read text-ish files as text; binary as base64. The model will receive
-  // text content directly and base64 only for binary attachments.
   const isText =
     file.type.startsWith("text/") ||
     /\.(md|markdown|csv|tsv|json|ya?ml|log|txt|py|js|ts|tsx|jsx|html|css|java|c|cpp|h|sh|tex|bib)$/i.test(file.name);
@@ -94,21 +101,12 @@ async function fileToContentEntry(file) {
 // Markdown + KaTeX rendering
 // ---------------------------------------------------------------------------
 
-// Private-use Unicode codepoints used as math-stash delimiters. They never
-// appear in real content, survive `marked` and `DOMPurify` untouched, and
-// don't depend on surrounding whitespace (the previous " MATH0 " marker
-// failed when math hugged a paragraph edge or punctuation: marked
-// normalized the spaces away and the restoration regex stopped matching).
 const MATH_STASH_OPEN = "";
 const MATH_STASH_CLOSE = "";
 const MATH_STASH_RE = new RegExp(MATH_STASH_OPEN + "(\\d+)" + MATH_STASH_CLOSE, "g");
 
 function renderMarkdownWithMath(text) {
-  // 1. Strip the tool-call block (it's noise to the user).
   text = String(text || "").replace(/```tool[\s\S]*?```/g, "");
-
-  // 2. Protect math regions from markdown processing — otherwise underscores
-  //    and asterisks inside formulas get parsed as italics/bold.
   const stash = [];
   const stashOne = (s) => {
     stash.push(s);
@@ -120,26 +118,16 @@ function renderMarkdownWithMath(text) {
     .replace(/\\\([\s\S]+?\\\)/g, stashOne)
     .replace(/(?<![\w\d])\$[^$\n]+?\$(?![\w\d])/g, stashOne);
 
-  // 3. Markdown → HTML.
   let html = "";
   if (window.marked) {
     html = marked.parse(text, { breaks: true, gfm: true });
   } else {
     html = escape(text).replace(/\n/g, "<br/>");
   }
-
-  // 4. Sanitize.
   if (window.DOMPurify) {
-    html = DOMPurify.sanitize(html, {
-      ADD_ATTR: ["target", "rel"],
-    });
+    html = DOMPurify.sanitize(html, { ADD_ATTR: ["target", "rel"] });
   }
-
-  // 5. Restore math. The escaped source is the ELEMENT'S innerHTML; KaTeX
-  //    auto-render later reads textContent, which decodes back to the raw
-  //    LaTeX so $...$ delimiters are seen.
   html = html.replace(MATH_STASH_RE, (_, i) => escape(stash[+i]));
-
   return html;
 }
 
@@ -162,6 +150,65 @@ function renderMathIn(el) {
 }
 
 // ---------------------------------------------------------------------------
+// Display settings
+// ---------------------------------------------------------------------------
+
+const _FONT_SIZE_VALUES = ["sm", "md", "lg", "xl"];
+const _LINE_HEIGHT_VALUES = ["normal", "relaxed", "loose"];
+
+function applyDisplaySettings(display) {
+  const body = document.body;
+  // Validate persisted values against an allowlist; classList tokens cannot
+  // contain whitespace, so a corrupted config value would otherwise throw.
+  const fontSize = _FONT_SIZE_VALUES.includes(display.font_size) ? display.font_size : "md";
+  const lineHeight = _LINE_HEIGHT_VALUES.includes(display.line_height) ? display.line_height : "normal";
+  // Font size
+  body.classList.remove("font-sm", "font-md", "font-lg", "font-xl");
+  body.classList.add("font-" + fontSize);
+  // Line height
+  body.classList.remove("lh-normal", "lh-relaxed", "lh-loose");
+  body.classList.add("lh-" + lineHeight);
+  // Dyslexic font
+  body.classList.toggle("dyslexic-font", !!display.dyslexic_font);
+  // High contrast
+  body.classList.toggle("high-contrast", !!display.high_contrast);
+  // Reduce motion
+  body.classList.toggle("reduce-motion", !!display.reduce_motion);
+}
+
+function loadDisplaySettingsUI(display) {
+  if (!display) return;
+  const fs = $("#cfg-font-size");
+  const lh = $("#cfg-line-height");
+  const dy = $("#cfg-dyslexic");
+  const hc = $("#cfg-high-contrast");
+  const rm = $("#cfg-reduce-motion");
+  // Clamp persisted values to the supported set so the select UI doesn't
+  // end up blank when config holds an older/unexpected value while
+  // applyDisplaySettings has already coerced the applied class to the default.
+  const fontSize = _FONT_SIZE_VALUES.includes(display.font_size) ? display.font_size : "md";
+  const lineHeight = _LINE_HEIGHT_VALUES.includes(display.line_height) ? display.line_height : "normal";
+  if (fs) fs.value = fontSize;
+  if (lh) lh.value = lineHeight;
+  if (dy) dy.checked = !!display.dyslexic_font;
+  if (hc) hc.checked = !!display.high_contrast;
+  if (rm) rm.checked = !!display.reduce_motion;
+}
+
+async function saveDisplay() {
+  const display = {
+    font_size: $("#cfg-font-size").value,
+    line_height: $("#cfg-line-height").value,
+    dyslexic_font: $("#cfg-dyslexic").checked,
+    high_contrast: $("#cfg-high-contrast").checked,
+    reduce_motion: $("#cfg-reduce-motion").checked,
+  };
+  await api("/api/config", { method: "POST", json: { display } });
+  applyDisplaySettings(display);
+  flash("Display settings saved.", "good");
+}
+
+// ---------------------------------------------------------------------------
 // Settings tab
 // ---------------------------------------------------------------------------
 
@@ -175,6 +222,20 @@ async function loadConfig() {
   $("#cfg-tts-voice").value = state.config.tts_voice || "alloy";
   $("#cfg-consensus-runs").value = state.config.consensus_runs ?? 1;
   $("#cfg-shell-enabled").checked = state.config.shell_enabled !== false;
+  // Mode select: prefer the active workspace's mode (if any) so the
+  // workspace-scoped setting actually takes effect; fall back to the
+  // global config mode, then to "approve-each".
+  const ms = $("#mode-select");
+  if (ms) {
+    const activeWsId = state.config.active_workspace_id;
+    const activeWs = activeWsId && state.workspaces
+      ? state.workspaces.find((w) => w.id === activeWsId)
+      : null;
+    ms.value = (activeWs && activeWs.mode) || state.config.chat_mode || "approve-each";
+  }
+  // Display
+  loadDisplaySettingsUI(state.config.display || {});
+  applyDisplaySettings(state.config.display || {});
   renderConnectionStatus(state.config);
   await loadHealth();
 }
@@ -236,7 +297,7 @@ async function saveDefaults() {
   await api("/api/config", { method: "POST", json: patch });
   await loadConfig();
   await refreshModels();
-  flash("Defaults saved.");
+  flash("Defaults saved.", "good");
 }
 
 // ---------------------------------------------------------------------------
@@ -341,6 +402,7 @@ async function loadSkills() {
   const data = await api("/api/skills");
   state.skills = data.skills || [];
   renderSkillList();
+  await loadLintWarnings();
 }
 
 function renderSkillList() {
@@ -377,6 +439,23 @@ function renderSkillList() {
       await loadSkills();
     }
   };
+}
+
+async function loadLintWarnings() {
+  try {
+    const lint = await api("/api/lint");
+    renderLintSection("skill-lint-warnings", lint.skills || []);
+    renderLintSection("mcp-lint-warnings", lint.mcp || []);
+    renderLintSection("cli-lint-warnings", lint.cli || []);
+  } catch (e) { /* lint endpoint may not exist yet */ }
+}
+
+function renderLintSection(elId, warnings) {
+  const el = document.getElementById(elId);
+  if (!el) return;
+  if (!warnings.length) { el.hidden = true; return; }
+  el.hidden = false;
+  el.innerHTML = `<strong>⚠ Issues found:</strong><ul>${warnings.map((w) => `<li>${escape(w)}</li>`).join("")}</ul>`;
 }
 
 function openNewSkillDialog() {
@@ -459,9 +538,10 @@ function renderWorkspaceList() {
         </div>
       </div>
       <div class="list-actions">
-        <button data-action="activate" data-id="${w.id}">Use</button>
-        <button data-action="edit" data-id="${w.id}">Edit</button>
-        <button data-action="delete" data-id="${w.id}">Delete</button>
+        <button data-action="activate" data-id="${w.id}" aria-label="Use workspace ${escape(w.name)}">Use</button>
+        <button data-action="edit" data-id="${w.id}" aria-label="Edit workspace ${escape(w.name)}">Edit</button>
+        <button data-action="export" data-id="${w.id}" title="Export as .bwui bundle" aria-label="Export workspace ${escape(w.name)} as .bwui bundle">↓</button>
+        <button data-action="delete" data-id="${w.id}" aria-label="Delete workspace ${escape(w.name)}">Delete</button>
       </div>`;
     ul.appendChild(li);
   }
@@ -471,6 +551,7 @@ function renderWorkspaceList() {
     const id = btn.dataset.id;
     if (btn.dataset.action === "activate") return activateWorkspace(id);
     if (btn.dataset.action === "edit") return openWorkspaceDialog(state.workspaces.find((x) => x.id === id));
+    if (btn.dataset.action === "export") return exportWorkspace(id);
     if (btn.dataset.action === "delete") {
       if (!confirm("Delete this workspace?")) return;
       await api(`/api/workspaces/${id}`, { method: "DELETE" });
@@ -478,6 +559,32 @@ function renderWorkspaceList() {
       await loadConfig();
     }
   };
+}
+
+async function exportWorkspace(id) {
+  const w = state.workspaces.find((x) => x.id === id);
+  const res = await fetch(`/api/workspaces/${encodeURIComponent(id)}/export`);
+  if (!res.ok) { flash("Export failed.", "warn"); return; }
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `${(w?.name || id).replace(/\s+/g, "_")}.bwui`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+  flash("Workspace exported.", "good");
+}
+
+async function importWorkspace(file) {
+  const fd = new FormData();
+  fd.append("file", file);
+  const res = await fetch("/api/workspaces/import", { method: "POST", body: fd });
+  if (!res.ok) { flash("Import failed: " + (await res.text()), "warn"); return; }
+  const data = await res.json();
+  await loadWorkspaces();
+  flash(`Workspace "${data.name}" imported.`, "good");
 }
 
 function populateWorkspaceSelect() {
@@ -496,10 +603,13 @@ async function activateWorkspace(id) {
     method: "POST",
     json: { active_workspace_id: id || "" },
   });
-  await loadConfig();
+  // Refresh workspaces before config so loadConfig's mode-select lookup
+  // can find the new active workspace's stored mode.
   await loadWorkspaces();
-  // Workspace switch starts a fresh chat by default
+  await loadConfig();
   newChat();
+  // Refresh file tree for the new workspace
+  if (state.filesPaneVisible) refreshFileTree();
 }
 
 function openWorkspaceDialog(workspace) {
@@ -514,6 +624,8 @@ function openWorkspaceDialog(workspace) {
     active_cli_tools: [],
     files: [],
     default_model: "",
+    project_root: "",
+    mode: "approve-each",
   };
   const skillsList = state.skills
     .map(
@@ -561,6 +673,10 @@ function openWorkspaceDialog(workspace) {
           ${state.models.map((m) => `<option value="${m.id}" ${m.id === w.default_model ? "selected" : ""}>${escape(m.name)}</option>`).join("")}
         </select>
       </label>
+      <label>Project root <em>(optional — for file tree &amp; checkpoints)</em>
+        <input id="dlg-project-root" type="text" value="${escape(w.project_root || "")}" placeholder="${escape((state.config?.workspace_dir || "") + "/my-project")}" />
+        <small>Must be a folder under the server's workspace directory${state.config?.workspace_dir ? ` (<code>${escape(state.config.workspace_dir)}</code>)` : ""}. The file tree pane will show its contents.</small>
+      </label>
 
       <h3>Skills available in this workspace</h3>
       <div class="check-grid">${skillsList || '<p class="hint">No skills yet.</p>'}</div>
@@ -572,7 +688,7 @@ function openWorkspaceDialog(workspace) {
       <div class="check-grid">${cliList || '<p class="hint">No CLI shortcuts configured. Add them under Tools.</p>'}</div>
 
       <h3>Persistent files</h3>
-      <p class="hint">Files added here travel with every chat in this workspace (attached to the first message). Useful for syllabi, rubrics, drafts.</p>
+      <p class="hint">Files added here travel with every chat in this workspace.</p>
       <div id="dlg-files">${filesPreview}</div>
       <label class="upload-label inline">
         + Add file
@@ -591,6 +707,7 @@ function openWorkspaceDialog(workspace) {
             description: $("#dlg-desc").value.trim(),
             system_prompt_id: $("#dlg-prompt").value || null,
             default_model: $("#dlg-model").value || null,
+            project_root: $("#dlg-project-root").value.trim() || null,
             active_skills: collectChecked("skill"),
             active_mcp_servers: collectChecked("mcp"),
             active_cli_tools: collectChecked("cli"),
@@ -599,7 +716,6 @@ function openWorkspaceDialog(workspace) {
           if (!body.name) return;
           const res = await api("/api/workspaces", { method: "POST", json: body });
           await loadWorkspaces();
-          // Auto-activate new workspaces
           if (isNew) await activateWorkspace(res.id);
           closeDialog();
         },
@@ -607,7 +723,6 @@ function openWorkspaceDialog(workspace) {
     ],
   });
 
-  // Wire file additions/removals into a mutable working list
   let pendingWorkspaceFiles = [...(w.files || [])];
   const renderFiles = () => {
     $("#dlg-files").innerHTML = pendingWorkspaceFiles
@@ -940,7 +1055,7 @@ function openCliCustomDialog() {
 }
 
 // ---------------------------------------------------------------------------
-// Conversations
+// Conversations: search, pin, tag, fork
 // ---------------------------------------------------------------------------
 
 async function loadConversations() {
@@ -952,25 +1067,43 @@ async function loadConversations() {
 function renderConversationList() {
   const ul = $("#conversation-list");
   ul.innerHTML = "";
-  if (!state.conversations.length) {
-    ul.innerHTML = '<p class="hint" style="padding: 8px;">No chats yet.</p>';
+  let convs = state.conversations;
+  const q = state.convSearchQuery.trim().toLowerCase();
+  if (q) {
+    convs = convs.filter((c) =>
+      (c.title || "").toLowerCase().includes(q) ||
+      (c.tags || []).some((t) => t.toLowerCase().includes(q))
+    );
+  }
+  if (!convs.length) {
+    // Empty-state must be a list item so the markup remains valid inside <ul>.
+    ul.innerHTML = `<li class="hint" role="presentation" style="padding: 8px; list-style: none;">${q ? "No results." : "No chats yet."}</li>`;
     return;
   }
-  for (const c of state.conversations) {
+  // Pinned first
+  convs = [...convs.filter((c) => c.pinned), ...convs.filter((c) => !c.pinned)];
+  for (const c of convs) {
     const li = document.createElement("li");
     if (c.id === state.currentConversationId) li.classList.add("active");
+    const tags = (c.tags || []).map((t) => `<span class="tag-badge">${escape(t)}</span>`).join("");
     li.innerHTML = `
-      <div class="list-item-title">${escape(c.title || "Untitled")}</div>
+      <div class="list-item-title">
+        <div>${escape(c.title || "Untitled")}</div>
+        <div class="conv-meta">
+          ${c.pinned ? '<span class="pin-badge" title="Pinned">📌</span>' : ""}
+          ${tags}
+        </div>
+      </div>
       <div class="list-actions">
-        <button data-action="delete" data-id="${c.id}" title="Delete">×</button>
+        <button data-action="pin" data-id="${c.id}" title="${c.pinned ? "Unpin" : "Pin"}" aria-label="${c.pinned ? "Unpin" : "Pin"} conversation ${escape(c.title || "")}" aria-pressed="${c.pinned ? "true" : "false"}">📌</button>
+        <button data-action="fork" data-id="${c.id}" title="Fork this conversation" aria-label="Fork conversation ${escape(c.title || "")}">⎇</button>
+        <button data-action="delete" data-id="${c.id}" title="Delete" aria-label="Delete conversation ${escape(c.title || "")}">×</button>
       </div>`;
     li.onclick = (e) => {
-      const btn = e.target.closest("button");
-      if (btn?.dataset.action === "delete") {
-        e.stopPropagation();
-        deleteConversation(c.id);
-        return;
-      }
+      const btn = e.target instanceof Element ? e.target.closest("button") : null;
+      if (btn?.dataset.action === "delete") { e.stopPropagation(); deleteConversation(c.id); return; }
+      if (btn?.dataset.action === "pin") { e.stopPropagation(); pinConversation(c.id, !c.pinned); return; }
+      if (btn?.dataset.action === "fork") { e.stopPropagation(); forkConversation(c.id); return; }
       openConversation(c.id);
     };
     ul.appendChild(li);
@@ -981,7 +1114,9 @@ async function openConversation(id) {
   const conv = await api(`/api/conversations/${id}`);
   state.currentConversationId = id;
   state.messages = conv.messages || [];
+  state.taskPlan = conv.task_plan || [];
   renderMessages();
+  renderPlan();
   renderConversationList();
 }
 
@@ -992,12 +1127,32 @@ async function deleteConversation(id) {
   await loadConversations();
 }
 
+async function pinConversation(id, pin) {
+  await api(`/api/conversations/${id}/pin`, { method: "POST", json: { pinned: pin } });
+  await loadConversations();
+}
+
+async function forkConversation(id) {
+  const conv = await api(`/api/conversations/${id}`);
+  const msgCount = (conv.messages || []).length;
+  const forkAt = msgCount > 1 ? msgCount - 1 : msgCount;
+  const forked = await api(`/api/conversations/${id}/fork`, {
+    method: "POST",
+    json: { fork_at: forkAt },
+  });
+  await loadConversations();
+  await openConversation(forked.id);
+  flash("Forked into a new conversation.", "good");
+}
+
 function newChat() {
   state.currentConversationId = null;
   state.messages = [];
   state.attachments = [];
+  state.taskPlan = [];
   renderMessages();
   renderAttachments();
+  renderPlan();
   renderConversationList();
 }
 
@@ -1045,20 +1200,39 @@ function appendMessage(m) {
       m.role === "assistant" ? "Assistant" : m.role === "user" ? "You" : m.role;
   }
 
+  // Per-message action buttons (read-aloud, fork)
+  if (m.role === "assistant" && !m._placeholder) {
+    const roleEl = tpl.querySelector(".role");
+    const acts = document.createElement("div");
+    acts.className = "message-actions";
+    acts.innerHTML = `<button class="read-aloud-btn" title="Read aloud" aria-label="Read this message aloud">🔊</button>`;
+    if (m.telemetry) {
+      acts.innerHTML += `<span class="telemetry-badge">${m.telemetry.tokens_in ?? "?"}→${m.telemetry.tokens_out ?? "?"}t · ${m.telemetry.elapsed_ms ?? "?"}ms</span>`;
+    }
+    roleEl.appendChild(acts);
+  }
+
   const content = tpl.querySelector(".content");
   if (m._placeholder) {
     content.innerHTML =
       '<span class="typing-dots"><span></span><span></span><span></span></span>';
   } else if (m.role === "assistant") {
-    content.innerHTML = renderMarkdownWithMath(m.content || "");
+    // Render the main answer first, then append subagent cards below as
+    // collapsible "supporting research" sections. Reads top-down: final
+    // synthesis, then the parallel research that informed it.
+    const mainText = m.content || "";
+    content.innerHTML = renderMarkdownWithMath(mainText);
+    if (m.subagents?.length) {
+      for (const sa of m.subagents) {
+        content.appendChild(buildSubagentCard(sa));
+      }
+    }
   } else if (isToolResult) {
     content.textContent = m.content || "";
   } else {
     content.innerHTML = renderMarkdownWithMath(m.content || "");
   }
 
-  // For backend-synced tool result messages (role:"user", content:"[Tool..."),
-  // look up the fileStore so images/audio survive the `done` re-render.
   let effectiveAttachments = m.attachments || [];
   if (isToolResult && m.role === "user" && !effectiveAttachments.length) {
     const fm = (m.content || "").match(/"filename":\s*"([^"]+)"/);
@@ -1108,11 +1282,80 @@ function appendMessage(m) {
   }
 
   container.appendChild(tpl);
-  // Render math after the node is in the DOM
   const newEl = container.lastElementChild;
+
+  // Wire read-aloud button
+  const readBtn = newEl?.querySelector(".read-aloud-btn");
+  if (readBtn) {
+    readBtn.onclick = () => readAloud(newEl, m.content || "", readBtn);
+  }
+
   if (newEl && m.role === "assistant") renderMathIn(newEl);
   container.scrollTop = container.scrollHeight;
   return newEl;
+}
+
+function buildSubagentCard(sa) {
+  const card = document.createElement("div");
+  card.className = "subagent-card";
+  const collapsed = document.createElement("details");
+  const summary = document.createElement("summary");
+  summary.className = "subagent-header";
+  summary.innerHTML = `<span>${escape(sa.kind || "subagent")} subagent result</span>`;
+  const body = document.createElement("div");
+  body.className = "subagent-body";
+  body.textContent = sa.combined || "(no result)";
+  collapsed.appendChild(summary);
+  collapsed.appendChild(body);
+  card.appendChild(collapsed);
+  return card;
+}
+
+// ---------------------------------------------------------------------------
+// Read aloud
+// ---------------------------------------------------------------------------
+
+async function readAloud(msgEl, text, btn) {
+  if (btn.classList.contains("reading")) {
+    // Toggle off: stop any playing audio in this message and revoke its blob URL
+    const audio = msgEl.querySelector("audio[data-tts]");
+    if (audio) {
+      audio.pause();
+      const src = audio.src;
+      audio.remove();
+      if (src && src.startsWith("blob:")) URL.revokeObjectURL(src);
+    }
+    btn.classList.remove("reading");
+    btn.title = "Read aloud";
+    return;
+  }
+  btn.classList.add("reading");
+  btn.title = "Stop reading";
+  try {
+    const res = await fetch("/api/tts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: text.slice(0, 4096) }),
+    });
+    if (!res.ok) throw new Error(await res.text());
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const audio = document.createElement("audio");
+    audio.dataset.tts = "1";
+    audio.autoplay = true;
+    audio.src = url;
+    audio.onended = () => {
+      audio.remove();
+      URL.revokeObjectURL(url);
+      btn.classList.remove("reading");
+      btn.title = "Read aloud";
+    };
+    msgEl.querySelector(".content").appendChild(audio);
+  } catch (e) {
+    btn.classList.remove("reading");
+    btn.title = "Read aloud";
+    flash("Read aloud failed: " + e.message, "warn");
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1123,10 +1366,7 @@ async function attachFile(file) {
   const fd = new FormData();
   fd.append("file", file);
   const res = await fetch("/api/upload", { method: "POST", body: fd });
-  if (!res.ok) {
-    flash("Upload failed.", "warn");
-    return;
-  }
+  if (!res.ok) { flash("Upload failed.", "warn"); return; }
   const a = await res.json();
   state.attachments.push(a);
   renderAttachments();
@@ -1138,12 +1378,391 @@ function renderAttachments() {
   state.attachments.forEach((a, i) => {
     const span = document.createElement("span");
     span.className = "pill";
-    span.innerHTML = `${escape(a.filename)} <button data-i="${i}" title="Remove">×</button>`;
+    span.innerHTML = `${escape(a.filename)} <button data-i="${i}" title="Remove" aria-label="Remove ${escape(a.filename)}">×</button>`;
     span.querySelector("button").onclick = () => {
       state.attachments.splice(i, 1);
       renderAttachments();
     };
     wrap.appendChild(span);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Voice input (SpeechRecognition)
+// ---------------------------------------------------------------------------
+
+let recognition = null;
+
+function initMic() {
+  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SpeechRecognition) {
+    const btn = $("#mic-btn");
+    if (btn) { btn.hidden = true; }
+    return;
+  }
+  recognition = new SpeechRecognition();
+  recognition.continuous = false;
+  recognition.interimResults = true;
+  recognition.lang = navigator.language || "en-US";
+
+  recognition.onresult = (e) => {
+    let transcript = "";
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      transcript += e.results[i][0].transcript;
+    }
+    const input = $("#composer-input");
+    if (input) input.value = transcript;
+  };
+
+  recognition.onend = () => {
+    state.micListening = false;
+    const btn = $("#mic-btn");
+    if (btn) { btn.classList.remove("listening"); btn.setAttribute("aria-pressed", "false"); }
+  };
+
+  recognition.onerror = (e) => {
+    state.micListening = false;
+    const btn = $("#mic-btn");
+    if (btn) { btn.classList.remove("listening"); btn.setAttribute("aria-pressed", "false"); }
+    if (e.error !== "no-speech") flash("Microphone error: " + e.error, "warn");
+  };
+}
+
+function toggleMic() {
+  if (!recognition) {
+    // Fallback: proxy to OpenWebUI transcription
+    flash("Voice input is not supported in this browser.", "warn");
+    return;
+  }
+  const btn = $("#mic-btn");
+  if (state.micListening) {
+    recognition.stop();
+  } else {
+    recognition.start();
+    state.micListening = true;
+    if (btn) { btn.classList.add("listening"); btn.setAttribute("aria-pressed", "true"); }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Task plan pane
+// ---------------------------------------------------------------------------
+
+const _PLAN_STATUSES = ["pending", "in_progress", "done", "blocked"];
+
+function renderPlan() {
+  const list = $("#plan-list");
+  if (!list) return;
+  list.innerHTML = "";
+  if (!state.taskPlan.length) {
+    list.innerHTML = `<li class="plan-item pending"><span class="plan-item-text" style="font-style:italic;color:var(--ink-faint)">No plan yet.</span></li>`;
+    return;
+  }
+  const icons = { pending: "○", in_progress: "◉", done: "✓", blocked: "⚠" };
+  for (const item of state.taskPlan) {
+    // Clamp item.status to the known set — values come from model output and
+    // could otherwise inject whitespace or extra tokens into className.
+    const status = _PLAN_STATUSES.includes(item.status) ? item.status : "pending";
+    const li = document.createElement("li");
+    li.className = `plan-item ${status}`;
+    li.innerHTML = `
+      <span class="plan-item-icon" aria-label="${escape(status)}">${icons[status]}</span>
+      <span class="plan-item-text">
+        ${escape(item.title || "")}
+        ${item.note ? `<div class="plan-item-note">${escape(item.note)}</div>` : ""}
+      </span>`;
+    list.appendChild(li);
+  }
+}
+
+function setRightRailVisible(show) {
+  state.rightRailVisible = show;
+  const rail = $("#right-rail");
+  if (!rail) return;
+  rail.hidden = !show;
+}
+
+function setPlanPaneVisible(show) {
+  state.planPaneVisible = show;
+  const pane = $("#plan-pane");
+  if (!pane) return;
+  pane.hidden = !show;
+  const btn = $("#toggle-plan-btn");
+  if (btn) btn.setAttribute("aria-pressed", show ? "true" : "false");
+  updateRightRailVisibility();
+}
+
+function setFilesPaneVisible(show) {
+  state.filesPaneVisible = show;
+  const pane = $("#files-pane");
+  if (!pane) return;
+  pane.hidden = !show;
+  const btn = $("#toggle-files-btn");
+  if (btn) btn.setAttribute("aria-pressed", show ? "true" : "false");
+  if (show) refreshFileTree();
+  updateRightRailVisibility();
+}
+
+function updateRightRailVisibility() {
+  setRightRailVisible(state.planPaneVisible || state.filesPaneVisible);
+}
+
+// ---------------------------------------------------------------------------
+// File tree pane
+// ---------------------------------------------------------------------------
+
+async function refreshFileTree() {
+  const hint = $("#file-tree-hint");
+  const ul = $("#file-tree");
+  try {
+    const data = await api("/api/project/tree");
+    // Three distinct states surfaced by the backend:
+    //   project_root_clamped=true → configured but invalid (silently fell back)
+    //   project_root_set=false    → not configured yet
+    //   project_root_set=true     → configured and honored (hide hint)
+    if (hint) {
+      if (data.project_root_clamped) {
+        hint.hidden = false;
+        hint.textContent = "This workspace's project root is invalid (outside the workspace directory). Update it in the workspace settings.";
+      } else if (data.project_root_set === false) {
+        hint.hidden = false;
+        hint.textContent = "No project root set for this workspace. Open the workspace settings to point it at a folder.";
+      } else {
+        hint.hidden = true;
+      }
+    }
+    renderFileTree(ul, data.entries || []);
+  } catch (e) {
+    if (ul) ul.innerHTML = "";
+    if (hint) {
+      hint.hidden = false;
+      const status = e && e.status ? e.status : 0;
+      if (status === 404 || status === 403) {
+        // The endpoint exists but the workspace has no usable project_root —
+        // guide the user toward the workspace settings.
+        hint.textContent = "No project root set for this workspace. Open the workspace settings to point it at a folder.";
+      } else if (status >= 500) {
+        hint.textContent = `Couldn't load file tree (server error ${status}). Try again, or check the server logs.`;
+      } else if (status === 0) {
+        hint.textContent = "Couldn't reach the server. Check your network connection and try again.";
+      } else {
+        hint.textContent = `Couldn't load file tree (HTTP ${status}).`;
+      }
+    }
+  }
+}
+
+function renderFileTree(ul, entries) {
+  ul.innerHTML = "";
+  for (const entry of entries) {
+    const li = document.createElement("li");
+    if (entry.type === "dir") {
+      li.innerHTML = `<details><summary class="file-tree-item dir"><span class="file-tree-icon">📁</span>${escape(entry.name)}</summary><ul class="file-tree" data-path="${escape(entry.path)}"></ul></details>`;
+      const sub = li.querySelector("ul");
+      const details = li.querySelector("details");
+      details.addEventListener("toggle", async () => {
+        // Use a data-loaded flag so empty directories aren't refetched on
+        // every expand (children.length === 0 stays true for empty results).
+        // Only mark loaded on success so a transient failure stays retryable.
+        if (details.open && details.dataset.loaded !== "1") {
+          try {
+            const data = await api(`/api/project/tree?path=${encodeURIComponent(entry.path)}`);
+            renderFileTree(sub, data.entries || []);
+            details.dataset.loaded = "1";
+          } catch (e) { /* silent — leave unloaded so next expand retries */ }
+        }
+      });
+    } else {
+      li.innerHTML = `<div class="file-tree-item" role="button" tabindex="0" data-path="${escape(entry.path)}"><span class="file-tree-icon">📄</span>${escape(entry.name)}</div>`;
+      li.querySelector(".file-tree-item").onclick = () => openProjectFile(entry.path);
+      li.querySelector(".file-tree-item").onkeydown = (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();   // stop Space from scrolling the page
+          e.stopPropagation();
+          openProjectFile(entry.path);
+        }
+      };
+    }
+    ul.appendChild(li);
+  }
+}
+
+async function openProjectFile(path) {
+  const ws = state.workspaces.find((w) => w.id === state.config?.active_workspace_id);
+  try {
+    // First fetch metadata only — for binary files we never display the bytes,
+    // so save bandwidth by skipping the second fetch. For text files do a
+    // second request with include_content=true to populate the preview.
+    const wsParam = `workspace_id=${encodeURIComponent(ws?.id || "")}`;
+    const meta = await api(`/api/project/file?${wsParam}&path=${encodeURIComponent(path)}`);
+    const name = path.split("/").pop() || path;
+    let body;
+    if (meta.is_binary) {
+      const sizeStr = meta.size != null ? `${meta.size} bytes` : "unknown size";
+      const truncated = meta.truncated ? " (truncated)" : "";
+      body = `<p><em>Binary file (${sizeStr})${truncated} — preview not available.</em></p>`;
+    } else {
+      const data = await api(`/api/project/file?${wsParam}&path=${encodeURIComponent(path)}&include_content=true`);
+      // The full read can decode differently than the 4 KB header sniff
+      // (e.g., a NUL byte later in the file). Re-check is_binary on the
+      // second response before rendering the content as text.
+      if (data.is_binary) {
+        const sizeStr = data.size != null ? `${data.size} bytes` : "unknown size";
+        const truncated = data.truncated ? " (truncated)" : "";
+        body = `<p><em>Binary file (${sizeStr})${truncated} — preview not available.</em></p>`;
+      } else {
+        const truncated = data.truncated
+          ? `<p class="hint">File was truncated to the first 1 MB for preview.</p>` : "";
+        body = `${truncated}<pre style="max-height:400px;overflow:auto;">${escape(data.content || "")}</pre>`;
+      }
+    }
+    showDialog({
+      title: name,
+      wide: true,
+      body,
+      actions: [{ label: "Close", action: "cancel" }],
+    });
+  } catch (e) {
+    flash("Could not open file.", "warn");
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Approval dialog (shell + write) — with explain expander + trust session
+// ---------------------------------------------------------------------------
+
+async function askApproval(req) {
+  // write_file: use the diff modal for a proper before/after view
+  if (req.tool === "write_file") {
+    return new Promise(async (resolve) => {
+      const modal = document.getElementById("diff-modal");
+      const pathEl = document.getElementById("diff-modal-path");
+      const contentEl = document.getElementById("diff-modal-content");
+      const acceptBtn = document.getElementById("diff-accept-btn");
+      const rejectBtn = document.getElementById("diff-reject-btn");
+      if (!modal || !acceptBtn || !rejectBtn) {
+        resolve({ approved: confirm(`Save file "${req.filename}"?`) });
+        return;
+      }
+      if (pathEl) pathEl.textContent = req.dest_path || req.filename;
+
+      // Try to load existing content for diff
+      let oldHtml = "<em>(new file)</em>";
+      try {
+        const existing = await api(`/api/project/file?path=${encodeURIComponent(req.filename)}&include_content=true`);
+        if (existing.is_binary) {
+          oldHtml = `<em>(binary file, ${existing.size ?? "?"} bytes — preview not available)</em>`;
+        } else {
+          oldHtml = `<pre>${escape(existing.content.slice(0, 3000))}</pre>`;
+        }
+      } catch { /* file doesn't exist yet */ }
+
+      if (contentEl) {
+        contentEl.innerHTML = `
+          <div class="diff-columns">
+            <div class="diff-col"><strong>Before</strong>${oldHtml}</div>
+            <div class="diff-col diff-col-new"><strong>After (${req.byte_count} bytes)</strong><pre>${escape(req.preview || "")}</pre></div>
+          </div>`;
+      }
+      // Remember the previously focused element so we can restore focus on close
+      const previousFocus = document.activeElement;
+      modal.hidden = false;
+      acceptBtn.focus();
+      // Trap focus inside the diff modal while it's open, matching the
+      // accessibility behavior of showDialog().
+      modal.addEventListener("keydown", trapFocus);
+      const cleanup = () => {
+        modal.removeEventListener("keydown", trapFocus);
+        modal.hidden = true;
+        state.pendingDialogCancel = null;
+        if (previousFocus && typeof previousFocus.focus === "function") {
+          try { previousFocus.focus(); } catch (_) { /* ignore */ }
+        }
+      };
+      acceptBtn.onclick = () => { cleanup(); resolve({ approved: true }); };
+      rejectBtn.onclick = () => { cleanup(); resolve({ approved: false }); };
+      // Escape (via global handler) cancels with deny
+      state.pendingDialogCancel = () => { cleanup(); resolve({ approved: false }); };
+    });
+  }
+
+  return new Promise((resolve) => {
+    let title, body;
+    if (req.tool === "execute_shell") {
+      title = `Run a ${req.shell} command?`;
+      body = `
+        <div class="danger-banner"><strong>Caution.</strong> The assistant wants to run a command on your computer. Read it carefully before approving.</div>
+        ${req.reason ? `<p><b>Why:</b> ${escape(req.reason)}</p>` : ""}
+        <p><b>Command:</b></p>
+        <pre>${escape(req.command)}</pre>
+        <details class="explain-expander" id="explain-details">
+          <summary>Explain this in plain English</summary>
+          <div class="explain-body" id="explain-body"><span class="spinner"></span> Loading explanation…</div>
+        </details>
+        <label class="trust-session-wrap">
+          <input type="checkbox" id="trust-session-cb" />
+          Trust this command for the rest of the session (won't ask again)
+        </label>
+      `;
+    } else {
+      title = `Allow ${req.tool}?`;
+      body = `<pre>${escape(JSON.stringify(req, null, 2))}</pre>`;
+    }
+
+    showDialog({
+      title,
+      body,
+      actions: [
+        {
+          label: "Deny",
+          action: () => {
+            closeDialog();
+            state.pendingDialogCancel = null;
+            resolve({ approved: false });
+          },
+        },
+        {
+          label: "Approve",
+          primary: true,
+          action: async () => {
+            const trustCb = document.getElementById("trust-session-cb");
+            const trustSession = trustCb ? trustCb.checked : false;
+            // Don't call /api/session/trust here: /api/approve already handles
+            // trust_session+command atomically, so an early call would trust
+            // the command even if the approve request later fails.
+            closeDialog();
+            state.pendingDialogCancel = null;
+            resolve({ approved: true, trust_session: trustSession, command: req.command });
+          },
+        },
+      ],
+    });
+    // Escape cancels with deny so the backend isn't left waiting
+    state.pendingDialogCancel = () => {
+      closeDialog();
+      resolve({ approved: false });
+    };
+
+    // Wire explain-details toggle
+    setTimeout(() => {
+      const det = document.getElementById("explain-details");
+      if (!det || req.tool !== "execute_shell") return;
+      let explained = false;
+      det.addEventListener("toggle", async () => {
+        if (!det.open || explained) return;
+        explained = true;
+        const bodyEl = document.getElementById("explain-body");
+        try {
+          const data = await api("/api/explain-command", {
+            method: "POST",
+            json: { command: req.command },
+          });
+          if (bodyEl) bodyEl.textContent = data.explanation || "No explanation available.";
+        } catch (e) {
+          if (bodyEl) bodyEl.textContent = "Could not fetch explanation.";
+        }
+      });
+    }, 50);
   });
 }
 
@@ -1156,8 +1775,6 @@ async function send() {
   const text = $("#composer-input").value.trim();
   if (!text && !state.attachments.length) return;
 
-  // If a workspace is active and this is the first message, prepend its
-  // persistent files as attachments.
   let attachments = state.attachments.slice();
   const ws = state.workspaces.find((w) => w.id === state.config?.active_workspace_id);
   if (ws && state.messages.length === 0 && Array.isArray(ws.files)) {
@@ -1177,20 +1794,22 @@ async function send() {
     return;
   }
 
+  const chatMode = $("#mode-select")?.value || state.config?.chat_mode || "approve-each";
+
   state.busy = true;
   const sendBtn = $("#send-btn");
   sendBtn.disabled = true;
   sendBtn.innerHTML = '<span class="spinner"></span>';
 
-  // Animated typing bubble — visible immediately, before the server responds.
   const placeholder = { role: "assistant", content: "", _placeholder: true };
   state.messages.push(placeholder);
   appendMessage(placeholder);
   const placeholderEl = $("#messages").lastElementChild;
 
+  // Track active subagent cards for current turn
+  const subagentSummaries = [];
+
   try {
-    // Only user/assistant turns travel back to the API. Pure-UI message
-    // types ("system-event", in-chat tool-result displays) are stripped.
     const sendable = state.messages.filter(
       (m) => !m._placeholder && (m.role === "user" || m.role === "assistant"),
     );
@@ -1201,6 +1820,7 @@ async function send() {
         conversation_id: state.currentConversationId,
         messages: sendable,
         model,
+        mode: chatMode,
       }),
     });
     if (!res.ok) {
@@ -1212,16 +1832,43 @@ async function send() {
 
     await consumeSSE(res, async (event, data) => {
       if (event === "assistant_text") {
-        const msg = { role: "assistant", content: data.text };
+        const telemetry = data.telemetry || null;
+        const msg = { role: "assistant", content: data.text, telemetry, subagents: subagentSummaries.slice() };
         state.messages.push(msg);
         appendMessage(msg);
+        if (telemetry) showTelemetryLine(telemetry);
+        return;
+      }
+      if (event === "task_plan") {
+        state.taskPlan = data.items || [];
+        renderPlan();
+        // Auto-show the plan pane when we get a plan
+        if (state.taskPlan.length && !state.planPaneVisible) setPlanPaneVisible(true);
+        return;
+      }
+      if (event === "subagent_start") {
+        const sysMsg = { role: "system-event", content: `↪ Starting ${data.count} ${data.kind} subagent${data.count !== 1 ? "s" : ""}…` };
+        state.messages.push(sysMsg);
+        appendMessage(sysMsg);
+        return;
+      }
+      if (event === "subagent_result") {
+        subagentSummaries.push({ kind: data.kind, combined: data.combined });
+        const sysMsg = { role: "system-event", content: `✓ Subagent (${data.kind}, ${data.count} result${data.count !== 1 ? "s" : ""}) done.` };
+        state.messages.push(sysMsg);
+        appendMessage(sysMsg);
         return;
       }
       if (event === "approval_request") {
-        const approved = await askApproval(data);
+        const result = await askApproval(data);
         await api("/api/approve", {
           method: "POST",
-          json: { approval_id: data.approval_id, approved },
+          json: {
+            approval_id: data.approval_id,
+            approved: result.approved !== undefined ? result.approved : result,
+            trust_session: result.trust_session,
+            command: result.command,
+          },
         });
         return;
       }
@@ -1249,13 +1896,13 @@ async function send() {
       }
       if (event === "done") {
         state.currentConversationId = data.conversation_id;
-        // Re-sync from the backend's canonical history. The backend
-        // includes synthetic "[Tool 'X' result]" user messages, which the
-        // renderer recognizes and styles as tool blocks. This keeps the
-        // model's tool-result context for follow-up turns.
         if (Array.isArray(data.messages)) {
           state.messages = data.messages;
           renderMessages();
+        }
+        if (data.task_plan) {
+          state.taskPlan = data.task_plan;
+          renderPlan();
         }
         await loadConversations();
         return;
@@ -1279,30 +1926,53 @@ async function send() {
   }
 }
 
+function showTelemetryLine(t) {
+  const el = $("#telemetry-line");
+  if (!el) return;
+  el.hidden = false;
+  el.textContent = `${t.tokens_in ?? "?"}→${t.tokens_out ?? "?"}t · ${t.elapsed_ms ?? "?"}ms`;
+  clearTimeout(el._timer);
+  el._timer = setTimeout(() => { el.hidden = true; }, 8000);
+}
+
 async function handleToolResult(data) {
   const r = data.result || {};
 
-  // Generated/written files: store blob URL in fileStore for inline rendering
-  // and user-initiated download; no automatic download to disk.
-  if (r.data_b64 && r.filename) {
+  // write_file result: backend sends data_b64 only on failure (so the user
+  // can still recover the bytes via download). On success, the file is on
+  // disk at project_root and the file-tree pane shows it — no SSE-bloating
+  // base64 in that path.
+  const isWriteResult = data.tool === "write_file" && r.filename;
+  if (isWriteResult || (r.data_b64 && r.filename)) {
     const mime = r.mime || "application/octet-stream";
-    const blob = b64ToBlob(r.data_b64, mime);
-    const url = storeFile(blob, r.filename, mime);
     const label =
       mime.startsWith("image/") ? "Image" :
       mime.startsWith("audio/") ? "Audio" :
       mime.startsWith("video/") ? "Video" : "File";
-    const sysMsg = {
-      role: "tool",
-      content: `${label} ready: ${r.filename}`,
-      attachments: [{ url, content_type: mime, filename: r.filename }],
-    };
+    const attachments = [];
+    let content;
+    if (r.data_b64) {
+      const blob = b64ToBlob(r.data_b64, mime);
+      const url = storeFile(blob, r.filename, mime);
+      attachments.push({ url, content_type: mime, filename: r.filename });
+      content = `${label} ready: ${r.filename}`;
+      if (r.write_error) {
+        content += `\n⚠️ On-disk write failed: ${r.write_error}. ` +
+          `You can still download the generated file from the link below.`;
+      }
+    } else {
+      // Successful write with no inlined bytes — point the user at the file
+      // tree where the saved file now lives.
+      content = `${label} saved: ${r.filename} (open from the Files pane to view).`;
+    }
+    const sysMsg = { role: "tool", content, attachments };
     state.messages.push(sysMsg);
     appendMessage(sysMsg);
+    // Refresh file tree only when the write actually succeeded
+    if (state.filesPaneVisible && !r.write_error) refreshFileTree();
     return;
   }
 
-  // Text summary for shell results
   if (data.tool === "execute_shell" || data.tool === "cli_call") {
     const text =
       `Exit ${r.exit_code} (${r.shell || ""}, ${r.duration_ms || 0}ms)\n` +
@@ -1314,7 +1984,6 @@ async function handleToolResult(data) {
     return;
   }
 
-  // read_file results: summarize without re-rendering all content
   if (data.tool === "read_file") {
     if (r.error) {
       const sysMsg = { role: "system-event", content: r.error };
@@ -1329,7 +1998,6 @@ async function handleToolResult(data) {
     return;
   }
 
-  // Default: show JSON-ish summary
   const sysMsg = { role: "tool", content: JSON.stringify(r, null, 2).slice(0, 3000) };
   state.messages.push(sysMsg);
   appendMessage(sysMsg);
@@ -1365,7 +2033,7 @@ async function consumeSSE(res, onEvent) {
 }
 
 // ---------------------------------------------------------------------------
-// File-request dialog (open file picker, send back contents)
+// File-request dialog
 // ---------------------------------------------------------------------------
 
 async function handleFileRequest(req) {
@@ -1388,6 +2056,7 @@ async function handleFileRequest(req) {
           label: "Skip",
           action: () => {
             closeDialog();
+            state.pendingDialogCancel = null;
             resolve([]);
           },
         },
@@ -1401,7 +2070,13 @@ async function handleFileRequest(req) {
       preview.innerHTML = `<p class="hint">Reading ${fs.length} file${fs.length === 1 ? "" : "s"}…</p>`;
       const entries = await Promise.all(fs.map(fileToContentEntry));
       closeDialog();
+      state.pendingDialogCancel = null;
       resolve(entries);
+    };
+    // Escape resolves as "skipped" so the backend isn't left waiting
+    state.pendingDialogCancel = () => {
+      closeDialog();
+      resolve([]);
     };
   });
 
@@ -1412,58 +2087,7 @@ async function handleFileRequest(req) {
 }
 
 // ---------------------------------------------------------------------------
-// Approval dialog (shell + write)
-// ---------------------------------------------------------------------------
-
-function askApproval(req) {
-  return new Promise((resolve) => {
-    let title, body;
-    if (req.tool === "execute_shell") {
-      title = `Run a ${req.shell} command?`;
-      body = `
-        <div class="danger-banner"><strong>Caution.</strong> The assistant wants to run a command on your computer. Read it carefully before approving.</div>
-        ${req.reason ? `<p><b>Why:</b> ${escape(req.reason)}</p>` : ""}
-        <p><b>Command:</b></p>
-        <pre>${escape(req.command)}</pre>
-      `;
-    } else if (req.tool === "write_file") {
-      title = `Accept file from assistant?`;
-      body = `
-        <p>The assistant wants to share a file <b>(${req.byte_count} bytes)</b>. Approve to add it to the chat, where you can preview and download it.</p>
-        <p><b>Filename:</b> <code>${escape(req.filename)}</code></p>
-        <p><b>Preview:</b></p>
-        <pre>${escape(req.preview || "")}</pre>
-      `;
-    } else {
-      title = `Allow ${req.tool}?`;
-      body = `<pre>${escape(JSON.stringify(req, null, 2))}</pre>`;
-    }
-    showDialog({
-      title,
-      body,
-      actions: [
-        {
-          label: "Deny",
-          action: () => {
-            closeDialog();
-            resolve(false);
-          },
-        },
-        {
-          label: "Approve",
-          primary: true,
-          action: () => {
-            closeDialog();
-            resolve(true);
-          },
-        },
-      ],
-    });
-  });
-}
-
-// ---------------------------------------------------------------------------
-// Generic dialog
+// Generic dialog (with focus trap)
 // ---------------------------------------------------------------------------
 
 function showDialog({ title, body, actions, wide }) {
@@ -1471,6 +2095,9 @@ function showDialog({ title, body, actions, wide }) {
   const root = $("#dialog-root");
   const wrap = document.createElement("div");
   wrap.className = "dialog-backdrop";
+  wrap.setAttribute("role", "alertdialog");
+  wrap.setAttribute("aria-modal", "true");
+  wrap.setAttribute("aria-label", title);
   wrap.innerHTML = `
     <div class="dialog ${wide ? "wide" : ""}">
       <h2>${escape(title)}</h2>
@@ -1489,6 +2116,26 @@ function showDialog({ title, body, actions, wide }) {
     actionsEl.appendChild(btn);
   }
   root.appendChild(wrap);
+  // Focus first button
+  const firstBtn = wrap.querySelector("button");
+  if (firstBtn) firstBtn.focus();
+  // Trap focus inside dialog
+  wrap.addEventListener("keydown", trapFocus);
+}
+
+function trapFocus(e) {
+  if (e.key !== "Tab") return;
+  const focusable = Array.from(e.currentTarget.querySelectorAll(
+    'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+  )).filter((el) => !el.disabled && el.offsetParent !== null);
+  if (!focusable.length) return;
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  if (e.shiftKey) {
+    if (document.activeElement === first) { last.focus(); e.preventDefault(); }
+  } else {
+    if (document.activeElement === last) { first.focus(); e.preventDefault(); }
+  }
 }
 
 function closeDialog() {
@@ -1506,8 +2153,6 @@ function flash(msg, level = "info") {
   t.className = `toast ${level}`;
   t.textContent = msg;
   host.appendChild(t);
-  // Force a reflow so the entry transition runs
-  // eslint-disable-next-line no-unused-expressions
   t.offsetHeight;
   t.classList.add("visible");
   setTimeout(() => {
@@ -1517,25 +2162,256 @@ function flash(msg, level = "info") {
 }
 
 // ---------------------------------------------------------------------------
+// Onboarding wizard
+// ---------------------------------------------------------------------------
+
+async function checkOnboarding() {
+  const cfg = state.config;
+  if (cfg?.onboarding_done) return;
+  // Show wizard
+  const overlay = $("#onboarding-overlay");
+  if (overlay) {
+    overlay.hidden = false;
+    overlay.addEventListener("keydown", trapFocus);
+    const firstFocusable = overlay.querySelector(
+      'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+    );
+    firstFocusable?.focus();
+  }
+  // Load use-case templates
+  try {
+    const data = await api("/api/onboarding/templates");
+    renderUseCaseGrid(data.templates || []);
+  } catch (e) { /* endpoint may not exist */ }
+}
+
+function renderUseCaseGrid(templates) {
+  const grid = $("#use-case-grid");
+  if (!grid) return;
+  grid.innerHTML = "";
+  const icons = { grading: "📝", research: "🔬", "course-prep": "📚", writing: "✍️", coding: "💻" };
+  for (const t of templates) {
+    const card = document.createElement("div");
+    card.className = "use-case-card";
+    card.setAttribute("role", "option");
+    card.setAttribute("tabindex", "0");
+    card.setAttribute("aria-selected", "false");
+    card.dataset.id = t.id;
+    card.innerHTML = `<span class="use-case-icon">${icons[t.id] || "📋"}</span>${escape(t.name)}`;
+    card.onclick = () => {
+      grid.querySelectorAll(".use-case-card").forEach((c) => {
+        c.classList.remove("selected");
+        c.setAttribute("aria-selected", "false");
+      });
+      card.classList.add("selected");
+      card.setAttribute("aria-selected", "true");
+      const btn = $("#ob-usecase-btn");
+      if (btn) { btn.disabled = false; btn.dataset.useCase = t.id; }
+    };
+    card.onkeydown = (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        // Space scrolls the page by default — stop that and let it select
+        // the card the same way Enter does (matches file-tree behavior).
+        e.preventDefault();
+        e.stopPropagation();
+        card.click();
+      }
+    };
+    grid.appendChild(card);
+  }
+}
+
+async function onboardingConnect() {
+  const url = $("#ob-url")?.value.trim();
+  const key = $("#ob-key")?.value.trim();
+  if (!url || !key) { flash("Enter a URL and API key.", "warn"); return; }
+  const status = $("#ob-status");
+  if (status) status.textContent = "Testing…";
+  try {
+    const result = await api("/api/config", { method: "POST", json: { base_url: url, api_key: key } });
+    if (!result.api_profile_label) {
+      if (status) { status.textContent = "Could not connect. Check the URL and key."; status.className = "status-line warn"; }
+      return;
+    }
+    state.config = result;
+    if (status) { status.textContent = `Connected via ${result.api_profile_label}.`; status.className = "status-line good"; }
+    await refreshModels();
+    // Move to step 2
+    setTimeout(() => {
+      $("#onboarding-step-1").hidden = true;
+      $("#onboarding-step-2").hidden = false;
+    }, 600);
+  } catch (e) {
+    if (status) { status.textContent = "Error: " + e.message; status.className = "status-line warn"; }
+  }
+}
+
+async function onboardingComplete(useCaseId) {
+  try {
+    const data = await api("/api/onboarding/complete", { method: "POST", json: { template_id: useCaseId } });
+    const msg = $("#ob-done-msg");
+    if (msg) msg.textContent = `Your "${data.workspace_name || useCaseId}" workspace has been created. Click "Start chatting" to begin.`;
+    $("#onboarding-step-2").hidden = true;
+    $("#onboarding-step-3").hidden = false;
+    await loadConfig();
+    await loadWorkspaces();
+    await loadPrompts();
+    await loadSkills();
+  } catch (e) {
+    flash("Onboarding error: " + e.message, "warn");
+  }
+}
+
+function onboardingFinish() {
+  const overlay = $("#onboarding-overlay");
+  if (overlay) {
+    overlay.hidden = true;
+    overlay.removeEventListener("keydown", trapFocus);
+  }
+  // Return focus to the composer so keyboard users can start typing immediately
+  $("#user-input")?.focus();
+  flash("Welcome to BetterWebUI!", "good");
+}
+
+// ---------------------------------------------------------------------------
+// Keyboard shortcuts
+// ---------------------------------------------------------------------------
+
+let _gKeyPending = false;
+let _gKeyTimer = null;
+
+let _shortcutPriorFocus = null;
+
+function openShortcutSheet() {
+  const sheet = $("#shortcut-sheet");
+  if (!sheet || !sheet.hidden) return;
+  _shortcutPriorFocus = document.activeElement;
+  sheet.hidden = false;
+  sheet.addEventListener("keydown", trapFocus);
+  const firstFocusable = sheet.querySelector(
+    'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+  );
+  firstFocusable?.focus();
+}
+
+function closeShortcutSheet() {
+  const sheet = $("#shortcut-sheet");
+  if (!sheet || sheet.hidden) return;
+  sheet.hidden = true;
+  sheet.removeEventListener("keydown", trapFocus);
+  _shortcutPriorFocus?.focus();
+  _shortcutPriorFocus = null;
+}
+
+function handleGlobalKey(e) {
+  // Don't intercept when typing in inputs — with two exceptions:
+  //  - Ctrl/Cmd+Enter in textareas still sends the message
+  //  - Escape always falls through so it can close approval dialogs,
+  //    diff modals, and the file picker even when an input has focus
+  //    (without this the Esc cancel/deny path becomes unreachable for
+  //    keyboard users mid-form).
+  const tag = document.activeElement?.tagName?.toLowerCase();
+  if (tag === "input" || tag === "textarea" || tag === "select") {
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey) && tag === "textarea") {
+      e.preventDefault();
+      send();
+      return;
+    }
+    if (e.key !== "Escape") return;
+  }
+
+  // Escape closes dialogs and modals
+  if (e.key === "Escape") {
+    // If a modal is awaiting user resolution (approval / file-pick / diff), cancel it
+    // explicitly so the pending Promise resolves and the backend isn't left waiting.
+    if (typeof state.pendingDialogCancel === "function") {
+      const cancel = state.pendingDialogCancel;
+      state.pendingDialogCancel = null;
+      try { cancel(); } catch (_) { /* ignore */ }
+    } else {
+      closeDialog();
+    }
+    closeShortcutSheet();
+    const diff = $("#diff-modal"); if (diff && !diff.hidden) diff.hidden = true;
+    const onboarding = $("#onboarding-overlay"); if (onboarding && !onboarding.hidden) onboarding.hidden = true;
+    // Return focus to the composer for keyboard users
+    const composer = $("#composer-input");
+    if (composer) composer.focus();
+    return;
+  }
+
+  // ? toggles shortcut sheet
+  if (e.key === "?") {
+    const sheet = $("#shortcut-sheet");
+    if (sheet?.hidden) openShortcutSheet(); else closeShortcutSheet();
+    return;
+  }
+
+  // N = new chat
+  if (e.key === "n" || e.key === "N") { newChat(); return; }
+
+  // P = toggle plan pane
+  if (e.key === "p" || e.key === "P") { setPlanPaneVisible(!state.planPaneVisible); return; }
+
+  // F = toggle files pane
+  if (e.key === "f" || e.key === "F") { setFilesPaneVisible(!state.filesPaneVisible); return; }
+
+  // G-chord navigation
+  if (e.key === "g" || e.key === "G") {
+    _gKeyPending = true;
+    clearTimeout(_gKeyTimer);
+    _gKeyTimer = setTimeout(() => { _gKeyPending = false; }, 1000);
+    return;
+  }
+  if (_gKeyPending) {
+    _gKeyPending = false;
+    clearTimeout(_gKeyTimer);
+    const chordMap = { c: "chats", w: "workspaces", s: "skills", t: "tools", x: "settings", p: "prompts" };
+    const target = chordMap[e.key.toLowerCase()];
+    if (target) switchTab(target);
+    return;
+  }
+}
+
+function switchTab(tabName) {
+  $$(".tab").forEach((b) => {
+    const active = b.dataset.tab === tabName;
+    b.classList.toggle("active", active);
+    b.setAttribute("aria-selected", active ? "true" : "false");
+  });
+  $$(".tab-panel").forEach((p) => p.classList.remove("active"));
+  const panel = $(`#tab-${tabName}`);
+  if (panel) panel.classList.add("active");
+}
+
+// ---------------------------------------------------------------------------
 // Tabs and wiring
 // ---------------------------------------------------------------------------
 
 function wireTabs() {
   $$(".tab").forEach((btn) =>
     btn.addEventListener("click", () => {
-      $$(".tab").forEach((b) => b.classList.remove("active"));
+      $$(".tab").forEach((b) => {
+        b.classList.remove("active");
+        b.setAttribute("aria-selected", "false");
+      });
       $$(".tab-panel").forEach((p) => p.classList.remove("active"));
       btn.classList.add("active");
+      btn.setAttribute("aria-selected", "true");
       $(`#tab-${btn.dataset.tab}`).classList.add("active");
     }),
   );
 }
 
 function wireEvents() {
+  // Core chat
   $("#new-chat-btn").onclick = newChat;
   $("#send-btn").onclick = send;
   $("#composer-input").addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && !e.shiftKey) {
+    // Plain Enter in the textarea sends. Ctrl/Cmd+Enter is handled by
+    // handleGlobalKey() — if we also handled it here, send() would fire
+    // twice (once per listener). Don't duplicate that branch.
+    if (e.key === "Enter" && !e.shiftKey && !e.ctrlKey && !e.metaKey) {
       e.preventDefault();
       send();
     }
@@ -1545,10 +2421,19 @@ function wireEvents() {
     if (f) attachFile(f);
     e.target.value = "";
   });
+
+  // Mic
+  $("#mic-btn")?.addEventListener("click", toggleMic);
+
+  // Settings
   $("#save-connection").onclick = saveConnection;
   $("#save-defaults").onclick = saveDefaults;
+  $("#save-display")?.addEventListener("click", saveDisplay);
 
+  // Prompts
   $("#new-prompt-btn").onclick = () => openPromptDialog(null);
+
+  // Skills
   $("#new-skill-btn").onclick = openNewSkillDialog;
   $("#upload-skill").addEventListener("change", (e) => {
     const f = e.target.files[0];
@@ -1556,34 +2441,104 @@ function wireEvents() {
     e.target.value = "";
   });
 
+  // Workspaces
   $("#new-workspace-btn").onclick = () => openWorkspaceDialog(null);
   $("#workspace-select").onchange = (e) => activateWorkspace(e.target.value);
+  $("#import-workspace-btn")?.addEventListener("click", () => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = ".bwui";
+    input.onchange = (e) => { if (e.target.files[0]) importWorkspace(e.target.files[0]); };
+    input.click();
+  });
 
+  // MCP / CLI
   $("#mcp-from-registry-btn").onclick = openMcpRegistryDialog;
   $("#mcp-custom-btn").onclick = openMcpCustomDialog;
   $("#cli-from-registry-btn").onclick = openCliRegistryDialog;
   $("#cli-custom-btn").onclick = openCliCustomDialog;
 
-  $("#chat-model-select").onchange = () => {};
+  // Right-rail toggles
+  $("#toggle-plan-btn")?.addEventListener("click", () => setPlanPaneVisible(!state.planPaneVisible));
+  $("#toggle-files-btn")?.addEventListener("click", () => setFilesPaneVisible(!state.filesPaneVisible));
+  $("#plan-pane-close")?.addEventListener("click", () => setPlanPaneVisible(false));
+  $("#files-pane-close")?.addEventListener("click", () => setFilesPaneVisible(false));
+
+  // Conversation search
+  $("#search-toggle-btn")?.addEventListener("click", () => {
+    const wrap = $("#conv-search-wrap");
+    if (!wrap) return;
+    wrap.hidden = !wrap.hidden;
+    if (!wrap.hidden) $("#conv-search")?.focus();
+    else { state.convSearchQuery = ""; renderConversationList(); }
+  });
+  $("#conv-search")?.addEventListener("input", (e) => {
+    state.convSearchQuery = e.target.value;
+    renderConversationList();
+  });
+
+  // Mode select — persist per-workspace when a workspace is active, otherwise globally
+  $("#mode-select")?.addEventListener("change", async (e) => {
+    const mode = e.target.value;
+    const activeWsId = state.config?.active_workspace_id;
+    try {
+      if (activeWsId) {
+        const ws = await api(`/api/workspaces/${activeWsId}`);
+        await api("/api/workspaces", { method: "POST", json: { ...ws, mode } });
+      } else {
+        await api("/api/config", { method: "POST", json: { chat_mode: mode } });
+      }
+    } catch (_) { /* non-critical */ }
+  });
+
+  // Keyboard shortcuts modal
+  $("#shortcut-help-btn")?.addEventListener("click", openShortcutSheet);
+  $("#shortcut-sheet")?.querySelector(".modal-close")?.addEventListener("click", closeShortcutSheet);
+
+  // Global keyboard shortcuts
+  document.addEventListener("keydown", handleGlobalKey);
+
+  // Onboarding wizard buttons
+  $("#ob-connect-btn")?.addEventListener("click", onboardingConnect);
+  $("#ob-back-btn")?.addEventListener("click", () => {
+    $("#onboarding-step-2").hidden = true;
+    $("#onboarding-step-1").hidden = false;
+  });
+  $("#ob-usecase-btn")?.addEventListener("click", (e) => {
+    const id = e.target.dataset.useCase;
+    if (id) onboardingComplete(id);
+  });
+  $("#ob-finish-btn")?.addEventListener("click", onboardingFinish);
 }
+
+// ---------------------------------------------------------------------------
+// Init
+// ---------------------------------------------------------------------------
 
 async function init() {
   wireTabs();
   wireEvents();
+  initMic();
+  // Load workspaces before config so loadConfig's #mode-select lookup can
+  // see the active workspace's stored mode on first paint; otherwise the
+  // select would fall back to config.chat_mode until the next config
+  // refresh.
+  await loadWorkspaces();
   await loadConfig();
   await Promise.all([
     refreshModels(),
     loadPrompts(),
     loadSkills(),
-    loadWorkspaces(),
     loadMcp(),
     loadCli(),
     loadConversations(),
   ]);
   populateWorkspaceSelect();
   newChat();
+  // Check if onboarding is needed
+  await checkOnboarding();
 }
 
 init().catch((e) => {
-  document.body.innerHTML = `<pre style="padding: 30px;">Init failed: ${escape(e.message)}</pre>`;
+  document.body.innerHTML = `<pre style="padding: 30px;">Init failed: ${escape(e.message)}\n\n${escape(e.stack || "")}</pre>`;
 });

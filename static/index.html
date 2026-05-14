@@ -7,7 +7,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
-      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;0,600;0,700;1,400;1,500&family=JetBrains+Mono:wght@400;500&display=swap"
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Lora:ital,wght@0,400;0,500;0,600;0,700;1,400;1,500&family=JetBrains+Mono:wght@400;500&family=OpenDyslexic:wght@400;700&display=swap"
       rel="stylesheet"
     />
     <link
@@ -19,57 +19,147 @@
     <link rel="stylesheet" href="/static/style.css" />
   </head>
   <body>
-    <aside id="sidebar">
+    <!-- Skip navigation for keyboard/screen reader users -->
+    <a href="#main" class="skip-link">Skip to main content</a>
+
+    <!-- Onboarding wizard (shown on first run) -->
+    <div id="onboarding-overlay" class="onboarding-overlay" role="dialog" aria-modal="true" aria-label="BetterWebUI onboarding wizard" hidden>
+      <div class="onboarding-card">
+        <div class="onboarding-step" id="onboarding-step-1">
+          <div class="onboarding-logo">
+            <span class="brand-mark">§</span>
+            <span class="brand-name">BetterWebUI</span>
+          </div>
+          <h2 id="onboarding-title">Welcome! Let's get you set up.</h2>
+          <p>First, connect to your OpenWebUI instance.</p>
+          <label>OpenWebUI URL
+            <input id="ob-url" type="text" placeholder="http://localhost:3000" />
+            <small>Just the root — paths are detected automatically.</small>
+          </label>
+          <label>API key
+            <input id="ob-key" type="password" placeholder="paste your key" />
+          </label>
+          <p class="status-line" id="ob-status"></p>
+          <div class="onboarding-actions">
+            <button id="ob-connect-btn" class="primary">Connect &amp; continue →</button>
+          </div>
+        </div>
+
+        <div class="onboarding-step" id="onboarding-step-2" hidden>
+          <h2 id="onboarding-title-2">What will you use this for?</h2>
+          <p>Pick the one that fits best — you can change it later.</p>
+          <div class="use-case-grid" id="use-case-grid" role="listbox" aria-label="Use case options"></div>
+          <div class="onboarding-actions">
+            <button id="ob-back-btn">← Back</button>
+            <button id="ob-usecase-btn" class="primary" disabled>Create workspace →</button>
+          </div>
+        </div>
+
+        <div class="onboarding-step" id="onboarding-step-3" hidden>
+          <h2>You're ready!</h2>
+          <p id="ob-done-msg">Your workspace has been created. Click "Start chatting" to begin.</p>
+          <div class="onboarding-actions">
+            <button id="ob-finish-btn" class="primary">Start chatting →</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Keyboard shortcut sheet -->
+    <div id="shortcut-sheet" class="modal-overlay" role="dialog" aria-modal="true" aria-label="Keyboard shortcuts" hidden>
+      <div class="modal-box shortcut-box">
+        <button class="modal-close" aria-label="Close shortcuts">✕</button>
+        <h2>Keyboard Shortcuts</h2>
+        <dl class="shortcut-list">
+          <div><dt><kbd>?</kbd></dt><dd>Show / hide this sheet</dd></div>
+          <div><dt><kbd>Ctrl</kbd> <kbd>Enter</kbd></dt><dd>Send message</dd></div>
+          <div><dt><kbd>Esc</kbd></dt><dd>Close dialog / cancel</dd></div>
+          <div><dt><kbd>G</kbd> <kbd>C</kbd></dt><dd>Jump to Chats tab</dd></div>
+          <div><dt><kbd>G</kbd> <kbd>W</kbd></dt><dd>Jump to Workspaces tab</dd></div>
+          <div><dt><kbd>G</kbd> <kbd>S</kbd></dt><dd>Jump to Skills tab</dd></div>
+          <div><dt><kbd>G</kbd> <kbd>T</kbd></dt><dd>Jump to Tools tab</dd></div>
+          <div><dt><kbd>G</kbd> <kbd>X</kbd></dt><dd>Jump to Settings tab</dd></div>
+          <div><dt><kbd>N</kbd></dt><dd>New chat</dd></div>
+          <div><dt><kbd>P</kbd></dt><dd>Toggle plan pane</dd></div>
+          <div><dt><kbd>F</kbd></dt><dd>Toggle file tree pane</dd></div>
+        </dl>
+      </div>
+    </div>
+
+    <!-- Diff modal (shown before approved file writes) -->
+    <div id="diff-modal" class="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="diff-modal-title" hidden>
+      <div class="modal-box diff-box">
+        <h2 id="diff-modal-title">File Change Preview</h2>
+        <p id="diff-modal-path" class="diff-filename"></p>
+        <div id="diff-modal-content" class="diff-view"></div>
+        <div class="modal-actions">
+          <button id="diff-accept-btn" class="primary">Accept write</button>
+          <button id="diff-reject-btn">Reject</button>
+        </div>
+      </div>
+    </div>
+
+    <aside id="sidebar" aria-label="Navigation and settings">
       <div class="sidebar-header">
-        <h1 class="brand">
-          <span class="brand-mark">§</span>
+        <h1 class="brand" aria-label="BetterWebUI">
+          <span class="brand-mark" aria-hidden="true">§</span>
           <span class="brand-name">BetterWebUI</span>
         </h1>
         <p class="brand-subtitle">A thoughtful workspace for AI</p>
-        <button id="new-chat-btn" class="primary">Begin a new chat</button>
+        <button id="new-chat-btn" class="primary" aria-label="Begin a new chat">Begin a new chat</button>
       </div>
 
-      <nav class="tabs" role="tablist">
-        <button class="tab active" data-tab="chats">Chats</button>
-        <button class="tab" data-tab="workspaces">Workspaces</button>
-        <button class="tab" data-tab="skills">Skills</button>
-        <button class="tab" data-tab="prompts">Prompts</button>
-        <button class="tab" data-tab="tools">Tools</button>
-        <button class="tab" data-tab="settings">Settings</button>
+      <!-- Search bar for conversations -->
+      <div class="sidebar-search" id="conv-search-wrap" hidden>
+        <input type="search" id="conv-search" placeholder="Search conversations…" aria-label="Search conversations" />
+      </div>
+
+      <nav class="tabs" role="tablist" aria-label="Sidebar tabs">
+        <button class="tab active" data-tab="chats" role="tab" aria-selected="true" aria-controls="tab-chats" id="tab-btn-chats">Chats</button>
+        <button class="tab" data-tab="workspaces" role="tab" aria-selected="false" aria-controls="tab-workspaces" id="tab-btn-workspaces">Workspaces</button>
+        <button class="tab" data-tab="skills" role="tab" aria-selected="false" aria-controls="tab-skills" id="tab-btn-skills">Skills</button>
+        <button class="tab" data-tab="prompts" role="tab" aria-selected="false" aria-controls="tab-prompts" id="tab-btn-prompts">Prompts</button>
+        <button class="tab" data-tab="tools" role="tab" aria-selected="false" aria-controls="tab-tools" id="tab-btn-tools">Tools</button>
+        <button class="tab" data-tab="settings" role="tab" aria-selected="false" aria-controls="tab-settings" id="tab-btn-settings">Settings</button>
       </nav>
 
-      <section id="tab-chats" class="tab-panel active">
-        <ul id="conversation-list"></ul>
+      <section id="tab-chats" class="tab-panel active" role="tabpanel" aria-labelledby="tab-btn-chats">
+        <div class="panel-actions">
+          <button id="search-toggle-btn" aria-label="Search conversations" title="Search conversations">⌕ Search</button>
+        </div>
+        <ul id="conversation-list" aria-label="Conversations" aria-live="polite"></ul>
       </section>
 
-      <section id="tab-workspaces" class="tab-panel">
+      <section id="tab-workspaces" class="tab-panel" role="tabpanel" aria-labelledby="tab-btn-workspaces">
         <div class="panel-actions">
           <button id="new-workspace-btn">+ New workspace</button>
+          <button id="import-workspace-btn" title="Import .bwui bundle">↑ Import</button>
         </div>
         <p class="hint">
           A workspace bundles a system prompt, chosen skills, MCP servers,
           CLI shortcuts, and persistent files into a saved configuration
           you can return to.
         </p>
-        <ul id="workspace-list"></ul>
+        <ul id="workspace-list" aria-label="Workspaces"></ul>
       </section>
 
-      <section id="tab-skills" class="tab-panel">
+      <section id="tab-skills" class="tab-panel" role="tabpanel" aria-labelledby="tab-btn-skills">
         <div class="panel-actions">
           <button id="new-skill-btn">+ New skill</button>
           <label class="upload-label">
             Upload .md
-            <input id="upload-skill" type="file" accept=".md" hidden />
+            <input id="upload-skill" type="file" accept=".md" hidden aria-label="Upload skill markdown file" />
           </label>
         </div>
         <p class="hint">
           Skills are short markdown briefs telling the assistant <em>how</em>
           to do something. The assistant loads one when the request matches.
         </p>
-        <ul id="skill-list"></ul>
+        <div id="skill-lint-warnings" class="lint-warnings" aria-live="polite" hidden></div>
+        <ul id="skill-list" aria-label="Skills"></ul>
       </section>
 
-      <section id="tab-prompts" class="tab-panel">
+      <section id="tab-prompts" class="tab-panel" role="tabpanel" aria-labelledby="tab-btn-prompts">
         <div class="panel-actions">
           <button id="new-prompt-btn">+ New prompt</button>
         </div>
@@ -77,10 +167,10 @@
           System prompts shape the assistant's role and tone. Pick the one
           to use as the active voice.
         </p>
-        <ul id="prompt-list"></ul>
+        <ul id="prompt-list" aria-label="Prompts"></ul>
       </section>
 
-      <section id="tab-tools" class="tab-panel">
+      <section id="tab-tools" class="tab-panel" role="tabpanel" aria-labelledby="tab-btn-tools">
         <h2>MCP servers</h2>
         <div class="panel-actions">
           <button id="mcp-from-registry-btn" class="primary">+ Add from registry</button>
@@ -91,7 +181,8 @@
           GitHub, web fetch, search, memory. Some require Node.js or
           Python's <code>uv</code> to be installed.
         </p>
-        <ul id="mcp-server-list"></ul>
+        <div id="mcp-lint-warnings" class="lint-warnings" aria-live="polite" hidden></div>
+        <ul id="mcp-server-list" aria-label="MCP servers"></ul>
 
         <h2>CLI shortcuts</h2>
         <div class="panel-actions">
@@ -103,47 +194,34 @@
           assistant calls them with arguments via <code>cli_call</code>;
           each invocation still needs your approval.
         </p>
-        <ul id="cli-tool-list"></ul>
+        <div id="cli-lint-warnings" class="lint-warnings" aria-live="polite" hidden></div>
+        <ul id="cli-tool-list" aria-label="CLI shortcuts"></ul>
       </section>
 
-      <section id="tab-settings" class="tab-panel">
+      <section id="tab-settings" class="tab-panel" role="tabpanel" aria-labelledby="tab-btn-settings">
         <h2>Connection</h2>
-        <label
-          >OpenWebUI URL
-          <input
-            id="cfg-base-url"
-            type="text"
-            placeholder="http://localhost:3000"
-          />
+        <label>OpenWebUI URL
+          <input id="cfg-base-url" type="text" placeholder="http://localhost:3000" autocomplete="url" />
           <small>Just the root — paths like /api or /v1 are detected automatically.</small>
         </label>
-        <label
-          >API key
-          <input id="cfg-api-key" type="password" placeholder="paste your key" />
+        <label>API key
+          <input id="cfg-api-key" type="password" placeholder="paste your key" autocomplete="current-password" />
           <small id="cfg-api-key-status">Not set</small>
         </label>
         <button id="save-connection" class="primary">Save &amp; test</button>
-        <p class="status-line" id="connection-status"></p>
+        <p class="status-line" id="connection-status" aria-live="polite"></p>
 
         <h2>Defaults</h2>
-        <label
-          >Default chat model
-          <select id="cfg-default-model"></select>
+        <label>Default chat model
+          <select id="cfg-default-model" aria-label="Default chat model"></select>
         </label>
-        <label
-          >Image model <small>(optional)</small>
-          <input
-            id="cfg-image-model"
-            type="text"
-            placeholder="dall-e-3 — or leave blank"
-          />
+        <label>Image model <small>(optional)</small>
+          <input id="cfg-image-model" type="text" placeholder="dall-e-3 — or leave blank" />
         </label>
-        <label
-          >Text-to-speech voice
+        <label>Text-to-speech voice
           <input id="cfg-tts-voice" type="text" placeholder="alloy" />
         </label>
-        <label
-          >Consensus runs
+        <label>Consensus runs
           <input id="cfg-consensus-runs" type="number" min="1" max="10" value="1" />
           <small>Send the prompt this many times in parallel and synthesize a consensus response. 1 = off.</small>
         </label>
@@ -156,44 +234,123 @@
 
         <button id="save-defaults" class="primary">Save defaults</button>
 
+        <h2>Display</h2>
+        <label>Font size
+          <select id="cfg-font-size" aria-label="Font size">
+            <option value="sm">Small (13px)</option>
+            <option value="md" selected>Medium (15px)</option>
+            <option value="lg">Large (17px)</option>
+            <option value="xl">Extra large (20px)</option>
+          </select>
+        </label>
+        <label>Line height
+          <select id="cfg-line-height" aria-label="Line height">
+            <option value="normal" selected>Normal (1.55)</option>
+            <option value="relaxed">Relaxed (1.75)</option>
+            <option value="loose">Loose (2.0)</option>
+          </select>
+        </label>
+        <label class="checkbox">
+          <input id="cfg-dyslexic" type="checkbox" />
+          OpenDyslexic font
+        </label>
+        <label class="checkbox">
+          <input id="cfg-high-contrast" type="checkbox" />
+          High contrast
+        </label>
+        <label class="checkbox">
+          <input id="cfg-reduce-motion" type="checkbox" />
+          Reduce motion
+        </label>
+        <button id="save-display" class="primary">Save display</button>
+
         <h2>About</h2>
         <p class="hint" id="about-info">Loading…</p>
+        <button id="shortcut-help-btn" aria-label="Show keyboard shortcuts">Keyboard shortcuts (?)</button>
       </section>
     </aside>
 
-    <main id="main">
-      <header id="chat-header">
+    <main id="main" tabindex="-1">
+      <header id="chat-header" role="banner">
         <div class="chat-title-wrap">
-          <select id="workspace-select" title="Active workspace"></select>
-          <select id="chat-model-select" title="Model for this chat"></select>
+          <select id="workspace-select" title="Active workspace" aria-label="Active workspace"></select>
+          <select id="chat-model-select" title="Model for this chat" aria-label="Model for this chat"></select>
         </div>
         <div class="chat-actions">
-          <span id="active-workspace-label" class="muted-label"></span>
+          <!-- Chat mode chip -->
+          <div class="mode-chip-wrap" title="Chat mode">
+            <select id="mode-select" aria-label="Chat mode" class="mode-select">
+              <option value="approve-each">Approve each</option>
+              <option value="plan">Plan first</option>
+              <option value="trusted">Trusted</option>
+            </select>
+          </div>
+          <!-- Toggle right-rail panes -->
+          <button id="toggle-plan-btn" class="icon-btn" title="Toggle task plan (P)" aria-pressed="false" aria-label="Toggle task plan pane">☰ Plan</button>
+          <button id="toggle-files-btn" class="icon-btn" title="Toggle file tree (F)" aria-pressed="false" aria-label="Toggle file tree pane">🗂 Files</button>
+          <span id="active-workspace-label" class="muted-label" aria-live="polite"></span>
         </div>
       </header>
 
-      <div id="messages"></div>
+      <div id="chat-body">
+        <div id="messages" role="log" aria-live="polite" aria-label="Conversation messages" aria-relevant="additions"></div>
 
-      <div id="composer">
-        <div id="attachments-preview"></div>
-        <div class="composer-row">
-          <label class="upload-label icon" title="Attach a file (image, etc.)">
-            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/>
-            </svg>
-            <input id="attach-input" type="file" hidden />
-          </label>
-          <textarea
-            id="composer-input"
-            placeholder="Ask anything. The assistant can run commands, read your files, and create images or audio — but only with your approval."
-            rows="2"
-          ></textarea>
-          <button id="send-btn" class="primary">Send</button>
+        <div id="composer">
+          <div id="attachments-preview" aria-label="Attached files" aria-live="polite"></div>
+          <div class="composer-row">
+            <label class="upload-label icon" title="Attach a file (image, etc.)" aria-label="Attach file">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/>
+              </svg>
+              <input id="attach-input" type="file" hidden aria-label="Choose file to attach" />
+            </label>
+            <button id="mic-btn" class="upload-label icon mic-btn" title="Dictate (voice input)" aria-label="Start voice input" aria-pressed="false">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <rect x="9" y="2" width="6" height="11" rx="3"/>
+                <path d="M19 10v2a7 7 0 01-14 0v-2"/>
+                <line x1="12" y1="19" x2="12" y2="23"/>
+                <line x1="8" y1="23" x2="16" y2="23"/>
+              </svg>
+            </button>
+            <textarea
+              id="composer-input"
+              placeholder="Ask anything. The assistant can run commands, read your files, and create images or audio — but only with your approval."
+              rows="2"
+              aria-label="Message input"
+              aria-multiline="true"
+            ></textarea>
+            <button id="send-btn" class="primary" aria-label="Send message">Send</button>
+          </div>
+          <div id="telemetry-line" class="telemetry-line" aria-live="polite" hidden></div>
         </div>
       </div>
     </main>
 
-    <div id="dialog-root"></div>
+    <!-- Right rail: plan pane + file tree pane -->
+    <aside id="right-rail" aria-label="Task plan and files" hidden>
+      <!-- Task plan pane -->
+      <div id="plan-pane" class="rail-pane" hidden>
+        <div class="rail-pane-header">
+          <h2>Task Plan</h2>
+          <button class="pane-collapse-btn" id="plan-pane-close" aria-label="Close plan pane">✕</button>
+        </div>
+        <ul id="plan-list" class="plan-list" aria-label="Task plan items" aria-live="polite"></ul>
+      </div>
+
+      <!-- File tree pane -->
+      <div id="files-pane" class="rail-pane" hidden>
+        <div class="rail-pane-header">
+          <h2>Project Files</h2>
+          <button class="pane-collapse-btn" id="files-pane-close" aria-label="Close file tree">✕</button>
+        </div>
+        <div class="file-tree-root">
+          <p class="hint" id="file-tree-hint">No project root set. Configure one in the workspace settings.</p>
+          <ul id="file-tree" class="file-tree" aria-label="Project files"></ul>
+        </div>
+      </div>
+    </aside>
+
+    <div id="dialog-root" role="region" aria-label="Dialogs" aria-live="assertive"></div>
 
     <template id="message-template">
       <div class="message">

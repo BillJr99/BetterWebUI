@@ -32,24 +32,44 @@ and audio, calling MCP servers — without having to be a developer.
 
 ## First-time setup
 
-You need:
+You need an **OpenWebUI instance you can reach** and its **API key**
+(OpenWebUI: Settings → Account → API Keys).
 
-1. **Python 3.10 or newer.** Download from [python.org](https://www.python.org/downloads/) if you don't have it.
-2. **An OpenWebUI instance you can reach** (running locally or on a server).
-3. **An API key** from that instance (in OpenWebUI: Settings → Account → API Keys).
+Choose whichever installation method suits you:
 
-Optional, only if you want to use MCP servers:
+---
 
-- **Node.js** (for `npx`-based MCP servers like Filesystem, GitHub, Memory)
-- **uv** (for `uvx`-based MCP servers like Fetch, Git, Time)
+### Option A — Docker (recommended, no Python needed)
 
-### macOS / Linux
+1. Install [Docker Desktop](https://www.docker.com/products/docker-desktop/) and start it.
+2. Open a terminal, navigate to the folder you cloned/downloaded, and run:
+
+```bash
+docker compose up
+```
+
+That's it. Docker builds and starts the app. Open <http://localhost:8765> in your browser.
+
+To stop it: press `Ctrl-C` in the terminal. To start again later: `docker compose up`.
+
+> **Your data** (conversations, workspaces, skills) is saved in the `data/` folder next to
+> the app, not inside Docker. You can back it up, share it, or delete it freely.
+
+---
+
+### Option B — Python (macOS / Linux)
+
+You need **Python 3.10+** ([python.org](https://www.python.org/downloads/) if you don't have it).
 
 ```bash
 ./start.sh
 ```
 
-### Windows
+The first launch creates a `.venv` folder and installs packages. Later launches just start.
+
+### Option C — Python (Windows)
+
+You need **Python 3.10+** ([python.org](https://www.python.org/downloads/) if you don't have it).
 
 Double-click `start.bat`, or in a terminal:
 
@@ -57,10 +77,9 @@ Double-click `start.bat`, or in a terminal:
 start.bat
 ```
 
-The first launch installs the Python dependencies into a `.venv` folder
-next to the app. Subsequent launches just start the server.
+---
 
-When it's running, open <http://127.0.0.1:8765> in your browser.
+When the server is running, open <http://127.0.0.1:8765> in your browser.
 
 ### Configure on first run
 
@@ -69,7 +88,12 @@ When it's running, open <http://127.0.0.1:8765> in your browser.
    and your API key. Click **Save & test** — the URL is auto-detected and
    the model dropdown populates.
 3. Pick a default chat model. Click **Save defaults**.
-4. Start a new chat.
+4. Start a new chat (or use the onboarding wizard if prompted).
+
+Optional, only if you want to use MCP servers:
+
+- **Node.js** (for `npx`-based servers like Filesystem, GitHub, Memory)
+- **uv** (for `uvx`-based servers like Fetch, Git, Time)
 
 ## Where things run
 

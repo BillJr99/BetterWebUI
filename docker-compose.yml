@@ -1,0 +1,32 @@
+services:
+  betterwebui:
+    build: .
+    # Both sides use the same ${PORT:-8765} so changing PORT on the host also
+    # changes the port uvicorn binds inside the container (the Dockerfile's
+    # CMD reads $PORT). The host side is bound to 127.0.0.1 by default so
+    # the service isn't accessible from other devices on the LAN. To expose
+    # to your LAN, set BIND=0.0.0.0 (and ideally set
+    # BETTERWEBUI_ALLOW_LAN=true in the environment block below if you also
+    # want /api/project/* and /api/session/trust to be reachable from LAN).
+    ports:
+      - "${BIND:-127.0.0.1}:${PORT:-8765}:${PORT:-8765}"
+    volumes:
+      # App data (config, conversations, workspaces, uploads …)
+      # Back this up to preserve your settings and chat history.
+      - ./data:/app/data
+
+      # Workspace — the folder the assistant reads from and writes to.
+      # Change ./workspace to any folder on your machine, e.g.:
+      #   - /Users/alice/Documents/my-project:/workspace
+      - ./workspace:/workspace
+    environment:
+      - PORT=${PORT:-8765}
+      - WORKSPACE_DIR=/workspace
+      # Inside a container, browser requests arrive from the Docker bridge
+      # gateway (172.16/12). _require_local_caller blocks that range by
+      # default so a bare-metal install on a real 172.16/12 LAN can't be
+      # exfiltrated; here we opt in because the container is the legitimate
+      # caller. The host port is still bound to 127.0.0.1 above, so this
+      # does not expose anything to the LAN by itself.
+      - BETTERWEBUI_ALLOW_DOCKER=true
+    restart: unless-stopped
