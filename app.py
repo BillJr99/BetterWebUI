@@ -1695,6 +1695,9 @@ def _public_config(cfg: dict) -> dict:
         safe["api_profile_label"] = profile.get("label", profile.get("name", ""))
     else:
         safe["api_profile_label"] = ""
+    # Expose the server-controlled workspace base so the UI can render an
+    # accurate placeholder and validation hint for workspace project_root.
+    safe["workspace_dir"] = str(Path(WORKSPACE_DIR).resolve())
     return safe
 
 
@@ -1946,6 +1949,19 @@ async def get_workspace(wid: str):
 
 @app.post("/api/workspaces")
 async def upsert_workspace(w: WorkspaceIn):
+    # Reject project_root values that escape WORKSPACE_DIR up front so the user
+    # gets actionable feedback. _resolve_project_root still clamps as defense-
+    # in-depth, but failing closed here avoids the "configured path silently
+    # ignored" footgun the reviewer flagged.
+    if w.project_root:
+        base = Path(WORKSPACE_DIR).resolve()
+        try:
+            Path(w.project_root).resolve().relative_to(base)
+        except (ValueError, OSError):
+            raise HTTPException(
+                400,
+                f"project_root must be inside the workspace directory ({base}).",
+            )
     data = load_workspaces()
     wid = w.id or "".join(c for c in w.name.lower() if c.isalnum() or c in "-_ ").strip().replace(" ", "-") or uuid.uuid4().hex[:8]
     payload = w.model_dump(exclude_none=True)

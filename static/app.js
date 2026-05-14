@@ -652,8 +652,8 @@ function openWorkspaceDialog(workspace) {
         </select>
       </label>
       <label>Project root <em>(optional — for file tree &amp; checkpoints)</em>
-        <input id="dlg-project-root" type="text" value="${escape(w.project_root || "")}" placeholder="/Users/you/my-project" />
-        <small>Absolute path to a folder. The file tree pane will show its contents.</small>
+        <input id="dlg-project-root" type="text" value="${escape(w.project_root || "")}" placeholder="${escape((state.config?.workspace_dir || "") + "/my-project")}" />
+        <small>Must be a folder under the server's workspace directory${state.config?.workspace_dir ? ` (<code>${escape(state.config.workspace_dir)}</code>)` : ""}. The file tree pane will show its contents.</small>
       </label>
 
       <h3>Skills available in this workspace</h3>
