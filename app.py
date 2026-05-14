@@ -1425,7 +1425,7 @@ async def execute_tool(call: dict, config: dict, send_event, mode: str = "approv
                 "preview": content[:1000],
                 "byte_count": len(content.encode("utf-8")),
                 "checkpoint_id": checkpoint_id,
-                "dest_path": str(dest),
+                "dest_path": filename,
             })
             approved = await approvals.wait(aid)
             if not approved:
@@ -1441,7 +1441,7 @@ async def execute_tool(call: dict, config: dict, send_event, mode: str = "approv
 
         result = {
             "filename": filename,
-            "dest_path": str(dest),
+            "dest_path": filename,
             "mime": mime,
             "bytes_written": len(content.encode("utf-8")),
             "data_b64": base64.b64encode(content.encode("utf-8")).decode("ascii"),
@@ -2078,6 +2078,8 @@ async def import_workspace(file: UploadFile = File(...)):
         })
         save_json(WORKSPACES_PATH, ws_data)
         return {"id": wid, "name": manifest.get("name")}
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(400, f"Invalid workspace bundle: {exc}")
 
@@ -2543,7 +2545,13 @@ async def fork_conversation(cid: str, body: ForkIn):
     if not conv:
         raise HTTPException(404, "Not found")
     messages = conv.get("messages", [])
-    idx = body.fork_at if body.fork_at is not None else (body.from_message_index or len(messages) - 1)
+    if body.fork_at is not None:
+        idx = body.fork_at
+    elif body.from_message_index is not None:
+        idx = body.from_message_index
+    else:
+        idx = len(messages) - 1
+    idx = max(0, min(idx, len(messages) - 1))
     forked_messages = messages[: idx + 1]
     new_cid = uuid.uuid4().hex
     title = body.title or f"{conv.get('title', 'Conversation')} (fork)"

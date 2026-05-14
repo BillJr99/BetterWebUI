@@ -1827,15 +1827,17 @@ async function handleToolResult(data) {
       mime.startsWith("image/") ? "Image" :
       mime.startsWith("audio/") ? "Audio" :
       mime.startsWith("video/") ? "Video" : "File";
+    let content = `${label} ready: ${r.filename}`;
+    if (r.write_error) content += `\n⚠️ On-disk write failed: ${r.write_error}`;
     const sysMsg = {
       role: "tool",
-      content: `${label} ready: ${r.filename}`,
-      attachments: [{ url, content_type: mime, filename: r.filename }],
+      content,
+      attachments: r.write_error ? [] : [{ url, content_type: mime, filename: r.filename }],
     };
     state.messages.push(sysMsg);
     appendMessage(sysMsg);
-    // Refresh file tree after a write
-    if (state.filesPaneVisible) refreshFileTree();
+    // Refresh file tree only when the write actually succeeded
+    if (state.filesPaneVisible && !r.write_error) refreshFileTree();
     return;
   }
 

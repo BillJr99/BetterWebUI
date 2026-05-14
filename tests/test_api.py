@@ -693,3 +693,69 @@ class TestBackgroundTasks:
     def test_get_missing_task(self, client):
         r = client.get("/api/tasks/nonexistent")
         assert r.status_code == 404
+
+
+# ===========================================================================
+# Project file APIs
+# ===========================================================================
+
+class TestProjectApi:
+    def _setup_workspace_dir(self, isolated_dirs):
+        """Point WORKSPACE_DIR to a temp dir with a test file inside it."""
+        import app as app_module
+        ws = isolated_dirs["tmp"] / "workspace"
+        ws.mkdir(parents=True, exist_ok=True)
+        (ws / "hello.txt").write_text("hello world", encoding="utf-8")
+        (ws / "sub").mkdir(exist_ok=True)
+        (ws / "sub" / "nested.txt").write_text("nested", encoding="utf-8")
+        app_module.WORKSPACE_DIR = ws
+        return ws
+
+    def test_tree_lists_files(self, client, isolated_dirs):
+        self._setup_workspace_dir(isolated_dirs)
+        r = client.get("/api/project/tree")
+        assert r.status_code == 200
+        data = r.json()
+        assert "entries" in data
+        names = {e["name"] for e in data["entries"]}
+        assert "hello.txt" in names
+
+    def test_tree_expands_subdirectory(self, client, isolated_dirs):
+        self._setup_workspace_dir(isolated_dirs)
+        r = client.get("/api/project/tree?path=sub")
+        assert r.status_code == 200
+        data = r.json()
+        names = {e["name"] for e in data["entries"]}
+        assert "nested.txt" in names
+
+    def test_file_read(self, client, isolated_dirs):
+        self._setup_workspace_dir(isolated_dirs)
+        r = client.get("/api/project/file?path=hello.txt")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["content"] == "hello world"
+        assert data["is_binary"] is False
+
+    def test_file_not_found(self, client, isolated_dirs):
+        self._setup_workspace_dir(isolated_dirs)
+        r = client.get("/api/project/file?path=missing.txt")
+        assert r.status_code == 404
+
+    def test_path_traversal_denied(self, client, isolated_dirs):
+        self._setup_workspace_dir(isolated_dirs)
+        r = client.get("/api/project/file?path=../config.json")
+        assert r.status_code == 403
+
+    def test_checkpoints_empty(self, client, isolated_dirs):
+        self._setup_workspace_dir(isolated_dirs)
+        r = client.get("/api/project/checkpoints?filename=hello.txt")
+        assert r.status_code == 200
+        assert r.json()["checkpoints"] == []
+
+    def test_revert_missing_checkpoint(self, client, isolated_dirs):
+        self._setup_workspace_dir(isolated_dirs)
+        r = client.post("/api/project/revert", json={
+            "filename": "hello.txt",
+            "checkpoint_id": "nonexistent",
+        })
+        assert r.status_code == 404
