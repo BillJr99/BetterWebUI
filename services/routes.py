@@ -6,18 +6,27 @@ to mount all /api/services/* endpoints onto the existing FastAPI app.
 """
 from __future__ import annotations
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 
 from .clients import get_clk_client, get_autogui_client, get_osso_client
 from .health import check_all_services
 from .sse_proxy import proxy_sse
+from . import state as svc_state
+
+_VALID_SERVICE_NAMES = frozenset({"clk", "autogui", "osso"})
+
+
+def _require_enabled(name: str) -> None:
+    """Raise 503 if the named service is currently disabled."""
+    if not svc_state.is_enabled(name):
+        raise HTTPException(status_code=503, detail=f"Service '{name}' is disabled")
 
 
 def register_routes(app: FastAPI) -> None:  # noqa: C901
     """Register all /api/services/* routes on the given FastAPI app instance."""
 
-    # ── Health ──────────────────────────────────────────────────────────────
+    # ── Health ───────────────────────────────────────────────────────────────────────
 
     @app.get("/api/services/health")
     async def services_health():
@@ -25,15 +34,39 @@ def register_routes(app: FastAPI) -> None:  # noqa: C901
         all_ok = all(v["ok"] for v in results.values())
         return {"ok": all_ok, "services": results}
 
-    # ── CognitiveLoopKernel ─────────────────────────────────────────────────
+    # ── Enable / Disable ───────────────────────────────────────────────────────────
+
+    @app.get("/api/services/status")
+    async def services_status():
+        """Return the enabled/disabled state for each service."""
+        enabled_map = svc_state.get_all()
+        return {"services": {name: {"enabled": enabled} for name, enabled in enabled_map.items()}}
+
+    @app.post("/api/services/{name}/enable")
+    async def enable_service(name: str):
+        if name not in _VALID_SERVICE_NAMES:
+            raise HTTPException(status_code=404, detail=f"Unknown service: {name}")
+        svc_state.set_enabled(name, True)
+        return {"ok": True, "service": name, "enabled": True}
+
+    @app.post("/api/services/{name}/disable")
+    async def disable_service(name: str):
+        if name not in _VALID_SERVICE_NAMES:
+            raise HTTPException(status_code=404, detail=f"Unknown service: {name}")
+        svc_state.set_enabled(name, False)
+        return {"ok": True, "service": name, "enabled": False}
+
+    # ── CognitiveLoopKernel ─────────────────────────────────────────────────────────
 
     @app.get("/api/services/clk/workflows")
     async def clk_list_workflows():
+        _require_enabled("clk")
         client = get_clk_client()
         return await client.list_workflows()
 
     @app.post("/api/services/clk/research")
     async def clk_start_research(body: dict):
+        _require_enabled("clk")
         client = get_clk_client()
         return await client.start_research(
             command=body.get("command", "run"),
@@ -44,11 +77,13 @@ def register_routes(app: FastAPI) -> None:  # noqa: C901
 
     @app.get("/api/services/clk/research/{task_id}")
     async def clk_get_task(task_id: str):
+        _require_enabled("clk")
         client = get_clk_client()
         return await client.get_task(task_id)
 
     @app.get("/api/services/clk/research/{task_id}/stream")
     async def clk_stream_task(task_id: str):
+        _require_enabled("clk")
         client = get_clk_client()
         return StreamingResponse(
             proxy_sse(client.stream_task(task_id)),
@@ -58,18 +93,21 @@ def register_routes(app: FastAPI) -> None:  # noqa: C901
 
     @app.get("/api/services/clk/research/{task_id}/artifacts")
     async def clk_list_artifacts(task_id: str):
+        _require_enabled("clk")
         client = get_clk_client()
         return await client.list_artifacts(task_id)
 
     @app.post("/api/services/clk/research/{task_id}/cancel")
     async def clk_cancel_task(task_id: str):
+        _require_enabled("clk")
         client = get_clk_client()
         return await client.cancel_task(task_id)
 
-    # ── AutoGUI ─────────────────────────────────────────────────────────────
+    # ── AutoGUI ───────────────────────────────────────────────────────────────────
 
     @app.post("/api/services/autogui/task")
     async def autogui_start_task(body: dict):
+        _require_enabled("autogui")
         client = get_autogui_client()
         return await client.start_task(
             task=body["task"],
@@ -80,11 +118,13 @@ def register_routes(app: FastAPI) -> None:  # noqa: C901
 
     @app.get("/api/services/autogui/task/{task_id}")
     async def autogui_get_task(task_id: str):
+        _require_enabled("autogui")
         client = get_autogui_client()
         return await client.get_task(task_id)
 
     @app.get("/api/services/autogui/task/{task_id}/stream")
     async def autogui_stream_task(task_id: str):
+        _require_enabled("autogui")
         client = get_autogui_client()
         return StreamingResponse(
             proxy_sse(client.stream_task(task_id)),
@@ -94,47 +134,55 @@ def register_routes(app: FastAPI) -> None:  # noqa: C901
 
     @app.post("/api/services/autogui/task/{task_id}/cancel")
     async def autogui_cancel_task(task_id: str):
+        _require_enabled("autogui")
         client = get_autogui_client()
         return await client.cancel_task(task_id)
 
     @app.get("/api/services/autogui/tools")
     async def autogui_list_tools():
+        _require_enabled("autogui")
         client = get_autogui_client()
         return await client.list_tools()
 
-    # ── OSScreenObserver ────────────────────────────────────────────────────
+    # ── OSScreenObserver ────────────────────────────────────────────────────────────────
 
     @app.get("/api/services/osso/windows")
     async def osso_windows():
+        _require_enabled("osso")
         client = get_osso_client()
         return await client.windows()
 
     @app.get("/api/services/osso/description")
     async def osso_description(window_index: int | None = None, mode: str = "accessibility"):
+        _require_enabled("osso")
         client = get_osso_client()
         return await client.description(window_index, mode)
 
     @app.get("/api/services/osso/structure")
     async def osso_structure(window_index: int | None = None):
+        _require_enabled("osso")
         client = get_osso_client()
         return await client.structure(window_index)
 
     @app.get("/api/services/osso/screenshot")
     async def osso_screenshot(window_index: int | None = None):
+        _require_enabled("osso")
         client = get_osso_client()
         return await client.screenshot(window_index)
 
     @app.post("/api/services/osso/action")
     async def osso_action(body: dict):
+        _require_enabled("osso")
         client = get_osso_client()
         return await client.action(body)
 
     @app.get("/api/services/osso/capabilities")
     async def osso_capabilities():
+        _require_enabled("osso")
         client = get_osso_client()
         return await client.capabilities()
 
-    # ── LLM Tool Specs ──────────────────────────────────────────────────────
+    # ── LLM Tool Specs ────────────────────────────────────────────────────────────────
 
     @app.get("/api/services/tools")
     async def services_tool_specs():
