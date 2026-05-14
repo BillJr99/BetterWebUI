@@ -1,0 +1,3 @@
+@echo off
+echo Starting BetterWebUI...
+powershell -ExecutionPolicy Bypass -File "%~dp0start.ps1" %*
