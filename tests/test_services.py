@@ -514,6 +514,45 @@ class TestServicesRoutes:
         assert r.status_code == 200
         assert r.json()["task_id"] == "gui-1"
 
+    def test_autogui_start_task_model_not_forwarded(self, app_client):
+        """Regression: the route must always pass model=None to start_task.
+
+        The caller's model value is intentionally dropped so AutoGUI uses
+        its own configured model rather than BetterWebUI's chat model.
+        """
+        with patch("services.state.is_enabled", return_value=True), \
+             patch("services.routes.get_autogui_client") as mock_factory:
+            mock_client = AsyncMock()
+            mock_client.start_task.return_value = {"task_id": "gui-reg"}
+            mock_factory.return_value = mock_client
+            r = app_client.post(
+                "/api/services/autogui/task",
+                json={"task": "click OK", "model": "some-chat-model"},
+            )
+        assert r.status_code == 200
+        _, kwargs = mock_client.start_task.await_args
+        assert kwargs.get("model") is None, (
+            "model must not be forwarded from the caller to AutoGUI"
+        )
+
+    def test_autogui_task_tool_spec_has_no_model_param(self, app_client):
+        """Regression: autogui_task tool spec must not expose a 'model' parameter.
+
+        The model forwarding was removed deliberately; this test catches
+        accidental re-addition of 'model' to the tool's parameter schema.
+        """
+        r = app_client.get("/api/services/tools")
+        assert r.status_code == 200
+        tools = r.json()["tools"]
+        autogui_specs = [t for t in tools if t["function"]["name"] == "autogui_task"]
+        assert autogui_specs, "autogui_task must be present in /api/services/tools"
+        params = autogui_specs[0]["function"].get("parameters", {})
+        properties = params.get("properties", {})
+        assert "model" not in properties, (
+            "'model' must not appear in autogui_task parameters — "
+            "AutoGUI uses its own configured model"
+        )
+
     def test_autogui_get_task(self, app_client):
         with patch("services.state.is_enabled", return_value=True), \
              patch("services.routes.get_autogui_client") as mock_factory:
