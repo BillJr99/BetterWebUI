@@ -3225,13 +3225,13 @@ def to_openai_messages(history: list, system_prompt: str) -> list:
             content = f"[Tool result]\n{m.get('content', '')}"
             out.append({"role": role, "content": content})
             continue
-        content = m.get("content", "")
+        content = m.get("content") or ""
         attachments = m.get("attachments") or []
         if attachments and role == "user":
             parts = [{"type": "text", "text": content}] if content else []
             for a in attachments:
-                ctype = a.get("content_type", "")
-                url = a.get("url", "")
+                ctype = a.get("content_type") or ""
+                url = a.get("url") or ""
                 if ctype.startswith("image/"):
                     parts.append({"type": "image_url", "image_url": {"url": url}})
                 else:
@@ -3272,10 +3272,13 @@ async def chat(req: ChatRequest, request: Request):
 
     async def run_loop() -> None:
         nonlocal current_task_plan
-        history = [
-            m for m in req.messages
-            if isinstance(m, dict) and m.get("role") in {"user", "assistant"}
-        ]
+        history = []
+        for m in req.messages:
+            if not isinstance(m, dict) or m.get("role") not in {"user", "assistant"}:
+                continue
+            if m.get("content") is None:
+                m = {**m, "content": ""}
+            history.append(m)
         system_prompt = build_system_prompt(cfg, prompts, effective_mode)
         try:
             for _step in range(12):  # higher cap for subagent-heavy tasks
