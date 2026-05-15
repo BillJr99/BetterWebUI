@@ -1776,8 +1776,8 @@ async def execute_tool(call: dict, config: dict, send_event, mode: str = "approv
         import httpx as _httpx
         if not svc_state.is_enabled("autogui"):
             return {"error": "AutoGUI is disabled. Enable it in Settings > Services."}
-        task_desc = args.get("task", "")
-        dry_run = args.get("dry_run", False)
+        task_desc = args.get("task") or ""
+        dry_run = args.get("dry_run") or False
         summary = f"AutoGUI task: {task_desc[:120]}" + (" [dry run]" if dry_run else "")
         if mode != "trusted":
             aid = approvals.new()
