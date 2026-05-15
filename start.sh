@@ -3,7 +3,7 @@
 # First run installs Python deps in a local virtualenv. After that it just starts.
 
 set -e
-cd "$(dirname "$0")"
+cd "$(dirname "${BASH_SOURCE[0]}")"
 
 if [ ! -d ".venv" ]; then
   echo "First-time setup: creating a Python environment and installing packages..."
