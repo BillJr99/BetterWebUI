@@ -18,6 +18,8 @@ import shutil
 import time
 import uuid
 import zipfile
+import logging
+import logging.handlers
 from pathlib import Path
 from typing import Any, AsyncGenerator, Optional
 
@@ -50,6 +52,23 @@ WORKSPACE_DIR = Path(os.environ.get("WORKSPACE_DIR", str(ROOT / "workspace")))
 
 for d in (DATA_DIR, SKILLS_DIR, UPLOADS_DIR, CHECKPOINTS_DIR, TASKS_DIR, WORKSPACE_DIR):
     d.mkdir(parents=True, exist_ok=True)
+
+_LOG_DIR = ROOT / "logs"
+_LOG_DIR.mkdir(parents=True, exist_ok=True)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    handlers=[
+        logging.handlers.RotatingFileHandler(
+            _LOG_DIR / "betterwebui.log",
+            maxBytes=10 * 1024 * 1024,
+            backupCount=3,
+            encoding="utf-8",
+        ),
+        logging.StreamHandler(),
+    ],
+)
+logger = logging.getLogger("betterwebui")
 
 
 # ---------------------------------------------------------------------------
