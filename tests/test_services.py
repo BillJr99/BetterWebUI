@@ -222,8 +222,10 @@ class TestAutoGUIClient:
             run(client.start_task("Close window"))
         _, kwargs = inner.post.await_args
         body = kwargs["json"]
-        assert body["model"] is None
-        assert body["allow"] is None
+        # None-valued optional fields must not be shipped — AutoGUI crashes
+        # with "NoneType has no attribute startswith" when it sees null model.
+        assert "model" not in body
+        assert "allow" not in body
         assert body["dry_run"] is False
 
     def test_get_task_calls_correct_path(self):

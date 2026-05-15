@@ -1795,7 +1795,7 @@ async def execute_tool(call: dict, config: dict, send_event, mode: str = "approv
             client = get_autogui_client()
             return await client.start_task(
                 task=task_desc,
-                model=args.get("model"),
+                model=args.get("model") or model or config.get("default_model") or None,
                 dry_run=dry_run,
             )
         except (_httpx.ConnectError, _httpx.TimeoutException, _httpx.TransportError) as e:
