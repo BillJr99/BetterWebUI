@@ -401,6 +401,7 @@ label small { font-weight: 400; }
   line-height: 1;
 }
 .upload-label.icon > svg { display: block; }
+button.upload-label { -webkit-appearance: none; appearance: none; }
 
 .hint {
   font-size: 13px;
