@@ -88,6 +88,43 @@ class AutoGUIClient(ServiceClient):
                     if line.startswith("data: "):
                         yield line[6:]
 
+    async def await_task(self, task_id: str, timeout: float = 600.0) -> dict:
+        """Stream task events until completion; return a result summary."""
+        ep = get_services()["autogui"]
+        events: list[dict] = []
+        try:
+            async with httpx.AsyncClient(
+                base_url=ep.base_url,
+                timeout=httpx.Timeout(timeout, connect=10.0),
+            ) as c:
+                async with c.stream("GET", f"/api/task/{task_id}/stream") as r:
+                    async for line in r.aiter_lines():
+                        if not line.startswith("data: "):
+                            continue
+                        try:
+                            data = json.loads(line[6:])
+                        except Exception:
+                            continue
+                        events.append(data)
+                        if data.get("finished") or data.get("kind") == "done":
+                            break
+        except Exception as e:
+            return {"ok": False, "task_id": task_id, "status": "error", "error": str(e)}
+
+        text_outputs = [e["content"] for e in events if e.get("kind") == "text"]
+        errors = [e["content"] for e in events if e.get("kind") == "error"]
+        done_events = [e for e in events if e.get("kind") == "done"]
+        finish_reason = (done_events[-1].get("data") or {}).get("finish_reason", "done") if done_events else "unknown"
+        status = "error" if errors else finish_reason
+
+        return {
+            "ok": True,
+            "task_id": task_id,
+            "status": status,
+            "summary": "\n".join(text_outputs) if text_outputs else "Task completed.",
+            "errors": errors if errors else None,
+        }
+
     async def cancel_task(self, task_id: str) -> dict:
         async with self._client() as c:
             r = await c.post(f"/api/task/{task_id}/cancel")
