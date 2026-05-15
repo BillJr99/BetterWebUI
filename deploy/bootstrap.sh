@@ -25,9 +25,9 @@ clone_or_update() {
     fi
 }
 
-clone_or_update "cognitiveloopkernel" "https://github.com/billjr99/cognitiveloopkernel.git" "${CLK_REF:-main}"
-clone_or_update "autogui" "https://github.com/billjr99/autogui.git" "${AUTOGUI_REF:-main}"
-clone_or_update "osscreenobserver" "https://github.com/billjr99/osscreenobserver.git" "${OSSO_REF:-main}"
+clone_or_update "cognitiveloopkernel" "git@github.com:billjr99/cognitiveloopkernel.git" "${CLK_REF:-main}"
+clone_or_update "autogui" "git@github.com:billjr99/autogui.git" "${AUTOGUI_REF:-main}"
+clone_or_update "osscreenobserver" "git@github.com:billjr99/osscreenobserver.git" "${OSSO_REF:-main}"
 
 echo ""
 echo "Done. Sibling repos are in: $WORKSPACE_DIR"
