@@ -1,5 +1,10 @@
+import json
+import logging
+
 import httpx
 from .registry import get_services, ServiceEndpoint
+
+logger = logging.getLogger("betterwebui.services.clients")
 
 
 class ServiceClient:
@@ -64,8 +69,10 @@ class AutoGUIClient(ServiceClient):
             body["model"] = model
         if allow is not None:
             body["allow"] = allow
+        logger.info("AutoGUI POST /api/task body: %s", json.dumps(body))
         async with self._client() as c:
             r = await c.post("/api/task", json=body)
+            logger.info("AutoGUI POST /api/task response %d: %s", r.status_code, r.text[:500])
             return r.json()
 
     async def get_task(self, task_id: str) -> dict:
