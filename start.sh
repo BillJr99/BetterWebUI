@@ -18,4 +18,6 @@ echo "BetterWebUI is starting on http://127.0.0.1:${PORT}"
 echo "Open that link in your browser. Press Ctrl-C in this window to stop."
 echo ""
 
-exec ./.venv/bin/python -m uvicorn app:app --host 127.0.0.1 --port "$PORT"
+# Run uvicorn as a child process (not exec) so Ctrl-C stops uvicorn
+# and drops back to the shell rather than closing the terminal.
+./.venv/bin/python -m uvicorn app:app --host 127.0.0.1 --port "$PORT"
