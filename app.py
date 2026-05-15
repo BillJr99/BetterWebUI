@@ -990,6 +990,52 @@ def build_system_prompt(config: dict, prompts: dict, mode: str = "approve-each")
 
     parts.append(f"Detected operating system: {platform.system()} ({platform.platform()}).")
     parts.append(TOOL_PROTOCOL)
+
+    # 5. Integrated services — only advertised when enabled
+    from services import state as svc_state
+    service_lines: list[str] = []
+    if svc_state.is_enabled("autogui"):
+        service_lines.append(
+            "- autogui_task: drive the desktop GUI (move the mouse, click, type, "
+            "open apps, work in any window — including Notepad on Windows or any "
+            "other native app) via AutoGUI's ReAct loop. PREFER this over "
+            "execute_shell when the user asks to operate a GUI application. "
+            "Args: {\"task\": \"natural-language description of what to do\", "
+            "\"dry_run\": false, \"model\": \"optional override\"}."
+        )
+    if svc_state.is_enabled("osso"):
+        service_lines.append(
+            "- screen_windows: list every open window on the user's desktop. "
+            "Args: {}."
+        )
+        service_lines.append(
+            "- screen_description: describe a window's contents via accessibility "
+            "tree or OCR. Args: {\"window_index\": 0, \"mode\": "
+            "\"accessibility|ocr|vision\"}."
+        )
+        service_lines.append(
+            "- screen_screenshot: capture a screenshot of a window. "
+            "Args: {\"window_index\": 0}."
+        )
+        service_lines.append(
+            "- screen_action: perform a precise screen action (click, type, key "
+            "press). REQUIRES APPROVAL. Args: {\"action\": \"click|type|key\", "
+            "\"x\": 0, \"y\": 0, \"text\": \"...\", \"key\": \"...\"}."
+        )
+    if svc_state.is_enabled("clk"):
+        service_lines.append(
+            "- clk_research: start a CognitiveLoopKernel research / reasoning "
+            "workflow for deep multi-step analysis. REQUIRES APPROVAL. "
+            "Args: {\"command\": \"run\", \"workflow\": \"optional workflow name\", "
+            "\"args\": [], \"workspace_id\": \"optional\"}."
+        )
+    if service_lines:
+        parts.append(
+            "Integrated services available as tools (call them like any other "
+            "tool via the ```tool block). These extend what you can do beyond "
+            "execute_shell:\n" + "\n".join(service_lines)
+        )
+
     return "\n\n".join(parts)
 
 
