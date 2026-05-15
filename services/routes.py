@@ -136,11 +136,13 @@ def register_routes(app: FastAPI) -> None:  # noqa: C901
         _require_enabled("autogui")
         client = get_autogui_client()
         try:
+            from app import load_config
+            cfg = load_config()
             return await client.start_task(
                 task=body["task"],
-                model=body.get("model"),
+                model=body.get("model") or cfg.get("default_model") or None,
                 allow=body.get("allow"),
-                dry_run=body.get("dry_run", False),
+                dry_run=body.get("dry_run") or False,
             )
         except (httpx.ConnectError, httpx.TimeoutException, httpx.TransportError) as e:
             raise _unreachable("autogui", e) from e
