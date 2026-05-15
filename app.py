@@ -1267,12 +1267,14 @@ async def call_openwebui_audio(text: str, voice: str, config: dict) -> dict:
     }
 
 
-async def chat_complete(messages: list, model: str, config: dict) -> tuple[str, dict]:
+async def chat_complete(messages: list, model: str, config: dict, chat_id: str = "") -> tuple[str, dict]:
     """Returns (text, usage_dict)."""
     base = normalize_base_url(config["base_url"])
     profile = active_profile(config)
-    headers = {"Authorization": f"Bearer {config['api_key']}"}
-    payload = {"model": model, "messages": messages, "stream": False}
+    headers = {"Authorization": f"Bearer {config.get('api_key', '')}"}
+    payload: dict = {"model": model, "messages": messages, "stream": False}
+    if chat_id:
+        payload["chat_id"] = chat_id
     t0 = time.time()
     async with httpx.AsyncClient(timeout=300.0, follow_redirects=True) as client:
         resp = await client.post(f"{base}{profile['chat']}", json=payload, headers=headers)
@@ -3290,7 +3292,7 @@ async def chat(req: ChatRequest, request: Request):
                 await send_event("status", {"message": "Thinking…"})
                 if consensus_runs > 1:
                     raw_responses = await asyncio.gather(
-                        *[chat_complete(openai_messages, model, cfg) for _ in range(consensus_runs)],
+                        *[chat_complete(openai_messages, model, cfg, chat_id=cid) for _ in range(consensus_runs)],
                         return_exceptions=True,
                     )
                     valid = [(r[0], r[1]) for r in raw_responses if isinstance(r, tuple)]
@@ -3306,9 +3308,9 @@ async def chat(req: ChatRequest, request: Request):
                                 "Favor content where the responses agree.\n\n" + numbered
                             ),
                         }]
-                        text, usage = await chat_complete(synthesis_messages, model, cfg)
+                        text, usage = await chat_complete(synthesis_messages, model, cfg, chat_id=cid)
                 else:
-                    text, usage = await chat_complete(openai_messages, model, cfg)
+                    text, usage = await chat_complete(openai_messages, model, cfg, chat_id=cid)
 
                 # Emit telemetry badge
                 tokens_in = usage.get("prompt_tokens", 0)
