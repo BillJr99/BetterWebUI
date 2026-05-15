@@ -58,10 +58,8 @@ class AutoGUIClient(ServiceClient):
             r = await c.get("/api/tools")
             return r.json()
 
-    async def start_task(self, task: str, model: str | None = None, allow: dict | None = None, dry_run: bool = False) -> dict:
+    async def start_task(self, task: str, allow: dict | None = None, dry_run: bool = False) -> dict:
         body: dict = {"task": task, "dry_run": dry_run}
-        if model:
-            body["model"] = model
         if allow is not None:
             body["allow"] = allow
         async with self._client() as c:

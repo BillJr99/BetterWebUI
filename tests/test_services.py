@@ -206,10 +206,9 @@ class TestAutoGUIClient:
         mock_resp = _mock_response({"task_id": "gui-1"})
         client, ctx, inner = self._make_client(mock_resp)
         with patch.object(client, "_client", return_value=ctx):
-            result = run(client.start_task("Open Notepad", model="gpt-4", allow={"apps": ["notepad"]}, dry_run=False))
+            result = run(client.start_task("Open Notepad", allow={"apps": ["notepad"]}, dry_run=False))
         inner.post.assert_awaited_once_with("/api/task", json={
             "task": "Open Notepad",
-            "model": "gpt-4",
             "allow": {"apps": ["notepad"]},
             "dry_run": False,
         })
@@ -222,8 +221,6 @@ class TestAutoGUIClient:
             run(client.start_task("Close window"))
         _, kwargs = inner.post.await_args
         body = kwargs["json"]
-        # None-valued optional fields must not be shipped — AutoGUI crashes
-        # with "NoneType has no attribute startswith" when it sees null model.
         assert "model" not in body
         assert "allow" not in body
         assert body["dry_run"] is False
