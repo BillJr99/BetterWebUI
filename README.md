@@ -4,6 +4,19 @@ A friendlier front-end for OpenWebUI. Built for higher-ed faculty who want
 the power of agentic AI — running commands, reading files, generating images
 and audio, calling MCP servers — without having to be a developer.
 
+> **⚠ Experimental software — use in a sandbox environment only.**
+> BetterWebUI is a research prototype. It is not intended for, nor evaluated
+> or deemed suitable for, any particular production use or critical workload.
+> No warranty is provided, express or implied. Shell commands approved in the
+> chat interface execute directly on your local machine; integrated services
+> (CLK, AutoGUI, OSScreenObserver) may take real actions on your desktop.
+> Run this software only in an isolated, sandboxed environment and review
+> every command before approving it. By using this software you accept all
+> associated risks.
+>
+> Contributions, bug reports, and ideas are very welcome — feel free to
+> open an issue or pull request!
+
 ## What it does
 
 - Connects to your existing OpenWebUI instance (auto-detects whether the API
