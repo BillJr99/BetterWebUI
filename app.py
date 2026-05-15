@@ -1793,7 +1793,7 @@ async def execute_tool(call: dict, config: dict, send_event, mode: str = "approv
         await send_event("tool_running", {"tool": "autogui_task", "command": summary})
         try:
             client = get_autogui_client()
-            return await client.start_task(task=task_desc, dry_run=dry_run)
+            return await client.start_task(task=task_desc, model=model or None, dry_run=dry_run)
         except (_httpx.ConnectError, _httpx.TimeoutException, _httpx.TransportError) as e:
             return {"error": f"AutoGUI is enabled but could not be reached. ({e})"}
 
