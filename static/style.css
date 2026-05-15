@@ -392,7 +392,15 @@ label small { font-weight: 400; }
   transition: background 0.15s ease;
 }
 .upload-label:hover { background: var(--parchment-pale); }
-.upload-label.icon { padding: 8px 10px; flex: 0 0 auto; color: var(--ink-soft); height: 40px; line-height: 1; }
+.upload-label.icon {
+  flex: 0 0 auto;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  color: var(--ink-soft);
+  line-height: 1;
+}
+.upload-label.icon > svg { display: block; }
 
 .hint {
   font-size: 13px;
