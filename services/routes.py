@@ -37,7 +37,7 @@ def _unreachable(name: str, exc: Exception) -> HTTPException:
 def register_routes(app: FastAPI) -> None:  # noqa: C901
     """Register all /api/services/* routes on the given FastAPI app instance."""
 
-    # ── Health ───────────────────────────────────────────────────────────────────────
+    # ── Health ──────────────────────────────────────────────────────
 
     @app.get("/api/services/health")
     async def services_health():
@@ -45,7 +45,7 @@ def register_routes(app: FastAPI) -> None:  # noqa: C901
         all_ok = all(v["ok"] for v in results.values())
         return {"ok": all_ok, "services": results}
 
-    # ── Enable / Disable ───────────────────────────────────────────────────────────
+    # ── Enable / Disable ─────────────────────────────────────────────
 
     @app.get("/api/services/status")
     async def services_status():
@@ -67,7 +67,7 @@ def register_routes(app: FastAPI) -> None:  # noqa: C901
         svc_state.set_enabled(name, False)
         return {"ok": True, "service": name, "enabled": False}
 
-    # ── CognitiveLoopKernel ─────────────────────────────────────────────────────────
+    # ── CognitiveLoopKernel ─────────────────────────────────────────────
 
     @app.get("/api/services/clk/workflows")
     async def clk_list_workflows():
@@ -129,18 +129,16 @@ def register_routes(app: FastAPI) -> None:  # noqa: C901
         except (httpx.ConnectError, httpx.TimeoutException, httpx.TransportError) as e:
             raise _unreachable("clk", e) from e
 
-    # ── AutoGUI ───────────────────────────────────────────────────────────────────
+    # ── AutoGUI ─────────────────────────────────────────────────────
 
     @app.post("/api/services/autogui/task")
     async def autogui_start_task(body: dict):
         _require_enabled("autogui")
         client = get_autogui_client()
         try:
-            from app import load_config
-            cfg = load_config()
             return await client.start_task(
                 task=body["task"],
-                model=body.get("model") or cfg.get("default_model") or None,
+                model=None,  # always use AutoGUI's own configured model
                 allow=body.get("allow"),
                 dry_run=body.get("dry_run") or False,
             )
@@ -184,7 +182,7 @@ def register_routes(app: FastAPI) -> None:  # noqa: C901
         except (httpx.ConnectError, httpx.TimeoutException, httpx.TransportError) as e:
             raise _unreachable("autogui", e) from e
 
-    # ── OSScreenObserver ────────────────────────────────────────────────────────────────
+    # ── OSScreenObserver ────────────────────────────────────────────────
 
     @app.get("/api/services/osso/windows")
     async def osso_windows():
@@ -240,7 +238,7 @@ def register_routes(app: FastAPI) -> None:  # noqa: C901
         except (httpx.ConnectError, httpx.TimeoutException, httpx.TransportError) as e:
             raise _unreachable("osso", e) from e
 
-    # ── LLM Tool Specs ────────────────────────────────────────────────────────────────
+    # ── LLM Tool Specs ─────────────────────────────────────────────────────
 
     @app.get("/api/services/tools")
     async def services_tool_specs():
@@ -274,7 +272,6 @@ def register_routes(app: FastAPI) -> None:  # noqa: C901
                             "properties": {
                                 "task": {"type": "string", "description": "Natural-language description of the desktop task"},
                                 "dry_run": {"type": "boolean", "description": "If true, plan the task but do not execute actions"},
-                                "model": {"type": "string", "description": "Override the LLM model used by AutoGUI"},
                             },
                             "required": ["task"],
                         },
