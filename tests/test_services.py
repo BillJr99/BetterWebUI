@@ -508,11 +508,13 @@ class TestServicesRoutes:
         with patch("services.state.is_enabled", return_value=True), \
              patch("services.routes.get_autogui_client") as mock_factory:
             mock_client = AsyncMock()
-            mock_client.start_task.return_value = {"task_id": "gui-1"}
+            mock_client.start_task.return_value = {"ok": True, "task_id": "gui-1"}
+            mock_client.await_task.return_value = {"ok": True, "task_id": "gui-1", "status": "done", "summary": "Done."}
             mock_factory.return_value = mock_client
             r = app_client.post("/api/services/autogui/task", json={"task": "Open Notepad"})
         assert r.status_code == 200
         assert r.json()["task_id"] == "gui-1"
+        assert r.json()["status"] == "done"
 
     def test_autogui_start_task_model_not_forwarded(self, app_client):
         """Regression: the route must always pass model=None to start_task.
@@ -523,7 +525,8 @@ class TestServicesRoutes:
         with patch("services.state.is_enabled", return_value=True), \
              patch("services.routes.get_autogui_client") as mock_factory:
             mock_client = AsyncMock()
-            mock_client.start_task.return_value = {"task_id": "gui-reg"}
+            mock_client.start_task.return_value = {"ok": True, "task_id": "gui-reg"}
+            mock_client.await_task.return_value = {"ok": True, "task_id": "gui-reg", "status": "done", "summary": "Done."}
             mock_factory.return_value = mock_client
             r = app_client.post(
                 "/api/services/autogui/task",
