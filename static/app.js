@@ -351,7 +351,7 @@ function modelOptionLabel(m) {
 function populateModelSelects() {
   const optionHtml =
     '<option value="">— pick a model —</option>' +
-    state.models.map((m) => `<option value="${m.id}">${escape(modelOptionLabel(m))}</option>`).join("");
+    state.models.map((m) => `<option value="${escape(m.id)}">${escape(modelOptionLabel(m))}</option>`).join("");
   $("#cfg-default-model").innerHTML = optionHtml;
   $("#cfg-default-model").value = state.config?.default_model || "";
   $("#chat-model-select").innerHTML = optionHtml;
@@ -707,7 +707,7 @@ function openWorkspaceDialog(workspace) {
       <label>Default model <em>(optional)</em>
         <select id="dlg-model">
           <option value="">— inherit —</option>
-          ${state.models.map((m) => `<option value="${m.id}" ${m.id === w.default_model ? "selected" : ""}>${escape(modelOptionLabel(m))}</option>`).join("")}
+          ${state.models.map((m) => `<option value="${escape(m.id)}" ${m.id === w.default_model ? "selected" : ""}>${escape(modelOptionLabel(m))}</option>`).join("")}
         </select>
       </label>
       <label>Project root <em>(optional — for file tree &amp; checkpoints)</em>

@@ -1010,8 +1010,8 @@ def build_system_prompt(config: dict, prompts: dict, mode: str = "approve-each")
         )
         service_lines.append(
             "- screen_description: describe a window's contents via accessibility "
-            "tree or OCR. Args: {\"window_index\": 0, \"mode\": "
-            "\"accessibility|ocr|vision\"}."
+            "tree or vision. Args: {\"window_index\": 0, \"mode\": "
+            "\"accessibility|vision\"}."
         )
         service_lines.append(
             "- screen_screenshot: capture a screenshot of a window. "
@@ -1020,7 +1020,7 @@ def build_system_prompt(config: dict, prompts: dict, mode: str = "approve-each")
         service_lines.append(
             "- screen_action: perform a precise screen action (click, type, key "
             "press). REQUIRES APPROVAL. Args: {\"action\": \"click|type|key\", "
-            "\"x\": 0, \"y\": 0, \"text\": \"...\", \"key\": \"...\"}."
+            "\"x\": 0, \"y\": 0, \"text\": \"text-to-type-or-key-name\"}."
         )
     if svc_state.is_enabled("clk"):
         service_lines.append(
@@ -1029,7 +1029,7 @@ def build_system_prompt(config: dict, prompts: dict, mode: str = "approve-each")
             "Args: {\"command\": \"run\", \"workflow\": \"optional workflow name\", "
             "\"args\": [], \"workspace_id\": \"optional\"}."
         )
-    if service_lines:
+    if service_lines and effective_mode != "plan":
         parts.append(
             "Integrated services available as tools (call them like any other "
             "tool via the ```tool block). These extend what you can do beyond "
@@ -1319,7 +1319,7 @@ async def chat_complete(messages: list, model: str, config: dict, chat_id: str =
     profile = active_profile(config)
     headers = {"Authorization": f"Bearer {config.get('api_key', '')}"}
     payload: dict = {"model": model, "messages": messages, "stream": False}
-    if chat_id:
+    if chat_id and profile.get("name") == "openwebui":
         payload["chat_id"] = chat_id
     t0 = time.time()
     async with httpx.AsyncClient(timeout=300.0, follow_redirects=True) as client:
@@ -3270,7 +3270,7 @@ def to_openai_messages(history: list, system_prompt: str) -> list:
             continue
         if role == "tool" and not m.get("tool_call_id"):
             role = "user"
-            content = f"[Tool result]\n{m.get('content', '')}"
+            content = f"[Tool result]\n{m.get('content') or ''}"
             out.append({"role": role, "content": content})
             continue
         content = m.get("content") or ""
@@ -3283,7 +3283,7 @@ def to_openai_messages(history: list, system_prompt: str) -> list:
                 if ctype.startswith("image/"):
                     parts.append({"type": "image_url", "image_url": {"url": url}})
                 else:
-                    parts.append({"type": "text", "text": f"[Attachment: {a.get('filename', url)}]"})
+                    parts.append({"type": "text", "text": f"[Attachment: {a.get('filename') or url}]"})
             out.append({"role": role, "content": parts})
         else:
             out.append({"role": role, "content": content})
@@ -3338,7 +3338,7 @@ async def chat(req: ChatRequest, request: Request):
                 await send_event("status", {"message": "Thinking…"})
                 if consensus_runs > 1:
                     raw_responses = await asyncio.gather(
-                        *[chat_complete(openai_messages, model, cfg, chat_id=cid) for _ in range(consensus_runs)],
+                        *[chat_complete(openai_messages, model, cfg, chat_id=f"{cid}-{i}") for i in range(consensus_runs)],
                         return_exceptions=True,
                     )
                     valid = [(r[0], r[1]) for r in raw_responses if isinstance(r, tuple)]
