@@ -206,9 +206,10 @@ class TestAutoGUIClient:
         mock_resp = _mock_response({"task_id": "gui-1"})
         client, ctx, inner = self._make_client(mock_resp)
         with patch.object(client, "_client", return_value=ctx):
-            result = run(client.start_task("Open Notepad", allow={"apps": ["notepad"]}, dry_run=False))
+            result = run(client.start_task("Open Notepad", model="gpt-4", allow={"apps": ["notepad"]}, dry_run=False))
         inner.post.assert_awaited_once_with("/api/task", json={
             "task": "Open Notepad",
+            "model": "gpt-4",
             "allow": {"apps": ["notepad"]},
             "dry_run": False,
         })
