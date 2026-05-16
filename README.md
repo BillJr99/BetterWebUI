@@ -1,6 +1,6 @@
 # BetterWebUI
 
-A friendlier front-end for OpenWebUI. Built for higher-ed faculty who want
+A friendlier front-end for OpenWebUI. Built for users who want
 the power of agentic AI — running commands, reading files, generating images
 and audio, calling MCP servers — without having to be a developer.
 
