@@ -418,7 +418,7 @@ def _prompt_openwebui(env: dict, force: bool) -> tuple:
                 break
 
     # ── Prompt for API key ──
-    if force or not conn_ok:
+    if force or not key:
         while True:
             new_key = prompt_text("API key", default=key, secret=True)
             if not new_key:
@@ -446,7 +446,8 @@ def _prompt_openwebui(env: dict, force: bool) -> tuple:
         models = fetch_models(url, key)
 
     # ── Model selection ──
-    needs_model_prompt = force or not model_ok
+    # Also prompt when no model is set at all (first-run scenario).
+    needs_model_prompt = force or not model or not model_ok
     if needs_model_prompt:
         if models:
             print(f"\n  {len(models)} model(s) available — use ↑↓ to scroll, type to filter.")
@@ -492,17 +493,22 @@ def _prompt_ports_paths(env: dict, force: bool) -> tuple:
 
     section("Ports & Paths")
 
-    if not force and at_defaults:
-        for k, v in defaults.items():
-            status(f"{k} = {cyan(v)}", True, "default")
-        print()
-        try:
-            ans = input(f"  {dim('All at defaults — reconfigure them?')} [y/{bold('N')}]: ").strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            print()
-            return current, False
-        if ans != "y":
-            return current, False
+    if not force:
+        # Show current values without prompting; pass --reconfigure to change them.
+        labels = {
+            "PORT":              "BetterWebUI port",
+            "CLK_PORT":          "CognitiveLoopKernel port",
+            "AUTOGUI_PORT":      "AutoGUI port",
+            "OSSO_PORT":         "OSScreenObserver port",
+            "CLK_WORKSPACES_DIR": "CLK workspaces directory",
+        }
+        for k, label in labels.items():
+            v = current[k]
+            is_default = (v == defaults[k])
+            tag = "default" if is_default else ""
+            status(f"{label} = {dim(v) if is_default else cyan(v)}", True, tag)
+        print(f"  {dim('Pass --reconfigure to change ports or paths.')}")
+        return current, False
 
     print()
     updated = {}
