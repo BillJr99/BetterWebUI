@@ -54,6 +54,12 @@ at `/api/services/*` endpoints that the LLM can call through tool use or slash c
 | AutoGUI | `AUTOGUI_BASE_URL` | `http://localhost:8002` | Desktop GUI automation via ReAct |
 | OSScreenObserver (OSSO) | `OSSO_BASE_URL` | `http://localhost:5001` | Screen reading & accessibility inspection |
 
+These services are included as **git submodules** (`CognitiveLoopKernel/`, `AutoGUI/`,
+`OSScreenObserver/`). Running `start.sh` automatically pulls the submodules and starts
+any service that is not already running; those services are stopped automatically when
+the script exits. Override the ports with the `CLK_PORT`, `AUTOGUI_PORT`, and
+`OSSO_PORT` environment variables.
+
 ### Enable / disable services
 
 Each service can be toggled on or off independently from **Settings → Services**
@@ -225,7 +231,10 @@ You need **Python 3.10+** ([python.org](https://www.python.org/downloads/) if yo
 ./start.sh
 ```
 
-The first launch creates a `.venv` folder and installs packages. Later launches just start.
+The first launch pulls the three service submodules, creates `.venv` folders, installs
+packages, and starts all services. Later launches skip setup and start in seconds.
+Services that were already running before the script launched are left alone; only
+services started by `start.sh` are stopped when you press Ctrl-C.
 
 ### Option C — Python (Windows)
 
@@ -374,18 +383,21 @@ Every action that touches your computer is gated:
 
 ```
 betterwebui/
-├── app.py              # backend (FastAPI)
-├── static/             # frontend (HTML/CSS/JS, no build step)
-├── skills/             # your skills, as .md files
-├── services/           # integration clients (CLK, AutoGUI, OSSO)
+├── app.py                    # backend (FastAPI)
+├── static/                   # frontend (HTML/CSS/JS, no build step)
+├── skills/                   # your skills, as .md files
+├── services/                 # integration clients (CLK, AutoGUI, OSSO)
+├── CognitiveLoopKernel/      # git submodule — CLK service
+├── AutoGUI/                  # git submodule — AutoGUI service
+├── OSScreenObserver/         # git submodule — OSScreenObserver service
 ├── data/
-│   ├── config.json         # your settings (API key lives here)
+│   ├── config.json               # your settings (API key lives here)
 │   ├── system_prompts.json
 │   ├── conversations.json
 │   ├── workspaces.json
 │   ├── mcp_servers.json
 │   ├── cli_tools.json
-│   └── uploads/            # files you attached
+│   └── uploads/                  # files you attached
 └── start.sh / start.bat
 ```
 

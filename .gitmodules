@@ -1,0 +1,9 @@
+[submodule "CognitiveLoopKernel"]
+	path = CognitiveLoopKernel
+	url = https://github.com/BillJr99/CognitiveLoopKernel
+[submodule "AutoGUI"]
+	path = AutoGUI
+	url = https://github.com/BillJr99/AutoGUI
+[submodule "OSScreenObserver"]
+	path = OSScreenObserver
+	url = https://github.com/BillJr99/OSScreenObserver
