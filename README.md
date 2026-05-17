@@ -54,6 +54,12 @@ at `/api/services/*` endpoints that the LLM can call through tool use or slash c
 | AutoGUI | `AUTOGUI_BASE_URL` | `http://localhost:8002` | Desktop GUI automation via ReAct |
 | OSScreenObserver (OSSO) | `OSSO_BASE_URL` | `http://localhost:5001` | Screen reading & accessibility inspection |
 
+These services are included as **git submodules** (`CognitiveLoopKernel/`, `AutoGUI/`,
+`OSScreenObserver/`). Running `start.sh` automatically pulls the submodules and starts
+any service that is not already running; those services are stopped automatically when
+the script exits. Override the ports with the `CLK_PORT`, `AUTOGUI_PORT`, and
+`OSSO_PORT` environment variables.
+
 ### Enable / disable services
 
 Each service can be toggled on or off independently from **Settings → Services**
@@ -217,25 +223,53 @@ To stop it: press `Ctrl-C` in the terminal. To start again later: `docker compos
 
 ---
 
-### Option B — Python (macOS / Linux)
+### Option B — Python (macOS)
 
-You need **Python 3.10+** ([python.org](https://www.python.org/downloads/) if you don't have it).
+```bash
+./start-mac.sh
+```
+
+Checks for [Homebrew](https://brew.sh/) and offers to install it, then installs Python 3
+and git via Homebrew if they are missing (with a Y/n prompt for each). On subsequent
+launches it skips straight to starting the services.
+
+### Option C — Python (Linux / generic Unix)
+
+You need **Python 3.10+**, **git**, and **curl** available in your PATH.
 
 ```bash
 ./start.sh
 ```
 
-The first launch creates a `.venv` folder and installs packages. Later launches just start.
+### Options B & C — what the script does
 
-### Option C — Python (Windows)
+The first launch pulls the three service git submodules, creates `.venv` folders for each,
+installs all Python packages, and starts every service. Later launches skip setup steps
+that are already complete. Services that were already running before the script launched
+are left alone; only the services it started are stopped when you press Ctrl-C.
 
-You need **Python 3.10+** ([python.org](https://www.python.org/downloads/) if you don't have it).
+Port overrides: `CLK_PORT` (default 8001), `AUTOGUI_PORT` (default 8002),
+`OSSO_PORT` (default 5001), `PORT` for BetterWebUI itself (default 8765).
 
-Double-click `start.bat`, or in a terminal:
+### Option D — Python (Windows)
+
+You need **Python 3.10+** and **git** in your PATH.
+Install from [python.org](https://www.python.org/downloads/) / [git-scm.com](https://git-scm.com/downloads), or:
+
+```cmd
+winget install Python.Python.3.12
+winget install Git.Git
+```
+
+Then double-click `start.bat`, or in a terminal:
 
 ```cmd
 start.bat
 ```
+
+`start.bat` checks for Python and git, pulls submodules, installs packages, and opens each
+service in a minimised terminal window. When BetterWebUI exits the service windows are
+closed automatically.
 
 ---
 
@@ -374,19 +408,22 @@ Every action that touches your computer is gated:
 
 ```
 betterwebui/
-├── app.py              # backend (FastAPI)
-├── static/             # frontend (HTML/CSS/JS, no build step)
-├── skills/             # your skills, as .md files
-├── services/           # integration clients (CLK, AutoGUI, OSSO)
+├── app.py                    # backend (FastAPI)
+├── static/                   # frontend (HTML/CSS/JS, no build step)
+├── skills/                   # your skills, as .md files
+├── services/                 # integration clients (CLK, AutoGUI, OSSO)
+├── CognitiveLoopKernel/      # git submodule — CLK service
+├── AutoGUI/                  # git submodule — AutoGUI service
+├── OSScreenObserver/         # git submodule — OSScreenObserver service
 ├── data/
-│   ├── config.json         # your settings (API key lives here)
+│   ├── config.json               # your settings (API key lives here)
 │   ├── system_prompts.json
 │   ├── conversations.json
 │   ├── workspaces.json
 │   ├── mcp_servers.json
 │   ├── cli_tools.json
-│   └── uploads/            # files you attached
-└── start.sh / start.bat
+│   └── uploads/                  # files you attached
+└── start.sh / start-mac.sh / start.bat
 ```
 
 The `data/` folder is yours — back it up if you've written prompts,

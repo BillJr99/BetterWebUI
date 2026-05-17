@@ -1079,9 +1079,15 @@ def extract_tool_call(text: str) -> Optional[dict]:
     if not isinstance(call, dict) or "tool" not in call:
         return None
     raw_args = call.get("args", {}) or {}
+    if not isinstance(raw_args, dict):
+        raw_args = {}
+    # Some models omit the "args" wrapper and place fields at the top level.
+    # Merge any unknown top-level keys into args so the tool handler sees them.
+    if not raw_args:
+        raw_args = {k: v for k, v in call.items() if k not in ("tool", "args")}
     return {
         "tool": call["tool"],
-        "args": raw_args if isinstance(raw_args, dict) else {},
+        "args": raw_args,
         "raw_block": text[start : end + 3],
     }
 
@@ -1796,6 +1802,9 @@ async def execute_tool(call: dict, config: dict, send_event, mode: str = "approv
         if not svc_state.is_enabled("autogui"):
             return {"error": "AutoGUI is disabled. Enable it in Settings > Services."}
         task_desc = args.get("task") or ""
+        if not task_desc.strip():
+            return {"error": "autogui_task requires a non-empty 'task' argument. "
+                    "Please call the tool again with {\"task\": \"description of what to do\", \"dry_run\": false}."}
         dry_run = args.get("dry_run") or False
         summary = f"AutoGUI task: {task_desc[:120]}" + (" [dry run]" if dry_run else "")
         if mode != "trusted":
