@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# BetterWebUI launcher for Linux / generic Unix.
-# Checks prerequisites, pulls git submodules, installs Python packages,
-# starts sibling services if not already running, then starts BetterWebUI.
-# Services started by this script are stopped automatically on exit.
+# BetterWebUI launcher for macOS.
+# Installs prerequisites via Homebrew if needed (with prompts), pulls git
+# submodules, installs Python packages, starts sibling services if not already
+# running, then starts BetterWebUI. Services started by this script are stopped
+# automatically when the script exits (Ctrl-C or normal termination).
 
 set -e
 cd "$(dirname "${BASH_SOURCE[0]}")"
@@ -34,6 +35,12 @@ trap cleanup EXIT INT TERM
 die()  { echo "ERROR: $*" >&2; exit 1; }
 is_up() { curl -sf "$1" >/dev/null 2>&1; }
 
+ask_yn() {
+    local prompt="$1" ans
+    read -rp "$prompt [Y/n]: " ans
+    [[ "${ans:-y}" =~ ^[Yy] ]]
+}
+
 setup_venv() {
     local dir="$1"
     if [[ ! -d "$dir/.venv" ]]; then
@@ -49,24 +56,73 @@ setup_venv() {
     fi
 }
 
-# ── Prerequisite checks ───────────────────────────────────────────────────────
-echo "Checking prerequisites..."
+echo "================================="
+echo "  BetterWebUI — macOS launcher"
+echo "================================="
+echo ""
 
-command -v git  >/dev/null 2>&1 || die "git is required. Install via your package manager (e.g. apt install git) and retry."
-command -v curl >/dev/null 2>&1 || die "curl is required. Install via your package manager (e.g. apt install curl) and retry."
-
-if ! command -v python3 >/dev/null 2>&1; then
-    die "Python 3.10+ is required. Install via your package manager (e.g. apt install python3) and retry."
+# ── Homebrew ──────────────────────────────────────────────────────────────────
+if ! command -v brew >/dev/null 2>&1; then
+    echo "Homebrew is not installed. It is the recommended way to manage Python"
+    echo "and Git on macOS."
+    if ask_yn "Install Homebrew now?"; then
+        /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+        # Make brew available in this session (Apple Silicon default path)
+        if [[ -x /opt/homebrew/bin/brew ]]; then
+            eval "$(/opt/homebrew/bin/brew shellenv)"
+        elif [[ -x /usr/local/bin/brew ]]; then
+            eval "$(/usr/local/bin/brew shellenv)"
+        fi
+    else
+        echo "Skipping Homebrew. Ensure Python 3.10+ and git are installed manually."
+    fi
 fi
 
-PY_VER=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
-PY_MAJOR="${PY_VER%%.*}"
-PY_MINOR="${PY_VER##*.}"
-if [[ "$PY_MAJOR" -lt 3 || ( "$PY_MAJOR" -eq 3 && "$PY_MINOR" -lt 10 ) ]]; then
-    die "Python 3.10+ required (found $PY_VER). Please upgrade and retry."
+# ── Python 3.10+ ──────────────────────────────────────────────────────────────
+NEED_PYTHON=false
+if ! command -v python3 >/dev/null 2>&1; then
+    NEED_PYTHON=true
+else
+    PY_VER=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
+    PY_MAJOR="${PY_VER%%.*}"
+    PY_MINOR="${PY_VER##*.}"
+    if [[ "$PY_MAJOR" -lt 3 || ( "$PY_MAJOR" -eq 3 && "$PY_MINOR" -lt 10 ) ]]; then
+        echo "Python $PY_VER found, but 3.10+ is required."
+        NEED_PYTHON=true
+    fi
+fi
+
+if $NEED_PYTHON; then
+    if command -v brew >/dev/null 2>&1; then
+        if ask_yn "Install Python 3 via Homebrew?"; then
+            brew install python@3
+            BREW_PY="$(brew --prefix python@3)/bin/python3"
+            [[ -x "$BREW_PY" ]] && export PATH="$(brew --prefix python@3)/bin:$PATH"
+        else
+            die "Python 3.10+ is required. Install it and retry."
+        fi
+    else
+        die "Python 3.10+ is required. Download from https://www.python.org/downloads/ and retry."
+    fi
+fi
+
+# ── git ───────────────────────────────────────────────────────────────────────
+if ! command -v git >/dev/null 2>&1; then
+    if command -v brew >/dev/null 2>&1; then
+        if ask_yn "git not found. Install via Homebrew?"; then
+            brew install git
+        else
+            die "git is required. Install it and retry."
+        fi
+    else
+        echo "git not found. You can install the Xcode Command Line Tools:"
+        echo "  xcode-select --install"
+        die "git is required. Install it and retry."
+    fi
 fi
 
 # ── Pull submodules ───────────────────────────────────────────────────────────
+echo ""
 echo "Updating git submodules..."
 git submodule update --init --recursive
 

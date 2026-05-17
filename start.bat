@@ -1,24 +1,118 @@
 @echo off
-REM BetterWebUI launcher for Windows.
-REM First run installs Python deps in a local virtualenv. After that it just starts.
+setlocal enabledelayedexpansion
 
 cd /d "%~dp0"
 
-if not exist ".venv\Scripts\python.exe" (
-  echo First-time setup: creating a Python environment and installing packages...
-  python -m venv .venv
-  if errorlevel 1 (
+if "%CLK_PORT%"==""     set CLK_PORT=8001
+if "%AUTOGUI_PORT%"=""  set AUTOGUI_PORT=8002
+if "%OSSO_PORT%"==""    set OSSO_PORT=5001
+if "%PORT%"==""         set PORT=8765
+
+set CLK_STARTED=0
+set AUTOGUI_STARTED=0
+set OSSO_STARTED=0
+
+echo =================================
+echo   BetterWebUI -- Windows launcher
+echo =================================
+echo.
+
+REM ── Check Python ──────────────────────────────────────────────────────────────
+python --version >nul 2>&1
+if errorlevel 1 (
+    echo Python is not found.
     echo.
-    echo Could not create the Python environment. Make sure Python 3.10+ is installed
-    echo from python.org and that "python" works in this terminal.
+    echo Install Python 3.10+ from https://www.python.org/downloads/
+    echo or run:  winget install Python.Python.3.12
+    echo.
+    echo Make sure to check "Add Python to PATH" during installation.
     pause
     exit /b 1
-  )
-  ".venv\Scripts\python.exe" -m pip install --upgrade pip >nul
-  ".venv\Scripts\python.exe" -m pip install -r requirements.txt
 )
 
-if "%PORT%"=="" set PORT=8765
+for /f "tokens=2" %%v in ('python --version 2^>^&1') do set PY_VER=%%v
+for /f "tokens=1,2 delims=." %%a in ("%PY_VER%") do (
+    set PY_MAJOR=%%a
+    set PY_MINOR=%%b
+)
+if %PY_MAJOR% LSS 3 goto :py_too_old
+if %PY_MAJOR% EQU 3 if %PY_MINOR% LSS 10 goto :py_too_old
+goto :py_ok
+
+:py_too_old
+echo Python %PY_VER% found, but 3.10+ is required.
+echo Install from https://www.python.org/downloads/ or run: winget install Python.Python.3.12
+pause
+exit /b 1
+
+:py_ok
+
+REM ── Check Git ─────────────────────────────────────────────────────────────────
+git --version >nul 2>&1
+if errorlevel 1 (
+    echo git is not found.
+    echo.
+    echo Install Git from https://git-scm.com/downloads
+    echo or run:  winget install Git.Git
+    echo.
+    pause
+    exit /b 1
+)
+
+REM ── Pull submodules ───────────────────────────────────────────────────────────
+echo Updating git submodules...
+git submodule update --init --recursive
+if errorlevel 1 (
+    echo ERROR: Could not update git submodules.
+    pause
+    exit /b 1
+)
+
+REM ── BetterWebUI virtualenv ────────────────────────────────────────────────────
+if not exist ".venv\Scripts\python.exe" (
+    echo First-time setup: installing BetterWebUI Python packages...
+    python -m venv .venv
+    if errorlevel 1 (
+        echo ERROR: Could not create Python environment.
+        pause
+        exit /b 1
+    )
+    ".venv\Scripts\python.exe" -m pip install --upgrade pip >nul
+    ".venv\Scripts\python.exe" -m pip install -r requirements.txt
+)
+
+REM ── CognitiveLoopKernel ───────────────────────────────────────────────────────
+call :is_up http://localhost:%CLK_PORT%/api/healthz
+if %ERRORLEVEL%==0 (
+    echo CognitiveLoopKernel already running on port %CLK_PORT% -- skipping.
+) else (
+    echo Starting CognitiveLoopKernel...
+    call :setup_venv "CognitiveLoopKernel"
+    START "BetterWebUI-CLK" /MIN cmd /c "cd /d "%~dp0CognitiveLoopKernel" && set CLK_API_PORT=%CLK_PORT% && .venv\Scripts\python.exe -m clk_harness.api"
+    set CLK_STARTED=1
+)
+
+REM ── AutoGUI ───────────────────────────────────────────────────────────────────
+call :is_up http://localhost:%AUTOGUI_PORT%/api/healthz
+if %ERRORLEVEL%==0 (
+    echo AutoGUI already running on port %AUTOGUI_PORT% -- skipping.
+) else (
+    echo Starting AutoGUI...
+    call :setup_venv "AutoGUI"
+    START "BetterWebUI-AutoGUI" /MIN cmd /c "cd /d "%~dp0AutoGUI" && set AUTOGUI_API_PORT=%AUTOGUI_PORT% && .venv\Scripts\python.exe api.py"
+    set AUTOGUI_STARTED=1
+)
+
+REM ── OSScreenObserver ──────────────────────────────────────────────────────────
+call :is_up http://localhost:%OSSO_PORT%/api/healthz
+if %ERRORLEVEL%==0 (
+    echo OSScreenObserver already running on port %OSSO_PORT% -- skipping.
+) else (
+    echo Starting OSScreenObserver...
+    call :setup_venv "OSScreenObserver"
+    START "BetterWebUI-OSSO" /MIN cmd /c "cd /d "%~dp0OSScreenObserver" && .venv\Scripts\python.exe main.py"
+    set OSSO_STARTED=1
+)
 
 echo.
 echo BetterWebUI is starting on http://127.0.0.1:%PORT%
@@ -26,3 +120,32 @@ echo Open that link in your browser. Close this window to stop.
 echo.
 
 ".venv\Scripts\python.exe" -m uvicorn app:app --host 127.0.0.1 --port %PORT%
+
+REM ── Cleanup (runs after uvicorn exits) ────────────────────────────────────────
+if %CLK_STARTED%==1     TASKKILL /FI "WINDOWTITLE eq BetterWebUI-CLK"     /T /F >nul 2>&1
+if %AUTOGUI_STARTED%==1 TASKKILL /FI "WINDOWTITLE eq BetterWebUI-AutoGUI" /T /F >nul 2>&1
+if %OSSO_STARTED%==1    TASKKILL /FI "WINDOWTITLE eq BetterWebUI-OSSO"    /T /F >nul 2>&1
+
+goto :eof
+
+REM ── Subroutines ───────────────────────────────────────────────────────────────
+
+:is_up
+REM Uses PowerShell to probe a URL. Sets ERRORLEVEL 0 if reachable, 1 if not.
+powershell -NoProfile -Command ^
+  "try { $null = Invoke-WebRequest '%~1' -UseBasicParsing -TimeoutSec 2 -ErrorAction Stop; exit 0 } catch { exit 1 }" >nul 2>&1
+goto :eof
+
+:setup_venv
+REM %~1 is the submodule directory name (relative to repo root)
+if not exist "%~1\.venv\Scripts\python.exe" (
+    python -m venv "%~1\.venv"
+)
+if exist "%~1\requirements.txt" (
+    "%~1\.venv\Scripts\pip.exe" install -q --upgrade pip >nul
+    "%~1\.venv\Scripts\pip.exe" install -q -r "%~1\requirements.txt"
+) else if exist "%~1\pyproject.toml" (
+    "%~1\.venv\Scripts\pip.exe" install -q --upgrade pip >nul
+    "%~1\.venv\Scripts\pip.exe" install -q -e "%~1"
+)
+goto :eof

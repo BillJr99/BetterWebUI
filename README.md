@@ -223,28 +223,53 @@ To stop it: press `Ctrl-C` in the terminal. To start again later: `docker compos
 
 ---
 
-### Option B — Python (macOS / Linux)
+### Option B — Python (macOS)
 
-You need **Python 3.10+** ([python.org](https://www.python.org/downloads/) if you don't have it).
+```bash
+./start-mac.sh
+```
+
+Checks for [Homebrew](https://brew.sh/) and offers to install it, then installs Python 3
+and git via Homebrew if they are missing (with a Y/n prompt for each). On subsequent
+launches it skips straight to starting the services.
+
+### Option C — Python (Linux / generic Unix)
+
+You need **Python 3.10+**, **git**, and **curl** available in your PATH.
 
 ```bash
 ./start.sh
 ```
 
-The first launch pulls the three service submodules, creates `.venv` folders, installs
-packages, and starts all services. Later launches skip setup and start in seconds.
-Services that were already running before the script launched are left alone; only
-services started by `start.sh` are stopped when you press Ctrl-C.
+### Options B & C — what the script does
 
-### Option C — Python (Windows)
+The first launch pulls the three service git submodules, creates `.venv` folders for each,
+installs all Python packages, and starts every service. Later launches skip setup steps
+that are already complete. Services that were already running before the script launched
+are left alone; only the services it started are stopped when you press Ctrl-C.
 
-You need **Python 3.10+** ([python.org](https://www.python.org/downloads/) if you don't have it).
+Port overrides: `CLK_PORT` (default 8001), `AUTOGUI_PORT` (default 8002),
+`OSSO_PORT` (default 5001), `PORT` for BetterWebUI itself (default 8765).
 
-Double-click `start.bat`, or in a terminal:
+### Option D — Python (Windows)
+
+You need **Python 3.10+** and **git** in your PATH.
+Install from [python.org](https://www.python.org/downloads/) / [git-scm.com](https://git-scm.com/downloads), or:
+
+```cmd
+winget install Python.Python.3.12
+winget install Git.Git
+```
+
+Then double-click `start.bat`, or in a terminal:
 
 ```cmd
 start.bat
 ```
+
+`start.bat` checks for Python and git, pulls submodules, installs packages, and opens each
+service in a minimised terminal window. When BetterWebUI exits the service windows are
+closed automatically.
 
 ---
 
@@ -398,7 +423,7 @@ betterwebui/
 │   ├── mcp_servers.json
 │   ├── cli_tools.json
 │   └── uploads/                  # files you attached
-└── start.sh / start.bat
+└── start.sh / start-mac.sh / start.bat
 ```
 
 The `data/` folder is yours — back it up if you've written prompts,
