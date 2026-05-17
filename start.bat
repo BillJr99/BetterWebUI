@@ -81,6 +81,25 @@ if not exist ".venv\Scripts\python.exe" (
     ".venv\Scripts\python.exe" -m pip install -r requirements.txt
 )
 
+REM ── OpenWebUI credentials for AutoGUI ─────────────────────────────────────────
+set OW_URL=%OPENWEBUI_BASE_URL%
+set OW_KEY=%OPENWEBUI_API_KEY%
+
+if "%OW_URL%"=="" (
+    for /f "delims=" %%v in ('python -c "import json; d=json.load(open('data/config.json')); print(d.get('base_url',''))" 2^>nul') do set OW_URL=%%v
+)
+if "%OW_KEY%"=="" (
+    for /f "delims=" %%v in ('python -c "import json; d=json.load(open('data/config.json')); print(d.get('api_key',''))" 2^>nul') do set OW_KEY=%%v
+)
+
+if "%OW_URL%"=="" (
+    set /p OW_URL="OpenWebUI base URL [http://localhost:3000]: "
+    if "%OW_URL%"=="" set OW_URL=http://localhost:3000
+)
+if "%OW_KEY%"=="" (
+    set /p OW_KEY="OpenWebUI API key: "
+)
+
 REM ── CognitiveLoopKernel ───────────────────────────────────────────────────────
 call :is_up http://localhost:%CLK_PORT%/api/healthz
 if %ERRORLEVEL%==0 (
@@ -99,7 +118,7 @@ if %ERRORLEVEL%==0 (
 ) else (
     echo Starting AutoGUI...
     call :setup_venv "AutoGUI"
-    START "BetterWebUI-AutoGUI" /MIN cmd /c "cd /d "%~dp0AutoGUI" && set AUTOGUI_API_PORT=%AUTOGUI_PORT% && .venv\Scripts\python.exe api.py"
+    START "BetterWebUI-AutoGUI" /MIN cmd /c "cd /d "%~dp0AutoGUI" && set AUTOGUI_API_PORT=%AUTOGUI_PORT% && set OPENWEBUI_BASE_URL=%OW_URL% && set OPENWEBUI_API_KEY=%OW_KEY% && .venv\Scripts\python.exe api.py"
     set AUTOGUI_STARTED=1
 )
 

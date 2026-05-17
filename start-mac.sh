@@ -134,6 +134,31 @@ if [ ! -d ".venv" ]; then
     ./.venv/bin/pip install -r requirements.txt
 fi
 
+# ── OpenWebUI credentials for AutoGUI ─────────────────────────────────────────
+_read_json_field() {
+    python3 -c "
+import json, sys
+try:
+    d = json.load(open('$REPO_ROOT/data/config.json'))
+    print(d.get('$1', ''), end='')
+except Exception:
+    pass
+" 2>/dev/null
+}
+
+OW_URL="${OPENWEBUI_BASE_URL:-$(_read_json_field base_url)}"
+OW_KEY="${OPENWEBUI_API_KEY:-$(_read_json_field api_key)}"
+
+if [[ -z "$OW_URL" ]]; then
+    printf "OpenWebUI base URL [http://localhost:3000]: "
+    read -r OW_URL
+    OW_URL="${OW_URL:-http://localhost:3000}"
+fi
+if [[ -z "$OW_KEY" ]]; then
+    printf "OpenWebUI API key: "
+    read -r OW_KEY
+fi
+
 # ── CognitiveLoopKernel ───────────────────────────────────────────────────────
 if is_up "http://localhost:$CLK_PORT/api/healthz"; then
     echo "CognitiveLoopKernel already running on port $CLK_PORT — skipping."
@@ -155,7 +180,10 @@ else
     setup_venv "$AUTOGUI_DIR"
     (
         cd "$AUTOGUI_DIR"
-        AUTOGUI_API_PORT=$AUTOGUI_PORT exec "$AUTOGUI_DIR/.venv/bin/python" api.py
+        AUTOGUI_API_PORT=$AUTOGUI_PORT \
+        OPENWEBUI_BASE_URL="$OW_URL" \
+        OPENWEBUI_API_KEY="$OW_KEY" \
+        exec "$AUTOGUI_DIR/.venv/bin/python" api.py
     ) &
     STARTED_PIDS+=("$!")
 fi
