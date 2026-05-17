@@ -8,6 +8,13 @@ set -e
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
 REPO_ROOT="$(pwd)"
+
+# ── Load deploy/.env if present ───────────────────────────────────────────────
+ENV_FILE="$REPO_ROOT/deploy/.env"
+if [[ -f "$ENV_FILE" ]]; then
+    set -o allexport; source "$ENV_FILE"; set +o allexport
+fi
+
 CLK_PORT="${CLK_PORT:-8001}"
 AUTOGUI_PORT="${AUTOGUI_PORT:-8002}"
 OSSO_PORT="${OSSO_PORT:-5001}"
@@ -91,8 +98,19 @@ except Exception:
 " 2>/dev/null
 }
 
+_set_env_key() {
+    local key="$1" val="$2"
+    [[ -f "$ENV_FILE" ]] || touch "$ENV_FILE"
+    if grep -q "^${key}=" "$ENV_FILE" 2>/dev/null; then
+        sed -i "s|^${key}=.*|${key}=${val}|" "$ENV_FILE"
+    else
+        printf '\n%s=%s' "$key" "$val" >> "$ENV_FILE"
+    fi
+}
+
 OW_URL="${OPENWEBUI_BASE_URL:-$(_read_json_field base_url)}"
 OW_KEY="${OPENWEBUI_API_KEY:-$(_read_json_field api_key)}"
+OW_MODEL="${OPENWEBUI_MODEL:-$(_read_json_field default_model)}"
 
 if [[ -z "$OW_URL" ]]; then
     printf "OpenWebUI base URL [http://localhost:3000]: "
@@ -103,6 +121,14 @@ if [[ -z "$OW_KEY" ]]; then
     printf "OpenWebUI API key: "
     read -r OW_KEY
 fi
+_set_env_key "OPENWEBUI_BASE_URL" "$OW_URL"
+_set_env_key "OPENWEBUI_API_KEY"  "$OW_KEY"
+
+if [[ -z "$OW_MODEL" ]]; then
+    printf "OpenWebUI default model (leave blank to skip): "
+    read -r OW_MODEL
+fi
+_set_env_key "OPENWEBUI_MODEL" "$OW_MODEL"
 
 # ── CognitiveLoopKernel ───────────────────────────────────────────────────────
 if is_up "http://localhost:$CLK_PORT/api/healthz"; then
@@ -141,6 +167,10 @@ else
     setup_venv "$OSSO_DIR"
     (
         cd "$OSSO_DIR"
+        CLK_PROVIDER=openwebui \
+        CLK_OPENWEBUI_ENDPOINT="$OW_URL" \
+        CLK_OPENWEBUI_API_KEY="$OW_KEY" \
+        CLK_OPENWEBUI_MODEL="$OW_MODEL" \
         exec "$OSSO_DIR/.venv/bin/python" main.py
     ) &
     STARTED_PIDS+=("$!")

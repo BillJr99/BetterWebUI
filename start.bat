@@ -3,6 +3,13 @@ setlocal enabledelayedexpansion
 
 cd /d "%~dp0"
 
+REM ── Load deploy\.env if present ───────────────────────────────────────────────
+if exist "deploy\.env" (
+    for /f "usebackq tokens=1,* delims==" %%a in ("deploy\.env") do (
+        if not "%%a"=="" set "%%a=%%b"
+    )
+)
+
 if "%CLK_PORT%"==""     set CLK_PORT=8001
 if "%AUTOGUI_PORT%"=""  set AUTOGUI_PORT=8002
 if "%OSSO_PORT%"==""    set OSSO_PORT=5001
@@ -84,12 +91,16 @@ if not exist ".venv\Scripts\python.exe" (
 REM ── OpenWebUI credentials for AutoGUI ─────────────────────────────────────────
 set OW_URL=%OPENWEBUI_BASE_URL%
 set OW_KEY=%OPENWEBUI_API_KEY%
+set OW_MODEL=%OPENWEBUI_MODEL%
 
 if "%OW_URL%"=="" (
     for /f "delims=" %%v in ('python -c "import json; d=json.load(open('data/config.json')); print(d.get('base_url',''))" 2^>nul') do set OW_URL=%%v
 )
 if "%OW_KEY%"=="" (
     for /f "delims=" %%v in ('python -c "import json; d=json.load(open('data/config.json')); print(d.get('api_key',''))" 2^>nul') do set OW_KEY=%%v
+)
+if "%OW_MODEL%"=="" (
+    for /f "delims=" %%v in ('python -c "import json; d=json.load(open('data/config.json')); print(d.get('default_model',''))" 2^>nul') do set OW_MODEL=%%v
 )
 
 if "%OW_URL%"=="" (
@@ -99,6 +110,13 @@ if "%OW_URL%"=="" (
 if "%OW_KEY%"=="" (
     set /p OW_KEY="OpenWebUI API key: "
 )
+call :set_env_key OPENWEBUI_BASE_URL %OW_URL%
+call :set_env_key OPENWEBUI_API_KEY  %OW_KEY%
+
+if "%OW_MODEL%"=="" (
+    set /p OW_MODEL="OpenWebUI default model (leave blank to skip): "
+)
+call :set_env_key OPENWEBUI_MODEL %OW_MODEL%
 
 REM ── CognitiveLoopKernel ───────────────────────────────────────────────────────
 call :is_up http://localhost:%CLK_PORT%/api/healthz
@@ -129,7 +147,7 @@ if %ERRORLEVEL%==0 (
 ) else (
     echo Starting OSScreenObserver...
     call :setup_venv "OSScreenObserver"
-    START "BetterWebUI-OSSO" /MIN cmd /c "cd /d "%~dp0OSScreenObserver" && .venv\Scripts\python.exe main.py"
+    START "BetterWebUI-OSSO" /MIN cmd /c "cd /d "%~dp0OSScreenObserver" && set CLK_PROVIDER=openwebui && set CLK_OPENWEBUI_ENDPOINT=%OW_URL% && set CLK_OPENWEBUI_API_KEY=%OW_KEY% && set CLK_OPENWEBUI_MODEL=%OW_MODEL% && .venv\Scripts\python.exe main.py"
     set OSSO_STARTED=1
 )
 
@@ -148,6 +166,11 @@ if %OSSO_STARTED%==1    TASKKILL /FI "WINDOWTITLE eq BetterWebUI-OSSO"    /T /F 
 goto :eof
 
 REM ── Subroutines ───────────────────────────────────────────────────────────────
+
+:set_env_key
+REM Upserts %1=value into deploy\.env
+python -c "import re, pathlib; p=pathlib.Path('deploy/.env'); txt=p.read_text() if p.exists() else ''; key='%~1'; val='%~2'; line=f'{key}={val}'; pat=re.compile(rf'^{re.escape(key)}=.*', re.M); txt=pat.sub(line, txt) if pat.search(txt) else txt+('\n' if txt and not txt.endswith('\n') else '')+line+'\n'; p.write_text(txt)"
+goto :eof
 
 :is_up
 REM Uses PowerShell to probe a URL. Sets ERRORLEVEL 0 if reachable, 1 if not.
