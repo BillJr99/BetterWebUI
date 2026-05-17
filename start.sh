@@ -8,17 +8,7 @@ set -e
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
 REPO_ROOT="$(pwd)"
-
-# ── Load deploy/.env if present ───────────────────────────────────────────────
 ENV_FILE="$REPO_ROOT/deploy/.env"
-if [[ -f "$ENV_FILE" ]]; then
-    set -o allexport; source "$ENV_FILE"; set +o allexport
-fi
-
-CLK_PORT="${CLK_PORT:-8001}"
-AUTOGUI_PORT="${AUTOGUI_PORT:-8002}"
-OSSO_PORT="${OSSO_PORT:-5001}"
-PORT="${PORT:-8765}"
 
 CLK_DIR="$REPO_ROOT/CognitiveLoopKernel"
 AUTOGUI_DIR="$REPO_ROOT/AutoGUI"
@@ -85,50 +75,30 @@ if [ ! -d ".venv" ]; then
     ./.venv/bin/pip install -r requirements.txt
 fi
 
-# ── OpenWebUI credentials for AutoGUI ─────────────────────────────────────────
-# Read from BetterWebUI's saved config if available; prompt only if missing.
-_read_json_field() {
-    python3 -c "
-import json, sys
-try:
-    d = json.load(open('$REPO_ROOT/data/config.json'))
-    print(d.get('$1', ''), end='')
-except Exception:
-    pass
-" 2>/dev/null
-}
+# ── Interactive setup wizard ───────────────────────────────────────────────────
+# Validates deploy/.env, prompts for anything missing or broken, then saves.
+python3 scripts/setup_wizard.py || exit 1
 
-_set_env_key() {
-    local key="$1" val="$2"
-    [[ -f "$ENV_FILE" ]] || touch "$ENV_FILE"
-    if grep -q "^${key}=" "$ENV_FILE" 2>/dev/null; then
-        sed -i "s|^${key}=.*|${key}=${val}|" "$ENV_FILE"
-    else
-        printf '\n%s=%s' "$key" "$val" >> "$ENV_FILE"
-    fi
-}
-
-OW_URL="${OPENWEBUI_BASE_URL:-$(_read_json_field base_url)}"
-OW_KEY="${OPENWEBUI_API_KEY:-$(_read_json_field api_key)}"
-OW_MODEL="${OPENWEBUI_MODEL:-$(_read_json_field default_model)}"
-
-if [[ -z "$OW_URL" ]]; then
-    printf "OpenWebUI base URL [http://localhost:3000]: "
-    read -r OW_URL
-    OW_URL="${OW_URL:-http://localhost:3000}"
+# Re-source deploy/.env so updated values take effect immediately.
+if [[ -f "$ENV_FILE" ]]; then
+    set -o allexport; source "$ENV_FILE"; set +o allexport
 fi
-if [[ -z "$OW_KEY" ]]; then
-    printf "OpenWebUI API key: "
-    read -r OW_KEY
-fi
-_set_env_key "OPENWEBUI_BASE_URL" "$OW_URL"
-_set_env_key "OPENWEBUI_API_KEY"  "$OW_KEY"
 
-if [[ -z "$OW_MODEL" ]]; then
-    printf "OpenWebUI default model (leave blank to skip): "
-    read -r OW_MODEL
-fi
-_set_env_key "OPENWEBUI_MODEL" "$OW_MODEL"
+# Apply port defaults (wizard may have written explicit values; these are fallbacks).
+CLK_PORT="${CLK_PORT:-8001}"
+AUTOGUI_PORT="${AUTOGUI_PORT:-8002}"
+OSSO_PORT="${OSSO_PORT:-5001}"
+PORT="${PORT:-8765}"
+
+# Derive service base-URLs for BetterWebUI (reads these from its own environment).
+export CLK_BASE_URL="${CLK_BASE_URL:-http://localhost:$CLK_PORT}"
+export AUTOGUI_BASE_URL="${AUTOGUI_BASE_URL:-http://localhost:$AUTOGUI_PORT}"
+export OSSO_BASE_URL="${OSSO_BASE_URL:-http://localhost:$OSSO_PORT}"
+
+# Convenience aliases used by the service-launch blocks below.
+OW_URL="$OPENWEBUI_BASE_URL"
+OW_KEY="$OPENWEBUI_API_KEY"
+OW_MODEL="${OPENWEBUI_MODEL:-}"
 
 # ── CognitiveLoopKernel ───────────────────────────────────────────────────────
 if is_up "http://localhost:$CLK_PORT/api/healthz"; then
@@ -138,7 +108,9 @@ else
     setup_venv "$CLK_DIR"
     (
         cd "$CLK_DIR"
-        CLK_API_PORT=$CLK_PORT exec "$CLK_DIR/.venv/bin/python" -m clk_harness.api
+        CLK_API_PORT=$CLK_PORT \
+        CLK_WORKSPACES_DIR="${CLK_WORKSPACES_DIR:-./data/clk-workspaces}" \
+        exec "$CLK_DIR/.venv/bin/python" -m clk_harness.api
     ) &
     STARTED_PIDS+=("$!")
 fi

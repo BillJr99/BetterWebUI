@@ -3,18 +3,6 @@ setlocal enabledelayedexpansion
 
 cd /d "%~dp0"
 
-REM ── Load deploy\.env if present ───────────────────────────────────────────────
-if exist "deploy\.env" (
-    for /f "usebackq tokens=1,* delims==" %%a in ("deploy\.env") do (
-        if not "%%a"=="" set "%%a=%%b"
-    )
-)
-
-if "%CLK_PORT%"==""     set CLK_PORT=8001
-if "%AUTOGUI_PORT%"=""  set AUTOGUI_PORT=8002
-if "%OSSO_PORT%"==""    set OSSO_PORT=5001
-if "%PORT%"==""         set PORT=8765
-
 set CLK_STARTED=0
 set AUTOGUI_STARTED=0
 set OSSO_STARTED=0
@@ -88,35 +76,38 @@ if not exist ".venv\Scripts\python.exe" (
     ".venv\Scripts\python.exe" -m pip install -r requirements.txt
 )
 
-REM ── OpenWebUI credentials for AutoGUI ─────────────────────────────────────────
+REM ── Interactive setup wizard ───────────────────────────────────────────────────
+REM Validates deploy\.env, prompts for anything missing or broken, then saves.
+python scripts\setup_wizard.py
+if errorlevel 1 (
+    echo.
+    echo Setup wizard cancelled. Re-run start.bat to try again.
+    pause
+    exit /b 1
+)
+
+REM ── Load deploy\.env (written/updated by wizard) ───────────────────────────────
+if exist "deploy\.env" (
+    for /f "usebackq tokens=1,* delims==" %%a in ("deploy\.env") do (
+        if not "%%a"=="" if not "%%a:~0,1%"=="#" set "%%a=%%b"
+    )
+)
+
+REM ── Apply port defaults ────────────────────────────────────────────────────────
+if "%CLK_PORT%"==""    set CLK_PORT=8001
+if "%AUTOGUI_PORT%"="" set AUTOGUI_PORT=8002
+if "%OSSO_PORT%"==""   set OSSO_PORT=5001
+if "%PORT%"==""        set PORT=8765
+
+REM ── Derive service base-URLs for BetterWebUI ──────────────────────────────────
+if "%CLK_BASE_URL%"==""    set CLK_BASE_URL=http://localhost:%CLK_PORT%
+if "%AUTOGUI_BASE_URL%"="" set AUTOGUI_BASE_URL=http://localhost:%AUTOGUI_PORT%
+if "%OSSO_BASE_URL%"==""   set OSSO_BASE_URL=http://localhost:%OSSO_PORT%
+
+REM ── Convenience aliases for service-launch blocks ─────────────────────────────
 set OW_URL=%OPENWEBUI_BASE_URL%
 set OW_KEY=%OPENWEBUI_API_KEY%
 set OW_MODEL=%OPENWEBUI_MODEL%
-
-if "%OW_URL%"=="" (
-    for /f "delims=" %%v in ('python -c "import json; d=json.load(open('data/config.json')); print(d.get('base_url',''))" 2^>nul') do set OW_URL=%%v
-)
-if "%OW_KEY%"=="" (
-    for /f "delims=" %%v in ('python -c "import json; d=json.load(open('data/config.json')); print(d.get('api_key',''))" 2^>nul') do set OW_KEY=%%v
-)
-if "%OW_MODEL%"=="" (
-    for /f "delims=" %%v in ('python -c "import json; d=json.load(open('data/config.json')); print(d.get('default_model',''))" 2^>nul') do set OW_MODEL=%%v
-)
-
-if "%OW_URL%"=="" (
-    set /p OW_URL="OpenWebUI base URL [http://localhost:3000]: "
-    if "%OW_URL%"=="" set OW_URL=http://localhost:3000
-)
-if "%OW_KEY%"=="" (
-    set /p OW_KEY="OpenWebUI API key: "
-)
-call :set_env_key OPENWEBUI_BASE_URL %OW_URL%
-call :set_env_key OPENWEBUI_API_KEY  %OW_KEY%
-
-if "%OW_MODEL%"=="" (
-    set /p OW_MODEL="OpenWebUI default model (leave blank to skip): "
-)
-call :set_env_key OPENWEBUI_MODEL %OW_MODEL%
 
 REM ── CognitiveLoopKernel ───────────────────────────────────────────────────────
 call :is_up http://localhost:%CLK_PORT%/api/healthz
@@ -125,7 +116,7 @@ if %ERRORLEVEL%==0 (
 ) else (
     echo Starting CognitiveLoopKernel...
     call :setup_venv "CognitiveLoopKernel"
-    START "BetterWebUI-CLK" /MIN cmd /c "cd /d "%~dp0CognitiveLoopKernel" && set CLK_API_PORT=%CLK_PORT% && .venv\Scripts\python.exe -m clk_harness.api"
+    START "BetterWebUI-CLK" /MIN cmd /c "cd /d "%~dp0CognitiveLoopKernel" && set CLK_API_PORT=%CLK_PORT% && set CLK_WORKSPACES_DIR=%CLK_WORKSPACES_DIR% && .venv\Scripts\python.exe -m clk_harness.api"
     set CLK_STARTED=1
 )
 
@@ -166,11 +157,6 @@ if %OSSO_STARTED%==1    TASKKILL /FI "WINDOWTITLE eq BetterWebUI-OSSO"    /T /F 
 goto :eof
 
 REM ── Subroutines ───────────────────────────────────────────────────────────────
-
-:set_env_key
-REM Upserts %1=value into deploy\.env
-python -c "import re, pathlib; p=pathlib.Path('deploy/.env'); txt=p.read_text() if p.exists() else ''; key='%~1'; val='%~2'; line=f'{key}={val}'; pat=re.compile(rf'^{re.escape(key)}=.*', re.M); txt=pat.sub(line, txt) if pat.search(txt) else txt+('\n' if txt and not txt.endswith('\n') else '')+line+'\n'; p.write_text(txt)"
-goto :eof
 
 :is_up
 REM Uses PowerShell to probe a URL. Sets ERRORLEVEL 0 if reachable, 1 if not.
