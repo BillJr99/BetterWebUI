@@ -174,7 +174,7 @@ jobs:
         run: pip install pyflakes python-frontmatter
 
       - name: pyflakes (syntax / undefined names)
-        run: python -m pyflakes app.py services/ tests/
+        run: python -m pyflakes app.py services/ tests/ scripts/setup_wizard.py
 
       - name: Check HTML is valid UTF-8
         run: python3 -c "open('static/index.html', encoding='utf-8').read(); print('index.html OK')"
@@ -189,6 +189,7 @@ jobs:
         run: |
           python3 -m py_compile app.py && echo "app.py compiles OK"
           python3 -m py_compile services/registry.py services/clients.py services/health.py services/routes.py && echo "services/ compiles OK"
+          python3 -m py_compile scripts/setup_wizard.py && echo "scripts/setup_wizard.py compiles OK"
 
       - name: Check required files exist
         run: |
