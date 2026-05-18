@@ -19,9 +19,7 @@ Exit codes:
 
 import curses
 import json
-import os
 import pathlib
-import re
 import sys
 import urllib.error
 import urllib.request
@@ -489,7 +487,6 @@ def _prompt_ports_paths(env: dict, force: bool) -> tuple:
         "CLK_WORKSPACES_DIR": "./data/clk-workspaces",
     }
     current = {k: env.get(k, v) for k, v in defaults.items()}
-    at_defaults = all(current[k] == defaults[k] for k in defaults)
 
     section("Ports & Paths")
 

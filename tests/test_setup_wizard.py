@@ -8,13 +8,10 @@ pytest's tmp_path, and interactive prompts are monkeypatched.
 from __future__ import annotations
 
 import importlib
-import io
 import json
-import sys
-import types
 import urllib.error
 from pathlib import Path
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
 import pytest
 
