@@ -396,7 +396,12 @@ def _prompt_openwebui(env: dict, force: bool) -> tuple:
         return url, key, model, models, False
 
     # ── Prompt for URL ──
-    if force or not conn_ok:
+    # Only re-prompt URL if forced, URL is missing, or connection failed for a
+    # URL-specific reason.  An "Authentication failed" error means the server IS
+    # reachable — the problem is the key, not the URL, so skip ahead to the key
+    # prompt in that case.
+    url_unreachable = not conn_ok and "Cannot reach" in conn_err
+    if force or not url or url_unreachable:
         print()
         while True:
             new_url = prompt_text("OpenWebUI URL", default=url or "http://localhost:3000")
@@ -407,6 +412,14 @@ def _prompt_openwebui(env: dict, force: bool) -> tuple:
                 print(f"  {green('✓')} Connected to {cyan(new_url)}          ")
                 url = new_url
                 changed = True
+                break
+            if not key and "Authentication" in conn_err:
+                # Server is reachable but requires an API key — treat URL as valid
+                # and let the key prompt do the full validation.
+                print(f"  {green('✓')} URL reachable — API key required          ")
+                url = new_url
+                changed = True
+                conn_ok = False
                 break
             print(f"  {red('✗')} {conn_err}")
             retry = input(f"  Try a different URL? [{bold('Y')}/n]: ").strip().lower()
