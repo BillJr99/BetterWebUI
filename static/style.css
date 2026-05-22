@@ -1075,6 +1075,46 @@ button.upload-label { -webkit-appearance: none; appearance: none; }
   cursor: pointer;
 }
 
+.stop-btn {
+  background: var(--parchment-soft);
+  color: var(--ink);
+  border: 1px solid var(--parchment-edge);
+  border-radius: 10px;
+  padding: 6px 14px;
+  cursor: pointer;
+  font-weight: 500;
+}
+.stop-btn:hover { background: #e8d4cc; }
+
+.message-actions .why-btn,
+.message-actions .retry-btn {
+  background: transparent;
+  border: 1px solid var(--parchment-edge);
+  border-radius: 12px;
+  padding: 2px 10px;
+  font-size: 11px;
+  color: var(--ink-soft);
+  cursor: pointer;
+}
+.message-actions .why-btn:hover,
+.message-actions .retry-btn:hover {
+  background: var(--parchment-soft);
+  color: var(--ink);
+}
+
+.retry-variant {
+  display: block;
+  width: 100%;
+  margin: 6px 0;
+  padding: 8px 14px;
+  background: var(--parchment-soft);
+  border: 1px solid var(--parchment-edge);
+  border-radius: var(--radius);
+  cursor: pointer;
+  text-align: left;
+}
+.retry-variant:hover { background: var(--parchment-edge); }
+
 .message pre {
   background: var(--code-bg);
   color: var(--code-text);

@@ -62,6 +62,27 @@ function escape(s) {
 // Map technical errors to language a non-technical user can act on.
 // `raw` is the raw error (Error object or string); `context` is an
 // optional short description ("uploading a file", "loading models").
+// Map raw tool names to verbs a non-technical user understands.
+function humanLabelForTool(tool) {
+  const map = {
+    execute_shell: "Running a command",
+    cli_call: "Running a CLI shortcut",
+    write_file: "Writing a file",
+    delete_file: "Deleting a file",
+    read_file: "Reading a file",
+    generate_image: "Drawing an image",
+    generate_audio: "Generating speech",
+    web_search: "Searching the web",
+    mcp_call: "Calling a connected service",
+    autogui_task: "Controlling the desktop",
+    clk_research: "Researching",
+    screen_action: "Acting on the screen",
+    update_task_plan: "Updating the plan",
+    load_skill: "Loading a skill",
+  };
+  return map[tool] || tool;
+}
+
 function friendlyError(raw, context) {
   const text = (raw && (raw.message || raw.body || raw.toString())) || "";
   const status = raw && raw.status;
@@ -258,7 +279,10 @@ async function loadConfig() {
     : "Not set";
   $("#cfg-image-model").value = state.config.image_model || "";
   $("#cfg-tts-voice").value = state.config.tts_voice || "alloy";
-  $("#cfg-consensus-runs").value = state.config.consensus_runs ?? 1;
+  // Snap the consensus value to one of the three select options (1, 3, or 5).
+  const cr = state.config.consensus_runs ?? 1;
+  const snap = cr <= 1 ? "1" : (cr <= 3 ? "3" : "5");
+  $("#cfg-consensus-runs").value = snap;
   $("#cfg-shell-enabled").checked = state.config.shell_enabled !== false;
   const ws = state.config.web_search || {};
   const wsProvider = $("#cfg-websearch-provider"); if (wsProvider) wsProvider.value = ws.provider || "";
@@ -1450,12 +1474,16 @@ function appendMessage(m) {
       m.role === "assistant" ? "Assistant" : m.role === "user" ? "You" : m.role;
   }
 
-  // Per-message action buttons (read-aloud, fork)
+  // Per-message action buttons (read-aloud, why, try-again, fork)
   if (m.role === "assistant" && !m._placeholder) {
     const roleEl = tpl.querySelector(".role");
     const acts = document.createElement("div");
     acts.className = "message-actions";
-    acts.innerHTML = `<button class="read-aloud-btn" title="Read aloud" aria-label="Read this message aloud">🔊</button>`;
+    acts.innerHTML = `
+      <button class="read-aloud-btn" title="Read aloud" aria-label="Read this message aloud">🔊</button>
+      <button class="why-btn" title="Why did you answer that way?" aria-label="Ask for an explanation">Why?</button>
+      <button class="retry-btn" title="Try another phrasing" aria-label="Try another phrasing">Try again</button>
+    `;
     if (m.telemetry) {
       acts.innerHTML += `<span class="telemetry-badge">${m.telemetry.tokens_in ?? "?"}→${m.telemetry.tokens_out ?? "?"}t · ${m.telemetry.elapsed_ms ?? "?"}ms</span>`;
     }
@@ -1542,10 +1570,60 @@ function appendMessage(m) {
   if (readBtn) {
     readBtn.onclick = () => readAloud(newEl, m.content || "", readBtn);
   }
+  const whyBtn = newEl?.querySelector(".why-btn");
+  if (whyBtn) {
+    whyBtn.onclick = () => askWhy(m.content || "");
+  }
+  const retryBtn = newEl?.querySelector(".retry-btn");
+  if (retryBtn) {
+    retryBtn.onclick = () => offerRetryVariant(m);
+  }
 
   if (newEl && m.role === "assistant") renderMathIn(newEl);
   container.scrollTop = container.scrollHeight;
   return newEl;
+}
+
+function askWhy(originalAnswer) {
+  const composer = $("#composer-input");
+  if (!composer) return;
+  composer.value =
+    "In one or two paragraphs, explain how you arrived at your last answer, what assumptions you made, and what you're least sure about.";
+  composer.focus();
+  flash("Press Enter to ask for an explanation.", "info");
+}
+
+function offerRetryVariant(m) {
+  showDialog({
+    title: "Try this another way",
+    body: `
+      <p>Pick how you'd like the assistant to retry the previous answer:</p>
+      <button data-variant="shorter" class="retry-variant">Shorter</button>
+      <button data-variant="simpler" class="retry-variant">Simpler (explain like I'm 12)</button>
+      <button data-variant="concrete" class="retry-variant">More concrete (give a real example)</button>
+      <button data-variant="formal" class="retry-variant">More formal</button>
+    `,
+    actions: [{ label: "Cancel", role: "close" }],
+  });
+  setTimeout(() => {
+    document.querySelectorAll(".retry-variant").forEach((btn) => {
+      btn.onclick = () => {
+        const variant = btn.dataset.variant;
+        const prompts = {
+          shorter: "Rewrite your previous answer in three sentences or fewer.",
+          simpler: "Rewrite your previous answer in language a 12-year-old would understand. Keep it accurate.",
+          concrete: "Rewrite your previous answer with a specific, concrete example showing the key idea in action.",
+          formal: "Rewrite your previous answer in a more formal tone, suitable for a professional document.",
+        };
+        const composer = $("#composer-input");
+        if (composer) {
+          composer.value = prompts[variant];
+          closeDialog();
+          send();
+        }
+      };
+    });
+  }, 50);
 }
 
 function buildSubagentCard(sa) {
@@ -2120,6 +2198,22 @@ async function send() {
   sendBtn.disabled = true;
   sendBtn.innerHTML = '<span class="spinner"></span>';
 
+  // Show a Stop button next to the send button while the request is in flight.
+  let stopBtn = $("#stop-btn");
+  if (!stopBtn) {
+    stopBtn = document.createElement("button");
+    stopBtn.id = "stop-btn";
+    stopBtn.type = "button";
+    stopBtn.textContent = "Stop";
+    stopBtn.className = "stop-btn";
+    sendBtn.parentElement.insertBefore(stopBtn, sendBtn.nextSibling);
+  }
+  stopBtn.hidden = false;
+  stopBtn.onclick = () => {
+    try { state.sendAbortController?.abort(); } catch (_) {}
+    flash("Stopped.", "info");
+  };
+
   const placeholder = { role: "assistant", content: "", _placeholder: true };
   state.messages.push(placeholder);
   appendMessage(placeholder);
@@ -2148,6 +2242,7 @@ async function send() {
     let bundleAttachments = [];
     try { bundleAttachments = await gatherMountedBundleAttachments(); } catch (_) { bundleAttachments = []; }
 
+    state.sendAbortController = new AbortController();
     const res = await fetch("/api/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -2161,6 +2256,7 @@ async function send() {
         user_memories: userMemories,
         bundle_attachments: bundleAttachments,
       }),
+      signal: state.sendAbortController.signal,
     });
     if (!res.ok) {
       const t = await res.text();
@@ -2216,9 +2312,10 @@ async function send() {
         return;
       }
       if (event === "tool_running") {
+        const human = humanLabelForTool(data.tool);
         const sysMsg = {
           role: "system-event",
-          content: `Running ${data.tool}: ${data.command || ""}`,
+          content: data.command ? `${human}: ${data.command}` : human,
         };
         state.messages.push(sysMsg);
         appendMessage(sysMsg);
@@ -2270,9 +2367,11 @@ async function send() {
     flash(friendlyError(e, "sending the message"), "warn");
   } finally {
     state.busy = false;
+    state.sendAbortController = null;
     const btn = $("#send-btn");
     btn.disabled = false;
     btn.textContent = "Send";
+    const sb = $("#stop-btn"); if (sb) sb.hidden = true;
   }
 }
 

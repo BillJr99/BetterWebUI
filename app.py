@@ -3539,6 +3539,32 @@ async def delete_scheduled_task(task_id: str, request: Request):
     return {"ok": True}
 
 
+@app.get("/api/verification/{chat_id}")
+async def get_verification_log(chat_id: str, request: Request):
+    """Return verification trace entries for a chat (one per tool call)."""
+    _require_local_caller(request)
+    chat_id = re.sub(r"[^A-Za-z0-9_-]+", "_", chat_id)[:128].strip("._-")
+    if not chat_id:
+        raise HTTPException(400, "Invalid chat_id.")
+    path = DATA_DIR / "verification" / f"{chat_id}.jsonl"
+    if not path.exists():
+        return {"entries": []}
+    entries: list[dict] = []
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entries.append(json.loads(line))
+                except Exception:
+                    continue
+    except Exception as exc:
+        raise HTTPException(500, f"Could not read verification log: {exc}")
+    return {"entries": entries}
+
+
 @app.get("/api/scheduled-tasks/notifications")
 async def drain_scheduled_notifications(request: Request):
     """Poll-style: returns and clears pending notifications. The frontend
@@ -4089,6 +4115,20 @@ async def chat(req: ChatRequest, request: Request):
 
                 if vtrace is not None and vtrace.events:
                     await send_event("verification", vtrace.to_dict())
+                    # Append one JSONL line per verification decision so
+                    # power users / debugging can audit after the fact.
+                    try:
+                        _verif_log_dir = DATA_DIR / "verification"
+                        _verif_log_dir.mkdir(parents=True, exist_ok=True)
+                        with open(_verif_log_dir / f"{cid}.jsonl", "a", encoding="utf-8") as _vf:
+                            _vf.write(json.dumps({
+                                "ts": time.time(),
+                                "chat_id": cid,
+                                "tool": call["tool"],
+                                "trace": vtrace.to_dict(),
+                            }) + "\n")
+                    except Exception:
+                        pass
 
                 # Auto-engage consensus when the judge fails repeatedly on
                 # the same turn — surfaced via a notice, then we recompute.
