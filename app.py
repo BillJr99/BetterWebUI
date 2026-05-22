@@ -46,6 +46,7 @@ WORKSPACES_PATH = DATA_DIR / "workspaces.json"
 MCP_PATH = DATA_DIR / "mcp_servers.json"
 CLI_PATH = DATA_DIR / "cli_tools.json"
 BRANDING_PATH = DATA_DIR / "branding.json"
+SCHEDULED_TASKS_PATH = DATA_DIR / "scheduled_tasks.json"
 
 # WORKSPACE_DIR is the default directory for shell execution and file I/O.
 # Set via the WORKSPACE_DIR environment variable (Docker mounts a host folder
@@ -2336,16 +2337,55 @@ async def fetch_models(config: dict) -> list[dict]:
 app = FastAPI(title="BetterWebUI")
 
 
+_transient_sweep_task: Optional[asyncio.Task] = None
+_scheduler_task: Optional[asyncio.Task] = None
+
+
+async def _transient_sweep_loop() -> None:
+    """Background loop: sweep stale transient uploads every hour."""
+    while True:
+        try:
+            removed = _sweep_transient_uploads()
+            if removed:
+                logging.getLogger("betterwebui.uploads").info(
+                    "Swept %d stale transient upload directories.", removed,
+                )
+        except Exception as exc:
+            logging.getLogger("betterwebui.uploads").warning("Sweep failed: %s", exc)
+        await asyncio.sleep(3600)
+
+
 @app.on_event("startup")
 async def _startup() -> None:
+    global _transient_sweep_task, _scheduler_task
     try:
         await mcp_manager.reconcile()
     except Exception as exc:
         print(f"[BetterWebUI] MCP startup error: {exc}")
+    # One sweep at boot so test fixtures get a clean state.
+    try:
+        _sweep_transient_uploads()
+    except Exception:
+        pass
+    _transient_sweep_task = asyncio.create_task(_transient_sweep_loop())
+    try:
+        from scheduler import start_scheduler
+        _scheduler_task = asyncio.create_task(start_scheduler(
+            tasks_path=SCHEDULED_TASKS_PATH,
+            run_callback=_run_scheduled_task,
+            send_notification=_emit_scheduled_notification,
+        ))
+    except Exception as exc:
+        logging.getLogger("betterwebui.scheduler").warning("Scheduler failed to start: %s", exc)
 
 
 @app.on_event("shutdown")
 async def _shutdown() -> None:
+    global _transient_sweep_task, _scheduler_task
+    if _transient_sweep_task is not None:
+        _transient_sweep_task.cancel()
+    if _scheduler_task is not None:
+        _scheduler_task.cancel()
     for client in list(mcp_manager.clients.values()):
         try:
             await client.stop()
@@ -3345,6 +3385,217 @@ async def upload_file(file: UploadFile = File(...)):
     return {"url": f"/uploads/{safe_name}", "filename": file.filename, "content_type": file.content_type}
 
 
+# --- Transient uploads (per-chat, TTL-swept). Used for file bundles that
+# live in browser IndexedDB and are streamed up only for the duration of
+# the chat turn — keeps sensitive bytes off the server long-term.
+
+UPLOADS_TRANSIENT_DIR = UPLOADS_DIR / "transient"
+UPLOADS_TRANSIENT_DIR.mkdir(parents=True, exist_ok=True)
+_TRANSIENT_TTL_SECONDS = 24 * 3600
+
+
+def _sweep_transient_uploads() -> int:
+    """Delete transient-upload chat directories older than the TTL.
+    Returns the count of directories removed. Safe to call on a timer."""
+    cutoff = time.time() - _TRANSIENT_TTL_SECONDS
+    removed = 0
+    try:
+        for chat_dir in UPLOADS_TRANSIENT_DIR.iterdir():
+            if not chat_dir.is_dir():
+                continue
+            try:
+                if chat_dir.stat().st_mtime < cutoff:
+                    shutil.rmtree(chat_dir, ignore_errors=True)
+                    removed += 1
+            except Exception:
+                continue
+    except FileNotFoundError:
+        pass
+    return removed
+
+
+@app.post("/api/uploads/transient")
+async def upload_transient_file(request: Request, file: UploadFile = File(...)):
+    """Accept a file scoped to a single chat. Files older than the TTL
+    are swept automatically. The caller passes chat_id as a query param."""
+    _require_local_caller(request)
+    chat_id = request.query_params.get("chat_id") or "anon"
+    # Sanitize chat_id: alphanumeric / dash / underscore only.
+    chat_id = re.sub(r"[^A-Za-z0-9._-]+", "_", chat_id)[:64] or "anon"
+    chat_dir = UPLOADS_TRANSIENT_DIR / chat_id
+    chat_dir.mkdir(parents=True, exist_ok=True)
+    safe_name = f"{uuid.uuid4().hex}_{Path(file.filename or 'file').name}"
+    dest = chat_dir / safe_name
+    async with aiofiles.open(dest, "wb") as f:
+        while chunk := await file.read(1024 * 64):
+            await f.write(chunk)
+    return {
+        "url": f"/uploads/transient/{chat_id}/{safe_name}",
+        "filename": file.filename,
+        "content_type": file.content_type,
+    }
+
+
+@app.delete("/api/uploads/transient/{chat_id}")
+async def delete_transient_chat(chat_id: str, request: Request):
+    _require_local_caller(request)
+    chat_id = re.sub(r"[^A-Za-z0-9._-]+", "_", chat_id)[:64]
+    if not chat_id:
+        raise HTTPException(400, "Invalid chat_id.")
+    chat_dir = UPLOADS_TRANSIENT_DIR / chat_id
+    if chat_dir.exists():
+        shutil.rmtree(chat_dir, ignore_errors=True)
+    return {"ok": True, "chat_id": chat_id}
+
+
+# --- Scheduled tasks ---
+
+# Queue of pending scheduled-task notifications. The /api/scheduled-tasks/notifications/stream
+# SSE endpoint drains this and pushes to the browser; once delivered the
+# in-memory list is cleared. We persist nothing — recently-missed
+# notifications can still be read from each task's history field.
+_scheduled_notifications: list[dict] = []
+
+
+async def _emit_scheduled_notification(task: dict, result: dict) -> None:
+    _scheduled_notifications.append({
+        "id": task.get("id"),
+        "name": task.get("name"),
+        "ok": bool(result.get("ok", True)),
+        "summary": (result.get("summary") or "")[:500],
+        "ts": time.time(),
+    })
+
+
+async def _run_scheduled_task(task: dict) -> dict:
+    """Execute a scheduled task by running its prompt through the same code
+    path as /api/chat. Returns {ok, summary}."""
+    cfg = load_config()
+    if not cfg.get("api_key") or not cfg.get("base_url"):
+        return {"ok": False, "summary": "BetterWebUI is not connected to a backend."}
+    # Honour the task's workspace if it specifies one.
+    if task.get("workspace_id"):
+        cfg = dict(cfg)
+        cfg["active_workspace_id"] = task["workspace_id"]
+    prompts = load_prompts()
+    model = cfg.get("default_model") or ""
+    if not model:
+        return {"ok": False, "summary": "No default model configured."}
+    system_prompt = build_system_prompt(cfg, prompts, mode="trusted")
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": (task.get("prompt") or "").strip() or "(no prompt)"},
+    ]
+    try:
+        text, _usage = await chat_complete(messages, model, cfg)
+    except Exception as exc:
+        return {"ok": False, "summary": f"LLM call failed: {exc}"}
+    return {"ok": True, "summary": (text or "").strip()[:1000]}
+
+
+class ScheduledTaskIn(BaseModel):
+    id: Optional[str] = None
+    name: str
+    prompt: str
+    workspace_id: Optional[str] = ""
+    schedule: dict
+    enabled: Optional[bool] = True
+
+
+@app.get("/api/scheduled-tasks")
+async def list_scheduled_tasks(request: Request):
+    _require_local_caller(request)
+    from scheduler import list_tasks
+    return {"tasks": list_tasks(SCHEDULED_TASKS_PATH)}
+
+
+@app.post("/api/scheduled-tasks")
+async def create_or_update_scheduled_task(body: ScheduledTaskIn, request: Request):
+    _require_local_caller(request)
+    from scheduler import upsert_task
+    task = body.model_dump()
+    if not task.get("id"):
+        task["id"] = uuid.uuid4().hex
+    task.setdefault("history", [])
+    task.setdefault("last_run_at", None)
+    return upsert_task(SCHEDULED_TASKS_PATH, task)
+
+
+@app.delete("/api/scheduled-tasks/{task_id}")
+async def delete_scheduled_task(task_id: str, request: Request):
+    _require_local_caller(request)
+    from scheduler import delete_task
+    ok = delete_task(SCHEDULED_TASKS_PATH, task_id)
+    if not ok:
+        raise HTTPException(404, "Task not found.")
+    return {"ok": True}
+
+
+@app.get("/api/scheduled-tasks/notifications")
+async def drain_scheduled_notifications(request: Request):
+    """Poll-style: returns and clears pending notifications. The frontend
+    polls this on a short interval rather than holding an SSE open."""
+    _require_local_caller(request)
+    pending = list(_scheduled_notifications)
+    _scheduled_notifications.clear()
+    return {"notifications": pending}
+
+
+# --- Memory extraction (client-side stored, server only synthesizes). ---
+
+class MemoryExtractIn(BaseModel):
+    user_message: str
+    assistant_message: str
+    model: Optional[str] = None
+
+
+@app.post("/api/memory/extract")
+async def memory_extract(body: MemoryExtractIn, request: Request):
+    _require_local_caller(request)
+    cfg = load_config()
+    model = body.model or cfg.get("default_model") or ""
+    if not model or not cfg.get("api_key") or not cfg.get("base_url"):
+        return {"candidates": []}
+    user_msg = (body.user_message or "")[:4000]
+    assistant_msg = (body.assistant_message or "")[:2000]
+    extraction_prompt = (
+        "Examine this single user message and identify any DURABLE preferences, "
+        "facts, or constraints the user revealed that would help in future chats. "
+        "Examples of good memories: 'User is vegetarian', 'User prefers Python', "
+        "'User's company is named Acme'. Skip ephemeral things like a question "
+        "they just asked or a one-off task.\n\n"
+        f"User message:\n{user_msg}\n\n"
+        f"Assistant reply (for context):\n{assistant_msg}\n\n"
+        "Respond with JSON ONLY in this exact shape: "
+        '{"candidates": [{"text": "User ...", "category": "preference|fact|constraint|other"}]} '
+        "or {\"candidates\": []} if nothing notable."
+    )
+    messages = [
+        {"role": "system", "content": "You are a careful assistant that returns JSON only."},
+        {"role": "user", "content": extraction_prompt},
+    ]
+    try:
+        text, _usage = await chat_complete(messages, model, cfg)
+    except Exception as exc:
+        return {"candidates": [], "error": str(exc)[:200]}
+    parsed = _verification._safe_json_parse(text)
+    if not isinstance(parsed, dict):
+        return {"candidates": []}
+    raw_candidates = parsed.get("candidates") if isinstance(parsed.get("candidates"), list) else []
+    cleaned: list[dict] = []
+    for c in raw_candidates[:5]:
+        if not isinstance(c, dict):
+            continue
+        t = (c.get("text") or "").strip()
+        if not t or len(t) > 280:
+            continue
+        cat = (c.get("category") or "other").strip().lower()
+        if cat not in {"preference", "fact", "constraint", "other"}:
+            cat = "other"
+        cleaned.append({"text": t, "category": cat})
+    return {"candidates": cleaned}
+
+
 # --- Voice transcription ---
 
 _MAX_TRANSCRIBE_BYTES = 25 * 1024 * 1024  # 25 MB cap for /api/transcribe uploads
@@ -3707,6 +3958,23 @@ async def chat(req: ChatRequest, request: Request):
             if m.get("content") is None:
                 m = {**m, "content": ""}
             history.append(m)
+
+        # Merge bundle_attachments from mounted file workspaces into the most
+        # recent user message so the model has access without the user having
+        # to re-attach. We splice rather than replace so per-message attachments
+        # the user added in the composer survive.
+        if req.bundle_attachments and history:
+            last_user_idx = next(
+                (i for i in range(len(history) - 1, -1, -1) if history[i].get("role") == "user"),
+                None,
+            )
+            if last_user_idx is not None:
+                msg = dict(history[last_user_idx])
+                existing = list(msg.get("attachments") or [])
+                extras = [a for a in req.bundle_attachments if isinstance(a, dict) and a.get("url")]
+                msg["attachments"] = existing + extras
+                history[last_user_idx] = msg
+
         system_prompt = build_system_prompt(
             cfg, prompts, effective_mode,
             user_memories=req.user_memories,
