@@ -16,6 +16,11 @@ data/cli_tools.json
 data/system_prompts.json
 data/uploads/
 data/generated/
+data/scheduled_tasks.json
+data/checkpoints/
+data/verification/
+data/branding.json
+data/oauth/
 
 # OS / editor cruft
 .DS_Store
