@@ -381,6 +381,20 @@ def _prompt_openwebui(env: dict, force: bool) -> tuple:
         else:
             print(red("✗"))
             print(f"  {red(conn_err)}")
+    elif url and not key and not force:
+        # URL is saved but no key yet — probe reachability so we know whether the
+        # URL itself needs re-entering before we ask for the key.
+        print(f"  Checking {cyan(url)} …", end=" ", flush=True)
+        _, probe_err = validate_connection(url, "")
+        if "Cannot reach" in probe_err:
+            conn_ok = False
+            conn_err = probe_err          # URL is down or wrong
+            print(red("✗"))
+            print(f"  {red(conn_err)}")
+        else:
+            conn_ok = False
+            conn_err = "Missing API key."  # server is up, just needs a key
+            print(dim("(API key required)"))
     else:
         conn_ok = False
         conn_err = "Not configured." if not url else "Missing API key."
@@ -396,7 +410,12 @@ def _prompt_openwebui(env: dict, force: bool) -> tuple:
         return url, key, model, models, False
 
     # ── Prompt for URL ──
-    if force or not conn_ok:
+    # Only re-prompt URL if forced, URL is missing, or connection failed for a
+    # URL-specific reason.  An "Authentication failed" error means the server IS
+    # reachable — the problem is the key, not the URL, so skip ahead to the key
+    # prompt in that case.
+    url_unreachable = not conn_ok and "Cannot reach" in conn_err
+    if force or not url or url_unreachable:
         print()
         while True:
             new_url = prompt_text("OpenWebUI URL", default=url or "http://localhost:3000")
@@ -407,6 +426,14 @@ def _prompt_openwebui(env: dict, force: bool) -> tuple:
                 print(f"  {green('✓')} Connected to {cyan(new_url)}          ")
                 url = new_url
                 changed = True
+                break
+            if not key and "Authentication" in conn_err:
+                # Server is reachable but requires an API key — treat URL as valid
+                # and let the key prompt do the full validation.
+                print(f"  {green('✓')} URL reachable — API key required          ")
+                url = new_url
+                changed = True
+                conn_ok = False
                 break
             print(f"  {red('✗')} {conn_err}")
             retry = input(f"  Try a different URL? [{bold('Y')}/n]: ").strip().lower()
