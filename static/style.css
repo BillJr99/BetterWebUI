@@ -966,6 +966,18 @@ button.upload-label { -webkit-appearance: none; appearance: none; }
 .verification-details summary { cursor: pointer; font-size: 12px; opacity: 0.85; }
 .verification-details ul { margin: 6px 0 0 0; padding-left: 18px; }
 .verification-details li { font-size: 12px; line-height: 1.5; }
+.vc-undo-btn {
+  margin-top: 6px;
+  background: var(--parchment-pale);
+  border: 1px solid var(--parchment-edge);
+  border-radius: 14px;
+  padding: 4px 12px;
+  font-size: 12px;
+  color: var(--ink);
+  cursor: pointer;
+}
+.vc-undo-btn:hover { background: var(--parchment-edge); }
+.vc-undo-btn:disabled { opacity: 0.6; cursor: progress; }
 
 .message pre {
   background: var(--code-bg);

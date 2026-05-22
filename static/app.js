@@ -59,6 +59,44 @@ function escape(s) {
     .replace(/"/g, "&quot;");
 }
 
+// Map technical errors to language a non-technical user can act on.
+// `raw` is the raw error (Error object or string); `context` is an
+// optional short description ("uploading a file", "loading models").
+function friendlyError(raw, context) {
+  const text = (raw && (raw.message || raw.body || raw.toString())) || "";
+  const status = raw && raw.status;
+  const ctx = context ? ` while ${context}` : "";
+  if (status === 401 || /unauthor/i.test(text)) {
+    return `Your API key isn't being accepted${ctx}. Open Settings → Connection to update it.`;
+  }
+  if (status === 403) {
+    return `You don't have permission for that${ctx}. Check Settings → Connection.`;
+  }
+  if (status === 404) {
+    return `Not found${ctx}. The item may have been deleted or moved.`;
+  }
+  if (status === 413 || /too large|payload/i.test(text)) {
+    return `That file is too large${ctx}. Try a smaller one.`;
+  }
+  if (status === 429 || /rate limit|too many/i.test(text)) {
+    return `The server is rate-limiting requests${ctx}. Wait a moment and try again.`;
+  }
+  if (/timeout|timed out|took too long/i.test(text)) {
+    return `The server took too long to respond${ctx}. Try again, or pick a smaller task.`;
+  }
+  if (/network|failed to fetch|ECONN|ENOTFOUND/i.test(text)) {
+    return `Couldn't reach the server${ctx}. Check your internet connection.`;
+  }
+  if (/invalid data|broken|undecodable/i.test(text)) {
+    return `The result came back broken${ctx}. Click "Try again" or rephrase.`;
+  }
+  if (status >= 500) {
+    return `The server hit an error${ctx}. Try again in a moment.`;
+  }
+  // Last resort: trim and de-jargon the raw text.
+  return text.replace(/^\d+:\s*/, "").slice(0, 200) || `Something went wrong${ctx}.`;
+}
+
 // ---------------------------------------------------------------------------
 // Local-download helpers
 // ---------------------------------------------------------------------------
@@ -1236,6 +1274,36 @@ function renderVerificationTrace(trace) {
     trace.final_attempt > 1 ? ` · attempt ${trace.final_attempt}` : ""
   }</span>`;
   card.appendChild(summary);
+
+  // Undo button for write_file when we have a checkpoint id from the
+  // most recent tool_result. The verification trace doesn't carry the
+  // checkpoint, but the tool_result event preceded it; we look up the
+  // last tool_result for this tool from the in-memory event log.
+  if (trace.tool === "write_file" && state.lastWriteCheckpoint) {
+    const undo = document.createElement("button");
+    undo.type = "button";
+    undo.className = "vc-undo-btn";
+    undo.textContent = "Undo this write";
+    const { filename, checkpoint_id } = state.lastWriteCheckpoint;
+    undo.onclick = async () => {
+      undo.disabled = true;
+      undo.textContent = "Reverting…";
+      try {
+        await api("/api/project/revert", {
+          method: "POST",
+          json: { filename, checkpoint_id },
+        });
+        undo.textContent = "Reverted ✓";
+        flash(`Reverted ${filename} to the previous version.`, "good");
+      } catch (e) {
+        undo.disabled = false;
+        undo.textContent = "Undo this write";
+        flash(friendlyError(e, "reverting the file"), "bad");
+      }
+    };
+    card.appendChild(undo);
+  }
+
   if (Array.isArray(trace.events) && trace.events.length) {
     const det = document.createElement("details");
     det.className = "verification-details";
@@ -1816,7 +1884,7 @@ async function askApproval(req) {
         ${req.reason ? `<p><b>Why:</b> ${escape(req.reason)}</p>` : ""}
         <p><b>Command:</b></p>
         <pre>${escape(req.command)}</pre>
-        <details class="explain-expander" id="explain-details">
+        <details class="explain-expander" id="explain-details" open>
           <summary>Explain this in plain English</summary>
           <div class="explain-body" id="explain-body"><span class="spinner"></span> Loading explanation…</div>
         </details>
@@ -1872,13 +1940,15 @@ async function askApproval(req) {
       resolve({ approved: false });
     };
 
-    // Wire explain-details toggle
-    setTimeout(() => {
+    // Wire explain-details toggle. The expander is open by default so
+    // non-technical users see the explanation without having to know
+    // to click; we kick the fetch immediately when the dialog opens.
+    setTimeout(async () => {
       const det = document.getElementById("explain-details");
       if (!det || req.tool !== "execute_shell") return;
       let explained = false;
-      det.addEventListener("toggle", async () => {
-        if (!det.open || explained) return;
+      const runExplain = async () => {
+        if (explained) return;
         explained = true;
         const bodyEl = document.getElementById("explain-body");
         try {
@@ -1888,9 +1958,13 @@ async function askApproval(req) {
           });
           if (bodyEl) bodyEl.textContent = data.explanation || "No explanation available.";
         } catch (e) {
-          if (bodyEl) bodyEl.textContent = "Could not fetch explanation.";
+          if (bodyEl) bodyEl.textContent = friendlyError(e, "explaining the command");
         }
+      };
+      det.addEventListener("toggle", () => {
+        if (det.open) runExplain();
       });
+      if (det.open) runExplain();
     }, 50);
   });
 }
@@ -2041,7 +2115,8 @@ async function send() {
         return;
       }
       if (event === "error") {
-        const sysMsg = { role: "system-event", content: "Error: " + data.message };
+        const human = friendlyError({ message: data.message || "" }, "running that step");
+        const sysMsg = { role: "system-event", content: human };
         state.messages.push(sysMsg);
         appendMessage(sysMsg);
         return;
@@ -2070,6 +2145,13 @@ function showTelemetryLine(t) {
 
 async function handleToolResult(data) {
   const r = data.result || {};
+
+  // Stash checkpoint info from the most recent write_file so the
+  // verification card (which arrives moments later) can render an
+  // "Undo" button without re-plumbing the trace.
+  if (data.tool === "write_file" && r && r.checkpoint_id && r.filename) {
+    state.lastWriteCheckpoint = { filename: r.filename, checkpoint_id: r.checkpoint_id };
+  }
 
   // write_file result: backend sends data_b64 only on failure (so the user
   // can still recover the bytes via download). On success, the file is on

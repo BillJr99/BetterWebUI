@@ -3507,6 +3507,11 @@ async def chat(req: ChatRequest, request: Request):
                 except Exception:
                     result, vtrace = first_result, None
 
+                # Emit tool_result first so the UI's checkpoint cache is
+                # populated before the verification card (which may want to
+                # render an Undo button) arrives.
+                await send_event("tool_result", {"tool": call["tool"], "result": result})
+
                 if vtrace is not None and vtrace.events:
                     await send_event("verification", vtrace.to_dict())
 
@@ -3521,8 +3526,6 @@ async def chat(req: ChatRequest, request: Request):
                     await send_event("notice", {
                         "message": "I wasn't confident in that result. I'll double-check on the next turn.",
                     })
-
-                await send_event("tool_result", {"tool": call["tool"], "result": result})
 
                 # Persist task plan updates
                 if call["tool"] == "update_task_plan":
