@@ -145,6 +145,19 @@ def _read_config_json() -> dict:
         return {}
 
 
+def _write_config_json(url: str, key: str, model: str) -> None:
+    """Persist url/key/model into data/config.json so the web UI skips its own setup prompt."""
+    p = ROOT / "data" / "config.json"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    cfg = _read_config_json()
+    cfg["base_url"] = url
+    if key:
+        cfg["api_key"] = key
+    if model:
+        cfg["default_model"] = model
+    p.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+
+
 # ── Prompt helpers ─────────────────────────────────────────────────────────────
 
 def prompt_text(label: str, default: str = "", secret: bool = False) -> str:
@@ -586,6 +599,10 @@ def main() -> int:
     else:
         section("Configuration")
         print(f"  {green('✓')} All settings are valid — nothing to update.")
+
+    if url and key:
+        _write_config_json(url, key, model)
+        print(f"  {green('✓')} Pre-populated {cyan('data/config.json')} — web UI will not re-ask for URL/key.")
 
     print()
     return 0
