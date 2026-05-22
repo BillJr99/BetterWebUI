@@ -21,6 +21,7 @@ const state = {
   fileStore: {},
   taskPlan: [],          // current plan items from backend
   convSearchQuery: "",   // conversation search filter
+  convSearchResults: null, // server-side full-text search results (null = not active)
   micListening: false,   // voice input state
   rightRailVisible: false,
   planPaneVisible: false,
@@ -726,6 +727,31 @@ function renderWorkspaceList() {
 
 async function exportWorkspace(id) {
   const w = state.workspaces.find((x) => x.id === id);
+  // Push bundle manifest so the .bwui export contains file-group metadata
+  if (window.bws && w?.bundle_ids?.length) {
+    try {
+      const bundles = await bws.bundleList();
+      const manifest = await Promise.all(
+        (w.bundle_ids || []).map(async (bid) => {
+          const bundle = bundles.find((b) => b.id === bid);
+          if (!bundle) return null;
+          const files = await bws.bundleFiles(bid);
+          return {
+            bundle_id: bid,
+            name: bundle.name || bid,
+            files: files.map((f) => ({ filename: f.filename, sha256: "" })),
+          };
+        })
+      );
+      const validManifest = manifest.filter(Boolean);
+      if (validManifest.length) {
+        await api(`/api/workspaces/${encodeURIComponent(id)}/bundle-manifest`, {
+          method: "POST",
+          json: { manifest: validManifest },
+        }).catch(() => {});
+      }
+    } catch (_) {}
+  }
   const res = await fetch(`/api/workspaces/${encodeURIComponent(id)}/export`);
   if (!res.ok) { flash("Export failed.", "warn"); return; }
   const blob = await res.blob();
@@ -980,6 +1006,84 @@ function renderMcpServers() {
   };
 }
 
+const _CLOUD_SERVICE_META = {
+  "google": { icon: "&#128241;", label: "Google", desc: "Calendar, Gmail, Drive" },
+  "microsoft": { icon: "&#128203;", label: "Microsoft 365", desc: "Outlook, Teams, OneDrive" },
+};
+
+async function renderCloudServices() {
+  const wrap = $("#cloud-services-list");
+  if (!wrap) return;
+  wrap.innerHTML = "";
+  const grid = document.createElement("div");
+  grid.className = "cloud-services-grid";
+  for (const [provider, meta] of Object.entries(_CLOUD_SERVICE_META)) {
+    const card = document.createElement("div");
+    card.className = "cloud-service-card";
+    let statusHtml = '<span class="cloud-status-chip disconnected">Not connected</span>';
+    let btnHtml = `<button class="primary" data-action="connect" data-provider="${provider}">Connect</button>`;
+    try {
+      const status = await api(`/api/oauth/status/${provider}`);
+      if (status.connected) {
+        const label = status.expired ? "Token expired" : "Connected";
+        const cls = status.expired ? "expired" : "connected";
+        const emailPart = status.email ? ` <small>${escape(status.email)}</small>` : "";
+        statusHtml = `<span class="cloud-status-chip ${cls}">${label}</span>${emailPart}`;
+        btnHtml = `<button data-action="reconnect" data-provider="${provider}">Reconnect</button>
+          <button data-action="disconnect" data-provider="${provider}" class="danger-btn">Disconnect</button>`;
+      }
+    } catch (_) { /* not connected */ }
+    card.innerHTML = `
+      <div class="cloud-service-header">
+        <span class="cloud-service-icon">${meta.icon}</span>
+        <div>
+          <div class="cloud-service-name">${meta.label}</div>
+          <div class="cloud-service-desc hint">${meta.desc}</div>
+        </div>
+      </div>
+      <div class="cloud-service-status">${statusHtml}</div>
+      <div class="cloud-service-actions">${btnHtml}</div>`;
+    card.addEventListener("click", async (e) => {
+      const btn = e.target.closest("button[data-action]");
+      if (!btn) return;
+      const action = btn.dataset.action;
+      const prov = btn.dataset.provider;
+      if (action === "disconnect") {
+        await api(`/api/oauth/disconnect/${prov}`, { method: "DELETE" });
+        renderCloudServices();
+        return;
+      }
+      if (action === "connect" || action === "reconnect") {
+        try {
+          const resp = await api(`/api/oauth/connect/${prov}`, { method: "POST" });
+          if (resp.auth_url) {
+            window.open(resp.auth_url, "_blank");
+            flash(`Sign in to ${_CLOUD_SERVICE_META[prov]?.label || prov} in the opened tab, then return here.`, "info");
+            // Poll for completion
+            let tries = 0;
+            const poll = setInterval(async () => {
+              tries++;
+              if (tries > 60) { clearInterval(poll); return; }
+              try {
+                const st = await api(`/api/oauth/status/${prov}`);
+                if (st.connected && !st.expired) {
+                  clearInterval(poll);
+                  flash(`Connected to ${_CLOUD_SERVICE_META[prov]?.label || prov}!`, "good");
+                  renderCloudServices();
+                }
+              } catch (_) {}
+            }, 2000);
+          }
+        } catch (err) {
+          flash(friendlyError(err, `connecting to ${_CLOUD_SERVICE_META[prov]?.label || prov}`), "warn");
+        }
+      }
+    });
+    grid.appendChild(card);
+  }
+  wrap.appendChild(grid);
+}
+
 function openMcpRegistryDialog() {
   const items = state.mcpRegistry
     .map(
@@ -1230,16 +1334,39 @@ async function loadConversations() {
 function renderConversationList() {
   const ul = $("#conversation-list");
   ul.innerHTML = "";
+  const q = state.convSearchQuery.trim();
+
+  // When server-side search results are available, render them instead
+  if (q && state.convSearchResults !== null) {
+    const results = state.convSearchResults;
+    if (!results.length) {
+      ul.innerHTML = `<li class="hint" role="presentation" style="padding: 8px; list-style: none;">No results.</li>`;
+      return;
+    }
+    for (const r of results) {
+      const li = document.createElement("li");
+      if (r.id === state.currentConversationId) li.classList.add("active");
+      li.innerHTML = `
+        <div class="list-item-title">
+          <div>${escape(r.title || "Untitled")}</div>
+          ${r.snippet ? `<div class="conv-snippet hint">&hellip;${escape(r.snippet)}&hellip;</div>` : ""}
+        </div>`;
+      li.onclick = () => openConversation(r.id);
+      ul.appendChild(li);
+    }
+    return;
+  }
+
+  // Default: all conversations, client-side tag/title filter
   let convs = state.conversations;
-  const q = state.convSearchQuery.trim().toLowerCase();
   if (q) {
+    const ql = q.toLowerCase();
     convs = convs.filter((c) =>
-      (c.title || "").toLowerCase().includes(q) ||
-      (c.tags || []).some((t) => t.toLowerCase().includes(q))
+      (c.title || "").toLowerCase().includes(ql) ||
+      (c.tags || []).some((t) => t.toLowerCase().includes(ql))
     );
   }
   if (!convs.length) {
-    // Empty-state must be a list item so the markup remains valid inside <ul>.
     ul.innerHTML = `<li class="hint" role="presentation" style="padding: 8px; list-style: none;">${q ? "No results." : "No chats yet."}</li>`;
     return;
   }
@@ -1253,14 +1380,14 @@ function renderConversationList() {
       <div class="list-item-title">
         <div>${escape(c.title || "Untitled")}</div>
         <div class="conv-meta">
-          ${c.pinned ? '<span class="pin-badge" title="Pinned">📌</span>' : ""}
+          ${c.pinned ? '<span class="pin-badge" title="Pinned">&#128204;</span>' : ""}
           ${tags}
         </div>
       </div>
       <div class="list-actions">
-        <button data-action="pin" data-id="${c.id}" title="${c.pinned ? "Unpin" : "Pin"}" aria-label="${c.pinned ? "Unpin" : "Pin"} conversation ${escape(c.title || "")}" aria-pressed="${c.pinned ? "true" : "false"}">📌</button>
-        <button data-action="fork" data-id="${c.id}" title="Fork this conversation" aria-label="Fork conversation ${escape(c.title || "")}">⎇</button>
-        <button data-action="delete" data-id="${c.id}" title="Delete" aria-label="Delete conversation ${escape(c.title || "")}">×</button>
+        <button data-action="pin" data-id="${c.id}" title="${c.pinned ? "Unpin" : "Pin"}" aria-label="${c.pinned ? "Unpin" : "Pin"} conversation ${escape(c.title || "")}" aria-pressed="${c.pinned ? "true" : "false"}">&#128204;</button>
+        <button data-action="fork" data-id="${c.id}" title="Fork this conversation" aria-label="Fork conversation ${escape(c.title || "")}">&#10167;</button>
+        <button data-action="delete" data-id="${c.id}" title="Delete" aria-label="Delete conversation ${escape(c.title || "")}">&#215;</button>
       </div>`;
     li.onclick = (e) => {
       const btn = e.target instanceof Element ? e.target.closest("button") : null;
@@ -1340,11 +1467,52 @@ function renderMessages() {
         <hr />
         <p class="hint">First time here? Open <b>Settings</b> to enter your OpenWebUI URL and API key.</p>
       </div>`;
+    renderRecentChatsResume(container);
     return;
   }
   for (const m of state.messages) {
     appendMessage(m);
   }
+}
+
+async function renderRecentChatsResume(container) {
+  if (!state.config?.api_key_set) return;
+  try {
+    const data = await api("/api/conversations/recent?limit=3");
+    const recent = (data.recent || []).filter((c) => c.message_count > 0);
+    if (!recent.length) return;
+    const section = document.createElement("div");
+    section.className = "resume-section";
+    const heading = document.createElement("p");
+    heading.className = "hint";
+    heading.textContent = "Pick up where you left off:";
+    section.appendChild(heading);
+    const grid = document.createElement("div");
+    grid.className = "resume-grid";
+    for (const c of recent) {
+      const card = document.createElement("button");
+      card.className = "resume-card";
+      card.type = "button";
+      const when = _relativeTime(c.updated_at);
+      card.innerHTML = `<span class="resume-title">${escape(c.title || "Untitled")}</span>
+        <span class="resume-meta">${escape(when)} &middot; ${c.message_count} message${c.message_count === 1 ? "" : "s"}</span>
+        ${c.summary ? `<span class="resume-summary">${escape(c.summary)}</span>` : ""}`;
+      card.onclick = () => openConversation(c.id);
+      grid.appendChild(card);
+    }
+    section.appendChild(grid);
+    container.appendChild(section);
+  } catch (_) { /* non-critical */ }
+}
+
+function _relativeTime(ts) {
+  if (!ts) return "";
+  const diff = Math.floor(Date.now() / 1000) - ts;
+  if (diff < 60) return "just now";
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+  if (diff < 604800) return `${Math.floor(diff / 86400)}d ago`;
+  return new Date(ts * 1000).toLocaleDateString();
 }
 
 function renderVerificationTrace(trace) {
@@ -1708,6 +1876,225 @@ async function attachFile(file) {
   renderAttachments();
 }
 
+// ---------------------------------------------------------------------------
+// Image annotation modal
+// ---------------------------------------------------------------------------
+
+const _anno = {
+  attachIdx: -1,
+  tool: "freehand",
+  color: "#ff3b30",
+  size: 3,
+  strokes: [],
+  drawing: false,
+  startX: 0,
+  startY: 0,
+  img: null,
+  offscreen: null, // offscreen canvas with base image only
+};
+
+function openAnnotationModal(attachIdx) {
+  const a = state.attachments[attachIdx];
+  if (!a) return;
+  const modal = $("#annotation-modal");
+  if (!modal) return;
+  _anno.attachIdx = attachIdx;
+  _anno.strokes = [];
+  _anno.img = null;
+  _anno.offscreen = null;
+  // Load the image
+  const imgEl = new Image();
+  imgEl.onload = () => {
+    _anno.img = imgEl;
+    const canvas = $("#annotation-canvas");
+    canvas.width = imgEl.naturalWidth;
+    canvas.height = imgEl.naturalHeight;
+    const offscreen = document.createElement("canvas");
+    offscreen.width = imgEl.naturalWidth;
+    offscreen.height = imgEl.naturalHeight;
+    offscreen.getContext("2d").drawImage(imgEl, 0, 0);
+    _anno.offscreen = offscreen;
+    _annoRedraw(canvas);
+    modal.hidden = false;
+  };
+  imgEl.onerror = () => flash("Could not load image for annotation.", "warn");
+  if (a.url) {
+    imgEl.src = a.url;
+  } else if (a._blob) {
+    imgEl.src = URL.createObjectURL(a._blob);
+  } else {
+    flash("Image data not available for annotation.", "warn");
+    return;
+  }
+}
+
+function _annoRedraw(canvas) {
+  const ctx = canvas.getContext("2d");
+  if (_anno.offscreen) ctx.drawImage(_anno.offscreen, 0, 0);
+  for (const s of _anno.strokes) _annoDrawStroke(ctx, s, false);
+}
+
+function _annoDrawStroke(ctx, s, preview) {
+  ctx.save();
+  ctx.strokeStyle = s.color;
+  ctx.lineWidth = s.size;
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  if (s.tool === "freehand" && s.points && s.points.length > 1) {
+    ctx.beginPath();
+    ctx.moveTo(s.points[0].x, s.points[0].y);
+    for (let i = 1; i < s.points.length; i++) ctx.lineTo(s.points[i].x, s.points[i].y);
+    ctx.stroke();
+  } else if (s.tool === "rect" && !preview) {
+    ctx.beginPath();
+    ctx.strokeRect(s.x, s.y, s.w, s.h);
+  } else if (s.tool === "rect" && preview) {
+    ctx.beginPath();
+    ctx.strokeRect(s.x, s.y, s.w, s.h);
+  } else if (s.tool === "arrow") {
+    const { x, y, x2, y2 } = s;
+    const angle = Math.atan2(y2 - y, x2 - x);
+    const headLen = Math.max(12, s.size * 4);
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+    ctx.lineTo(x2, y2);
+    ctx.lineTo(x2 - headLen * Math.cos(angle - Math.PI / 6), y2 - headLen * Math.sin(angle - Math.PI / 6));
+    ctx.moveTo(x2, y2);
+    ctx.lineTo(x2 - headLen * Math.cos(angle + Math.PI / 6), y2 - headLen * Math.sin(angle + Math.PI / 6));
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function _annoCanvasPos(canvas, e) {
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = canvas.width / rect.width;
+  const scaleY = canvas.height / rect.height;
+  const src = e.touches ? e.touches[0] : e;
+  return {
+    x: (src.clientX - rect.left) * scaleX,
+    y: (src.clientY - rect.top) * scaleY,
+  };
+}
+
+function _initAnnotationCanvas() {
+  const canvas = $("#annotation-canvas");
+  if (!canvas || canvas._annoInited) return;
+  canvas._annoInited = true;
+
+  const onStart = (e) => {
+    if (!_anno.img) return;
+    e.preventDefault();
+    _anno.drawing = true;
+    const pos = _annoCanvasPos(canvas, e);
+    _anno.startX = pos.x;
+    _anno.startY = pos.y;
+    if (_anno.tool === "freehand") {
+      _anno.strokes.push({ tool: "freehand", color: _anno.color, size: _anno.size, points: [pos] });
+    }
+  };
+  const onMove = (e) => {
+    if (!_anno.drawing || !_anno.img) return;
+    e.preventDefault();
+    const pos = _annoCanvasPos(canvas, e);
+    const ctx = canvas.getContext("2d");
+    _annoRedraw(canvas);
+    if (_anno.tool === "freehand") {
+      const stroke = _anno.strokes[_anno.strokes.length - 1];
+      stroke.points.push(pos);
+      _annoDrawStroke(ctx, stroke, true);
+    } else if (_anno.tool === "rect") {
+      _annoDrawStroke(ctx, {
+        tool: "rect", color: _anno.color, size: _anno.size,
+        x: _anno.startX, y: _anno.startY,
+        w: pos.x - _anno.startX, h: pos.y - _anno.startY,
+      }, true);
+    } else if (_anno.tool === "arrow") {
+      _annoDrawStroke(ctx, {
+        tool: "arrow", color: _anno.color, size: _anno.size,
+        x: _anno.startX, y: _anno.startY, x2: pos.x, y2: pos.y,
+      }, true);
+    }
+  };
+  const onEnd = (e) => {
+    if (!_anno.drawing || !_anno.img) return;
+    _anno.drawing = false;
+    const pos = e.changedTouches
+      ? _annoCanvasPos(canvas, { clientX: e.changedTouches[0].clientX, clientY: e.changedTouches[0].clientY })
+      : _annoCanvasPos(canvas, e);
+    if (_anno.tool === "rect") {
+      _anno.strokes.push({
+        tool: "rect", color: _anno.color, size: _anno.size,
+        x: _anno.startX, y: _anno.startY,
+        w: pos.x - _anno.startX, h: pos.y - _anno.startY,
+      });
+    } else if (_anno.tool === "arrow") {
+      _anno.strokes.push({
+        tool: "arrow", color: _anno.color, size: _anno.size,
+        x: _anno.startX, y: _anno.startY, x2: pos.x, y2: pos.y,
+      });
+    }
+    _annoRedraw(canvas);
+  };
+
+  canvas.addEventListener("mousedown", onStart);
+  canvas.addEventListener("mousemove", onMove);
+  canvas.addEventListener("mouseup", onEnd);
+  canvas.addEventListener("touchstart", onStart, { passive: false });
+  canvas.addEventListener("touchmove", onMove, { passive: false });
+  canvas.addEventListener("touchend", onEnd);
+}
+
+async function _applyAnnotation() {
+  const canvas = $("#annotation-canvas");
+  const a = state.attachments[_anno.attachIdx];
+  if (!canvas || !a) return;
+  const blob = await new Promise((res) => canvas.toBlob(res, "image/png"));
+  if (!blob) { flash("Could not export annotated image.", "warn"); return; }
+  // Upload to server
+  const form = new FormData();
+  const name = (a.filename || "annotated").replace(/\.[^.]+$/, "") + "_annotated.png";
+  form.append("file", blob, name);
+  try {
+    const resp = await fetch("/api/upload", { method: "POST", body: form });
+    if (!resp.ok) throw new Error(await resp.text());
+    const data = await resp.json();
+    // Replace the original attachment with the annotated one
+    state.attachments[_anno.attachIdx] = {
+      url: data.url,
+      filename: data.filename || name,
+      content_type: "image/png",
+    };
+    renderAttachments();
+    flash("Annotated image attached.", "good");
+  } catch (err) {
+    flash(friendlyError(err, "uploading annotated image"), "warn");
+  }
+  $("#annotation-modal").hidden = true;
+}
+
+function _initAnnotationModal() {
+  _initAnnotationCanvas();
+  document.querySelectorAll(".anno-tool-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      _anno.tool = btn.dataset.tool;
+      document.querySelectorAll(".anno-tool-btn").forEach((b) => b.classList.toggle("active", b === btn));
+    });
+  });
+  $("#anno-color")?.addEventListener("input", (e) => { _anno.color = e.target.value; });
+  $("#anno-size")?.addEventListener("input", (e) => { _anno.size = +e.target.value; });
+  $("#anno-undo-btn")?.addEventListener("click", () => {
+    _anno.strokes.pop();
+    _annoRedraw($("#annotation-canvas"));
+  });
+  $("#anno-clear-btn")?.addEventListener("click", () => {
+    _anno.strokes = [];
+    _annoRedraw($("#annotation-canvas"));
+  });
+  $("#anno-apply-btn")?.addEventListener("click", _applyAnnotation);
+  $("#anno-cancel-btn")?.addEventListener("click", () => { $("#annotation-modal").hidden = true; });
+}
+
 async function captureScreenshot() {
   let stream;
   try {
@@ -1761,11 +2148,19 @@ function renderAttachments() {
   state.attachments.forEach((a, i) => {
     const span = document.createElement("span");
     span.className = "pill";
-    span.innerHTML = `${escape(a.filename)} <button data-i="${i}" title="Remove" aria-label="Remove ${escape(a.filename)}">×</button>`;
-    span.querySelector("button").onclick = () => {
+    const isImage = a.content_type && a.content_type.startsWith("image/");
+    const annoBtn = isImage
+      ? `<button class="anno-open-btn" data-i="${i}" title="Annotate this image" aria-label="Annotate ${escape(a.filename)}">&#9998;</button> `
+      : "";
+    span.innerHTML = `${annoBtn}${escape(a.filename)} <button data-rm="${i}" title="Remove" aria-label="Remove ${escape(a.filename)}">&#215;</button>`;
+    span.querySelector(`button[data-rm]`).onclick = () => {
       state.attachments.splice(i, 1);
       renderAttachments();
     };
+    const annoOpenBtn = span.querySelector(".anno-open-btn");
+    if (annoOpenBtn) {
+      annoOpenBtn.onclick = () => openAnnotationModal(i);
+    }
     wrap.appendChild(span);
   });
 }
@@ -2351,6 +2746,21 @@ async function send() {
         if (lastAssistant && lastUser) {
           suggestMemoryCandidates(lastUser.content, lastAssistant.content);
         }
+        // Cache a one-line summary for the resume surface (uses the title + first user message)
+        if (state.currentConversationId && !state.messages.some((m) => m._hasSummary)) {
+          const firstUser = state.messages.find((m) => m.role === "user" && m.content);
+          if (firstUser) {
+            const rawSummary = (typeof firstUser.content === "string"
+              ? firstUser.content
+              : "").slice(0, 120).replace(/\n/g, " ").trim();
+            if (rawSummary) {
+              api(`/api/conversations/${state.currentConversationId}/summary`, {
+                method: "POST",
+                json: { summary: rawSummary },
+              }).catch(() => {});
+            }
+          }
+        }
         return;
       }
       if (event === "error") {
@@ -2853,6 +3263,7 @@ function switchTab(tabName) {
   if (tabName === "files") renderBundleList();
   if (tabName === "memory") renderMemoryList();
   if (tabName === "scheduled") renderScheduledList();
+  if (tabName === "tools") renderCloudServices();
 }
 
 // ---------------------------------------------------------------------------
@@ -3394,17 +3805,35 @@ function wireEvents() {
   $("#plan-pane-close")?.addEventListener("click", () => setPlanPaneVisible(false));
   $("#files-pane-close")?.addEventListener("click", () => setFilesPaneVisible(false));
 
-  // Conversation search
+  // Conversation search (debounced, uses server-side full-text search)
+  let _searchTimer = null;
   $("#search-toggle-btn")?.addEventListener("click", () => {
     const wrap = $("#conv-search-wrap");
     if (!wrap) return;
     wrap.hidden = !wrap.hidden;
     if (!wrap.hidden) $("#conv-search")?.focus();
-    else { state.convSearchQuery = ""; renderConversationList(); }
+    else {
+      state.convSearchQuery = "";
+      state.convSearchResults = null;
+      renderConversationList();
+    }
   });
   $("#conv-search")?.addEventListener("input", (e) => {
-    state.convSearchQuery = e.target.value;
-    renderConversationList();
+    const q = e.target.value;
+    state.convSearchQuery = q;
+    clearTimeout(_searchTimer);
+    if (!q.trim()) {
+      state.convSearchResults = null;
+      renderConversationList();
+      return;
+    }
+    _searchTimer = setTimeout(async () => {
+      try {
+        const data = await api(`/api/conversations/search?q=${encodeURIComponent(q)}`);
+        state.convSearchResults = data.results || [];
+        renderConversationList();
+      } catch (_) {}
+    }, 250);
   });
 
   // Mode select — persist per-workspace when a workspace is active, otherwise globally
@@ -3449,6 +3878,7 @@ async function init() {
   wireTabs();
   wireEvents();
   initMic();
+  _initAnnotationModal();
   // Load workspaces before config so loadConfig's #mode-select lookup can
   // see the active workspace's stored mode on first paint; otherwise the
   // select would fall back to config.chat_mode until the next config

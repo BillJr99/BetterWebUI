@@ -19,7 +19,6 @@ async callable so it can be unit-tested without the FastAPI app.
 
 from __future__ import annotations
 
-import asyncio
 import base64
 import io
 import json
@@ -376,7 +375,6 @@ async def judge_tool_result(
     if not model:
         return JudgeReport(ok=True, confidence=0.0, skipped=True, skip_reason="No judge model configured.")
     result_summary = _summarise_result_for_judge(tool, result)
-    vision_note = ""
     user_parts: list = []
     prompt = JUDGE_PROMPT.format(
         goal=str(goal or "")[:1500],

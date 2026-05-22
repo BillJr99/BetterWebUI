@@ -1,4 +1,4 @@
-// browser-store.js — IndexedDB-backed storage for file bundles and user
+// browser-store.js - IndexedDB-backed storage for file bundles and user
 // memories. Loaded before app.js. Exposes a small global `bws` namespace.
 //
 // Why IndexedDB rather than localStorage: file bundles can hold large

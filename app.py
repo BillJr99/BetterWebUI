@@ -771,11 +771,25 @@ class MCPManager:
         for name, s in wanted.items():
             if name in self.clients:
                 continue
+            env = dict(s.get("env") or {})
+            # Substitute OAuth access tokens: {oauth.google.access_token} etc.
+            try:
+                from services.oauth import get_oauth_token as _get_oauth_tok
+                for k, v in list(env.items()):
+                    if "{oauth." in str(v):
+                        for provider in ("google", "microsoft"):
+                            placeholder = f"{{oauth.{provider}.access_token}}"
+                            if placeholder in str(v):
+                                tok = _get_oauth_tok(provider, DATA_DIR)
+                                if tok and tok.get("access_token"):
+                                    env[k] = str(v).replace(placeholder, tok["access_token"])
+            except Exception:
+                pass
             client = MCPStdioClient(
                 name=name,
                 command=s.get("command", ""),
                 args=s.get("args", []),
-                env=s.get("env", {}),
+                env=env,
             )
             await client.start()
             self.clients[name] = client
@@ -1002,6 +1016,11 @@ Available tools:
   web search for this turn (the system prompt will say so). Args:
   {"query": "...", "max_results": 5}. Returns a list of
   {title, url, snippet} items.
+
+- fetch_url: download and extract the readable text content of a web page.
+  Useful after web_search to read the full article. Requires user approval
+  unless chat mode is trusted. Args: {"url": "https://..."}.
+  Returns {url, title, text, word_count} or {error: "..."}.
 """.strip()
 
 PLAN_MODE_BLOCK = """
@@ -1657,6 +1676,68 @@ async def call_web_search(query: str, max_results: int, config: dict) -> dict:
         return {"error": f"Unknown web_search provider: {provider}"}
 
 
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+_WHITESPACE_RE = re.compile(r"\s+")
+_HTML_ENTITIES = {"&amp;": "&", "&lt;": "<", "&gt;": ">", "&quot;": '"', "&apos;": "'", "&#39;": "'", "&nbsp;": " "}
+
+
+def _strip_html(raw: str) -> tuple[str, str]:
+    """Return (title, body_text) extracted from HTML. Falls back to raw text."""
+    title = ""
+    title_m = re.search(r"<title[^>]*>(.*?)</title>", raw, re.IGNORECASE | re.DOTALL)
+    if title_m:
+        title = title_m.group(1).strip()
+    # Remove script/style blocks
+    raw = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", raw, flags=re.IGNORECASE | re.DOTALL)
+    # Remove all other tags
+    text = _HTML_TAG_RE.sub(" ", raw)
+    # Decode common HTML entities
+    for ent, ch in _HTML_ENTITIES.items():
+        text = text.replace(ent, ch)
+    text = _WHITESPACE_RE.sub(" ", text).strip()
+    # Clean title entities too
+    for ent, ch in _HTML_ENTITIES.items():
+        title = title.replace(ent, ch)
+    title = _WHITESPACE_RE.sub(" ", title).strip()
+    return title, text
+
+
+async def call_fetch_url(url: str) -> dict:
+    """Fetch a URL and return extracted readable text."""
+    parsed = None
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            return {"error": f"fetch_url only supports http/https URLs (got '{parsed.scheme}')."}
+    except Exception:
+        return {"error": "Invalid URL."}
+    try:
+        async with httpx.AsyncClient(
+            timeout=20.0,
+            follow_redirects=True,
+            headers={"User-Agent": "Mozilla/5.0 BetterWebUI/1.0"},
+        ) as client:
+            resp = await client.get(url)
+        if resp.status_code >= 400:
+            return {"error": f"Server returned {resp.status_code} for {url}."}
+        ct = resp.headers.get("content-type", "")
+        if "html" in ct:
+            title, text = _strip_html(resp.text)
+        else:
+            title, text = "", resp.text
+        max_chars = 12000
+        truncated = len(text) > max_chars
+        return {
+            "url": url,
+            "title": title,
+            "text": text[:max_chars] + (" …[truncated]" if truncated else ""),
+            "word_count": len(text.split()),
+        }
+    except Exception as exc:
+        return {"error": f"Failed to fetch {url}: {exc}"}
+
+
 async def call_openwebui_audio(text: str, voice: str, config: dict) -> dict:
     base = normalize_base_url(config["base_url"])
     profile = active_profile(config)
@@ -2076,6 +2157,25 @@ async def execute_tool(call: dict, config: dict, send_event, mode: str = "approv
         except HTTPException as exc:
             return {"error": exc.detail}
 
+    if tool == "fetch_url":
+        url = (args.get("url") or "").strip()
+        if not url:
+            return {"error": "fetch_url requires a 'url' argument."}
+        if mode != "trusted":
+            aid = approvals.new()
+            await send_event("approval_request", {
+                "approval_id": aid,
+                "tool": "fetch_url",
+                "command": f"Fetch: {url}",
+                "reason": "The assistant wants to download the contents of a web page.",
+                "shell": "",
+            })
+            approved = await approvals.wait(aid)
+            if not approved:
+                return {"error": "User denied fetch_url."}
+        await send_event("tool_running", {"tool": "fetch_url", "url": url})
+        return await call_fetch_url(url)
+
     if tool == "cli_call":
         if not config.get("shell_enabled", True):
             return {"error": "Shell execution is disabled in settings."}
@@ -2382,7 +2482,6 @@ async def _startup() -> None:
 
 @app.on_event("shutdown")
 async def _shutdown() -> None:
-    global _transient_sweep_task, _scheduler_task
     if _transient_sweep_task is not None:
         _transient_sweep_task.cancel()
     if _scheduler_task is not None:
@@ -2874,6 +2973,12 @@ async def export_workspace(request: Request, wid: str):
         cli_data = load_cli_tools()
         cli_items = [c for c in cli_data.get("tools", []) if c["id"] in w.get("active_cli_tools", [])]
         zf.writestr("cli_tools.json", json.dumps({"tools": cli_items}, indent=2))
+        # Bundle manifest (filenames + hashes provided by client via query param)
+        # The actual file bytes are NOT included — the manifest is just metadata so
+        # the recipient knows which bundles existed and can provide the files themselves.
+        bundle_manifest = w.get("bundle_manifest")
+        if bundle_manifest and isinstance(bundle_manifest, list):
+            zf.writestr("bundle_manifest.json", json.dumps(bundle_manifest, indent=2))
     buf.seek(0)
     safe_name = _slug(w["name"], "workspace")
     return Response(
@@ -2881,6 +2986,37 @@ async def export_workspace(request: Request, wid: str):
         media_type="application/zip",
         headers={"Content-Disposition": f'attachment; filename="{safe_name}.bwui"'},
     )
+
+
+@app.post("/api/workspaces/{wid}/bundle-manifest")
+async def set_workspace_bundle_manifest(request: Request, wid: str):
+    """Client posts bundle metadata (filenames + hashes) to be included in exports."""
+    _require_local_caller(request)
+    body = await request.json()
+    manifest = body.get("manifest") if isinstance(body, dict) else None
+    if not isinstance(manifest, list):
+        raise HTTPException(400, "Expected {'manifest': [...]} body.")
+    data = load_workspaces()
+    w = next((x for x in data["workspaces"] if x["id"] == wid), None)
+    if not w:
+        raise HTTPException(404, "Workspace not found")
+    safe_manifest = []
+    for entry in manifest[:200]:
+        if not isinstance(entry, dict):
+            continue
+        safe_manifest.append({
+            "bundle_id": str(entry.get("bundle_id", ""))[:64],
+            "name": str(entry.get("name", ""))[:128],
+            "files": [
+                {"filename": str(f.get("filename", ""))[:256], "sha256": str(f.get("sha256", ""))[:64]}
+                for f in (entry.get("files") or [])[:500]
+                if isinstance(f, dict)
+            ],
+        })
+    idx = next((i for i, x in enumerate(data["workspaces"]) if x["id"] == wid), None)
+    data["workspaces"][idx]["bundle_manifest"] = safe_manifest
+    save_json(WORKSPACES_PATH, data)
+    return {"ok": True, "bundle_count": len(safe_manifest)}
 
 
 _MAX_BUNDLE_BYTES = 10 * 1024 * 1024       # 10 MB compressed
@@ -3630,6 +3766,39 @@ async def memory_extract(body: MemoryExtractIn, request: Request):
     return {"candidates": cleaned}
 
 
+# --- OAuth helper endpoints ---
+
+@app.get("/api/oauth/status/{provider}")
+async def oauth_status(provider: str, request: Request):
+    _require_local_caller(request)
+    from services.oauth import get_oauth_status
+    return get_oauth_status(provider, DATA_DIR)
+
+
+@app.post("/api/oauth/connect/{provider}")
+async def oauth_connect(provider: str, request: Request):
+    """Return an authorization URL for the user to open in their browser."""
+    _require_local_caller(request)
+    cfg = load_config()
+    try:
+        from services.oauth import start_oauth_flow
+        auth_url = await start_oauth_flow(provider, cfg, DATA_DIR)
+        return {"auth_url": auth_url}
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    except Exception as exc:
+        raise HTTPException(500, f"OAuth connect failed: {exc}")
+
+
+@app.delete("/api/oauth/disconnect/{provider}")
+async def oauth_disconnect(provider: str, request: Request):
+    """Remove stored OAuth token."""
+    _require_local_caller(request)
+    from services.oauth import revoke_oauth_token
+    removed = revoke_oauth_token(provider, DATA_DIR)
+    return {"removed": removed}
+
+
 # --- Voice transcription ---
 
 _MAX_TRANSCRIBE_BYTES = 25 * 1024 * 1024  # 25 MB cap for /api/transcribe uploads
@@ -3737,6 +3906,42 @@ async def list_conversations(request: Request):
         })
     summary.sort(key=lambda x: (not x["pinned"], -x["updated_at"]))
     return {"conversations": summary}
+
+
+@app.get("/api/conversations/recent")
+async def recent_conversations(request: Request, limit: int = 3):
+    """Return the most-recently-updated conversations with their one-line summaries."""
+    _require_local_caller(request)
+    data = load_conversations()
+    convs = sorted(
+        [{"id": cid, **conv} for cid, conv in data["conversations"].items()],
+        key=lambda x: -x.get("updated_at", 0),
+    )[:max(1, min(10, limit))]
+    return {"recent": [
+        {
+            "id": c["id"],
+            "title": c.get("title", "Untitled"),
+            "updated_at": c.get("updated_at", 0),
+            "summary": c.get("summary", ""),
+            "message_count": len(c.get("messages", [])),
+        }
+        for c in convs
+    ]}
+
+
+@app.post("/api/conversations/{cid}/summary")
+async def set_conversation_summary(request: Request, cid: str):
+    """Store a one-line summary for a conversation (generated client-side or by the LLM)."""
+    _require_local_caller(request)
+    body = await request.json()
+    summary = str(body.get("summary", ""))[:300].strip()
+    data = load_conversations()
+    conv = data["conversations"].get(cid)
+    if not conv:
+        raise HTTPException(404, "Not found")
+    conv["summary"] = summary
+    save_json(CONVERSATIONS_PATH, data)
+    return {"ok": True}
 
 
 @app.get("/api/conversations/search")

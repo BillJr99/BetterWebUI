@@ -226,6 +226,10 @@
         <div id="mcp-lint-warnings" class="lint-warnings" aria-live="polite" hidden></div>
         <ul id="mcp-server-list" aria-label="MCP servers"></ul>
 
+        <h2>Cloud services</h2>
+        <p class="hint">Connect Google or Microsoft accounts to let the assistant access calendar, mail, and files. OAuth credentials stay on your device.</p>
+        <div id="cloud-services-list" aria-label="Cloud services"></div>
+
         <h2>CLI shortcuts</h2>
         <div class="panel-actions">
           <button id="cli-from-registry-btn" class="primary">+ Add from registry</button>
@@ -470,6 +474,30 @@
     </aside>
 
     <div id="dialog-root" role="region" aria-label="Dialogs" aria-live="assertive"></div>
+
+    <!-- Image annotation modal -->
+    <div id="annotation-modal" class="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="annotation-title" hidden>
+      <div class="modal-box annotation-box">
+        <h2 id="annotation-title">Annotate image</h2>
+        <p class="hint">Draw to highlight areas of interest. Select a tool, then click and drag on the image.</p>
+        <div id="annotation-toolbar" class="annotation-toolbar">
+          <button class="anno-tool-btn active" data-tool="freehand" title="Freehand pen">&#9998;</button>
+          <button class="anno-tool-btn" data-tool="rect" title="Rectangle">&#9635;</button>
+          <button class="anno-tool-btn" data-tool="arrow" title="Arrow">&#10137;</button>
+          <input type="color" id="anno-color" value="#ff3b30" title="Color" />
+          <input type="range" id="anno-size" min="1" max="20" value="3" title="Brush size" style="width:80px" />
+          <button id="anno-undo-btn" title="Undo last stroke">&#8617;</button>
+          <button id="anno-clear-btn" title="Clear all annotations">&#128465;</button>
+        </div>
+        <div id="annotation-canvas-wrap" style="position:relative;display:inline-block;max-width:100%;overflow:auto">
+          <canvas id="annotation-canvas" style="cursor:crosshair;display:block;max-width:100%"></canvas>
+        </div>
+        <div class="modal-actions">
+          <button id="anno-apply-btn" class="primary">Use annotated image</button>
+          <button id="anno-cancel-btn">Cancel</button>
+        </div>
+      </div>
+    </div>
 
     <template id="message-template">
       <div class="message">
