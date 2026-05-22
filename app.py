@@ -14,6 +14,7 @@ import ipaddress
 import json
 import os
 import platform
+import re
 import shutil
 import time
 import uuid
@@ -31,6 +32,8 @@ from fastapi.responses import FileResponse, StreamingResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+import verification as _verification
+
 ROOT = Path(__file__).parent.resolve()
 DATA_DIR = ROOT / "data"
 SKILLS_DIR = ROOT / "skills"
@@ -44,6 +47,7 @@ WORKSPACES_PATH = DATA_DIR / "workspaces.json"
 MCP_PATH = DATA_DIR / "mcp_servers.json"
 CLI_PATH = DATA_DIR / "cli_tools.json"
 BRANDING_PATH = DATA_DIR / "branding.json"
+SCHEDULED_TASKS_PATH = DATA_DIR / "scheduled_tasks.json"
 
 # WORKSPACE_DIR is the default directory for shell execution and file I/O.
 # Set via the WORKSPACE_DIR environment variable (Docker mounts a host folder
@@ -142,6 +146,26 @@ def load_config() -> dict:
             "chat_mode": "approve-each",
             "onboarding_done": False,
             "display": {},
+            "verification": {
+                "enabled": True,
+                "mode": "validators_only",
+                "retries": 1,
+                "judge_model": "",
+                "judge_confidence_threshold": 0.7,
+                "tools": {
+                    "generate_image": True,
+                    "generate_audio": True,
+                    "autogui_task": True,
+                    "execute_shell": False,
+                    "write_file": True,
+                    "mcp_call": False,
+                },
+            },
+            "web_search": {
+                "provider": "",         # "tavily" | "brave" | "serpapi" | "custom" | ""
+                "api_key": "",
+                "custom_url": "",
+            },
         },
     )
 
@@ -360,6 +384,145 @@ MCP_REGISTRY: list[dict] = [
         "args_template": ["mcp-server-time"],
         "fields": [],
         "requires": "Python with uv installed.",
+    },
+    # ---- Cloud services (community-maintained MCP servers) ----
+    {
+        "id": "gdrive",
+        "name": "Google Drive",
+        "description": "Browse, search, and read files from Google Drive.",
+        "homepage": "https://github.com/modelcontextprotocol/servers-archived/tree/main/src/gdrive",
+        "command": "npx",
+        "args_template": ["-y", "@modelcontextprotocol/server-gdrive"],
+        "env_template": {
+            "GDRIVE_CREDENTIALS_PATH": "{credentials_path}",
+        },
+        "fields": [
+            {"name": "credentials_path", "label": "Path to gcp-oauth.keys.json", "type": "path"},
+        ],
+        "requires": "Node.js plus a Google Cloud OAuth credentials JSON. Run the server once interactively to mint a refresh token.",
+        "category": "cloud",
+    },
+    {
+        "id": "google-workspace",
+        "name": "Google Workspace",
+        "description": "Read Gmail, manage Google Calendar events, and search Drive in one server.",
+        "homepage": "https://github.com/taylorwilsdon/google_workspace_mcp",
+        "command": "uvx",
+        "args_template": ["google-workspace-mcp"],
+        "env_template": {
+            "GOOGLE_OAUTH_CLIENT_ID": "{client_id}",
+            "GOOGLE_OAUTH_CLIENT_SECRET": "{client_secret}",
+        },
+        "fields": [
+            {"name": "client_id", "label": "Google OAuth client ID", "type": "text"},
+            {"name": "client_secret", "label": "Google OAuth client secret", "type": "password"},
+        ],
+        "requires": "Python with uv installed plus a Google Cloud OAuth client. Follow the server's README for the consent-screen setup.",
+        "category": "cloud",
+    },
+    {
+        "id": "microsoft-graph",
+        "name": "Microsoft 365 (Graph)",
+        "description": "Outlook mail, calendar, OneDrive, SharePoint, and Teams via Microsoft Graph.",
+        "homepage": "https://github.com/softeria/ms-365-mcp-server",
+        "command": "npx",
+        "args_template": ["-y", "@softeria/ms-365-mcp-server"],
+        "env_template": {
+            "MS365_MCP_CLIENT_ID": "{client_id}",
+            "MS365_MCP_TENANT_ID": "{tenant_id}",
+        },
+        "fields": [
+            {"name": "client_id", "label": "Azure AD app client ID", "type": "text"},
+            {"name": "tenant_id", "label": "Tenant ID (or 'common')", "type": "text"},
+        ],
+        "requires": "Node.js plus an Azure AD app registration with Microsoft Graph delegated permissions.",
+        "category": "cloud",
+    },
+    {
+        "id": "slack",
+        "name": "Slack",
+        "description": "Read channels, post messages, search history.",
+        "homepage": "https://github.com/modelcontextprotocol/servers-archived/tree/main/src/slack",
+        "command": "npx",
+        "args_template": ["-y", "@modelcontextprotocol/server-slack"],
+        "env_template": {
+            "SLACK_BOT_TOKEN": "{bot_token}",
+            "SLACK_TEAM_ID": "{team_id}",
+        },
+        "fields": [
+            {"name": "bot_token", "label": "Slack bot token (xoxb-...)", "type": "password"},
+            {"name": "team_id", "label": "Slack team / workspace ID", "type": "text"},
+        ],
+        "requires": "Node.js plus a Slack app installed in your workspace with the required scopes.",
+        "category": "cloud",
+    },
+    {
+        "id": "notion",
+        "name": "Notion",
+        "description": "Search, read, and update Notion pages and databases.",
+        "homepage": "https://github.com/makenotion/notion-mcp-server",
+        "command": "npx",
+        "args_template": ["-y", "@notionhq/notion-mcp-server"],
+        "env_template": {
+            "OPENAPI_MCP_HEADERS": "{headers_json}",
+        },
+        "fields": [
+            {"name": "headers_json", "label": "Headers JSON (e.g. {\"Authorization\":\"Bearer ntn_...\",\"Notion-Version\":\"2022-06-28\"})", "type": "password"},
+        ],
+        "requires": "Node.js plus a Notion integration token with workspace access.",
+        "category": "cloud",
+    },
+    {
+        "id": "linear",
+        "name": "Linear",
+        "description": "Browse and update Linear issues, projects, and cycles.",
+        "homepage": "https://github.com/jerhadf/linear-mcp-server",
+        "command": "npx",
+        "args_template": ["-y", "linear-mcp-server"],
+        "env_template": {
+            "LINEAR_API_KEY": "{api_key}",
+        },
+        "fields": [
+            {"name": "api_key", "label": "Linear personal API key", "type": "password"},
+        ],
+        "requires": "Node.js plus a Linear API key from Settings → API.",
+        "category": "cloud",
+    },
+    {
+        "id": "asana",
+        "name": "Asana",
+        "description": "Read and update Asana tasks, projects, and workspaces.",
+        "homepage": "https://github.com/cristip73/mcp-server-asana",
+        "command": "npx",
+        "args_template": ["-y", "@cristip73/mcp-server-asana"],
+        "env_template": {
+            "ASANA_ACCESS_TOKEN": "{access_token}",
+        },
+        "fields": [
+            {"name": "access_token", "label": "Asana personal access token", "type": "password"},
+        ],
+        "requires": "Node.js plus an Asana personal access token from My Settings → Apps.",
+        "category": "cloud",
+    },
+    {
+        "id": "jira",
+        "name": "Jira",
+        "description": "Search, read, and update Jira issues.",
+        "homepage": "https://github.com/sooperset/mcp-atlassian",
+        "command": "uvx",
+        "args_template": ["mcp-atlassian"],
+        "env_template": {
+            "JIRA_URL": "{jira_url}",
+            "JIRA_USERNAME": "{username}",
+            "JIRA_API_TOKEN": "{api_token}",
+        },
+        "fields": [
+            {"name": "jira_url", "label": "Jira base URL (e.g. https://acme.atlassian.net)", "type": "text"},
+            {"name": "username", "label": "Atlassian account email", "type": "text"},
+            {"name": "api_token", "label": "Atlassian API token", "type": "password"},
+        ],
+        "requires": "Python with uv installed plus an Atlassian API token.",
+        "category": "cloud",
     },
 ]
 
@@ -608,11 +771,25 @@ class MCPManager:
         for name, s in wanted.items():
             if name in self.clients:
                 continue
+            env = dict(s.get("env") or {})
+            # Substitute OAuth access tokens: {oauth.google.access_token} etc.
+            try:
+                from services.oauth import get_oauth_token as _get_oauth_tok
+                for k, v in list(env.items()):
+                    if "{oauth." in str(v):
+                        for provider in ("google", "microsoft"):
+                            placeholder = f"{{oauth.{provider}.access_token}}"
+                            if placeholder in str(v):
+                                tok = _get_oauth_tok(provider, DATA_DIR)
+                                if tok and tok.get("access_token"):
+                                    env[k] = str(v).replace(placeholder, tok["access_token"])
+            except Exception:
+                pass
             client = MCPStdioClient(
                 name=name,
                 command=s.get("command", ""),
                 args=s.get("args", []),
-                env=s.get("env", {}),
+                env=env,
             )
             await client.start()
             self.clients[name] = client
@@ -834,6 +1011,16 @@ Available tools:
 - cli_call: run one of the user's pre-registered CLI shortcuts. Routes
   through execute_shell with approval (unless the shortcut has always-allow
   policy). Args: {"id": "shortcut_id", "args": "command-line arguments"}.
+
+- web_search: search the public web. Use only when the user has enabled
+  web search for this turn (the system prompt will say so). Args:
+  {"query": "...", "max_results": 5}. Returns a list of
+  {title, url, snippet} items.
+
+- fetch_url: download and extract the readable text content of a web page.
+  Useful after web_search to read the full article. Requires user approval
+  unless chat mode is trusted. Args: {"url": "https://..."}.
+  Returns {url, title, text, word_count} or {error: "..."}.
 """.strip()
 
 PLAN_MODE_BLOCK = """
@@ -929,7 +1116,15 @@ def resolve_active_workspace(config: dict) -> Optional[dict]:
     return next((w for w in data["workspaces"] if w["id"] == wid), None)
 
 
-def build_system_prompt(config: dict, prompts: dict, mode: str = "approve-each") -> str:
+def build_system_prompt(
+    config: dict,
+    prompts: dict,
+    mode: str = "approve-each",
+    *,
+    user_memories: Optional[list[str]] = None,
+    use_vision: bool = False,
+    web_search_mode: str = "off",
+) -> str:
     parts: list[str] = []
     workspace = resolve_active_workspace(config)
 
@@ -946,6 +1141,35 @@ def build_system_prompt(config: dict, prompts: dict, mode: str = "approve-each")
         parts.append(
             f"Active workspace: {workspace['name']}."
             + (f" {workspace['description']}" if workspace.get("description") else "")
+        )
+
+    # User memories — durable preferences/facts/constraints stored client-side
+    # in the browser and injected here on every turn. Subject to context trim.
+    if user_memories:
+        cleaned = [m.strip() for m in user_memories if isinstance(m, str) and m.strip()]
+        if cleaned:
+            parts.append(
+                "Things to remember about the user:\n"
+                + "\n".join(f"- {m}" for m in cleaned[:50])  # hard cap so a runaway list can't blow the budget
+            )
+
+    # Per-turn capability hints
+    if use_vision:
+        parts.append(
+            "The user has explicitly asked you to USE VISION on this turn. "
+            "If any images are attached, analyse them in detail and incorporate "
+            "what you see into your reply."
+        )
+    if web_search_mode == "required":
+        parts.append(
+            "The user requires web search on this turn. You MUST call the "
+            "web_search tool before answering so your reply reflects current "
+            "information."
+        )
+    elif web_search_mode == "if_needed":
+        parts.append(
+            "If answering accurately requires current or specialised information "
+            "you don't have, call the web_search tool first."
         )
 
     # Plan mode block (injected before other tools if active)
@@ -1286,6 +1510,36 @@ def _get_checkpoint(workspace_id: str, filename: str, ckpt_id: str) -> Optional[
 # OpenWebUI proxy helpers
 # ---------------------------------------------------------------------------
 
+def _sniff_image_mime(raw: bytes) -> Optional[str]:
+    """Magic-byte sniff. Returns canonical image mime or None for unrecognised bytes."""
+    if len(raw) < 12:
+        return None
+    if raw.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if raw[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if raw[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    if raw[:4] == b"RIFF" and raw[8:12] == b"WEBP":
+        return "image/webp"
+    if raw[:2] == b"BM":
+        return "image/bmp"
+    return None
+
+
+def validate_image_bytes(raw: bytes, min_bytes: int = 64) -> tuple[bool, str, Optional[str]]:
+    """Return (ok, reason, sniffed_mime). Cheap deterministic check used to
+    detect broken image renders before they reach the UI as broken-link icons."""
+    if not raw:
+        return False, "Empty image payload.", None
+    if len(raw) < min_bytes:
+        return False, f"Image payload too small ({len(raw)} bytes).", None
+    mime = _sniff_image_mime(raw)
+    if mime is None:
+        return False, "Image bytes do not match any known image format.", None
+    return True, "", mime
+
+
 async def call_openwebui_image(prompt: str, size: str, config: dict) -> dict:
     base = normalize_base_url(config["base_url"])
     profile = active_profile(config)
@@ -1304,20 +1558,184 @@ async def call_openwebui_image(prompt: str, size: str, config: dict) -> dict:
         item = (body.get("data") or [{}])[0] if isinstance(body, dict) else {}
     filename = f"{_slug(prompt)}-{uuid.uuid4().hex[:6]}.png"
     if "b64_json" in item:
-        return {"filename": filename, "mime": "image/png", "data_b64": item["b64_json"], "prompt": prompt}
+        try:
+            raw = base64.b64decode(item["b64_json"], validate=False)
+        except Exception as exc:
+            return {"error": f"Image generation returned undecodable base64: {exc}", "prompt": prompt}
+        ok, reason, sniffed = validate_image_bytes(raw)
+        if not ok:
+            return {"error": f"Image generation returned invalid data: {reason}", "prompt": prompt}
+        return {
+            "filename": filename,
+            "mime": sniffed or "image/png",
+            "data_b64": item["b64_json"],
+            "prompt": prompt,
+        }
     if "url" in item:
         async with httpx.AsyncClient(timeout=180.0) as client:
             img_resp = await client.get(item["url"])
         if img_resp.status_code != 200:
-            return {"error": f"Could not fetch generated image at {item['url']}"}
+            return {"error": f"Could not fetch generated image at {item['url']} (HTTP {img_resp.status_code})."}
+        ok, reason, sniffed = validate_image_bytes(img_resp.content)
+        if not ok:
+            return {"error": f"Image generation returned invalid data: {reason}", "prompt": prompt}
         return {
             "filename": filename,
-            "mime": img_resp.headers.get("content-type", "image/png"),
+            "mime": sniffed or img_resp.headers.get("content-type", "image/png"),
             "data_b64": base64.b64encode(img_resp.content).decode("ascii"),
             "prompt": prompt,
             "source_url": item["url"],
         }
-    return {"raw": body}
+    return {"raw": body, "error": "Image generation response had neither b64_json nor url."}
+
+
+async def call_web_search(query: str, max_results: int, config: dict) -> dict:
+    """Dispatch to the configured web-search provider. Returns a dict with
+    keys: query, provider, results=[{title, url, snippet}], or {error: ...}.
+    """
+    web = (config or {}).get("web_search") or {}
+    provider = (web.get("provider") or "").lower()
+    api_key = web.get("api_key") or ""
+    if not provider:
+        return {"error": "Web search is not configured. Settings → Connection → Web search."}
+
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        if provider == "tavily":
+            if not api_key:
+                return {"error": "Tavily requires an API key (Settings → Connection → Web search)."}
+            resp = await client.post(
+                "https://api.tavily.com/search",
+                json={
+                    "api_key": api_key,
+                    "query": query,
+                    "max_results": max_results,
+                    "search_depth": "basic",
+                },
+            )
+            if resp.status_code != 200:
+                return {"error": f"Tavily search failed ({resp.status_code}): {resp.text[:300]}"}
+            body = resp.json()
+            results = [
+                {"title": r.get("title", ""), "url": r.get("url", ""), "snippet": r.get("content", "")}
+                for r in (body.get("results") or [])[:max_results]
+            ]
+            return {"query": query, "provider": "tavily", "results": results}
+
+        if provider == "brave":
+            if not api_key:
+                return {"error": "Brave Search requires an API key."}
+            resp = await client.get(
+                "https://api.search.brave.com/res/v1/web/search",
+                params={"q": query, "count": max_results},
+                headers={"X-Subscription-Token": api_key, "Accept": "application/json"},
+            )
+            if resp.status_code != 200:
+                return {"error": f"Brave search failed ({resp.status_code}): {resp.text[:300]}"}
+            body = resp.json()
+            results = [
+                {"title": r.get("title", ""), "url": r.get("url", ""), "snippet": r.get("description", "")}
+                for r in ((body.get("web") or {}).get("results") or [])[:max_results]
+            ]
+            return {"query": query, "provider": "brave", "results": results}
+
+        if provider == "serpapi":
+            if not api_key:
+                return {"error": "SerpAPI requires an API key."}
+            resp = await client.get(
+                "https://serpapi.com/search.json",
+                params={"q": query, "engine": "google", "num": max_results, "api_key": api_key},
+            )
+            if resp.status_code != 200:
+                return {"error": f"SerpAPI search failed ({resp.status_code}): {resp.text[:300]}"}
+            body = resp.json()
+            results = [
+                {"title": r.get("title", ""), "url": r.get("link", ""), "snippet": r.get("snippet", "")}
+                for r in (body.get("organic_results") or [])[:max_results]
+            ]
+            return {"query": query, "provider": "serpapi", "results": results}
+
+        if provider == "custom":
+            url = web.get("custom_url") or ""
+            if not url:
+                return {"error": "Custom web search needs a 'custom_url' in settings."}
+            headers = {}
+            if api_key:
+                headers["Authorization"] = f"Bearer {api_key}"
+            resp = await client.post(url, json={"query": query, "max_results": max_results}, headers=headers)
+            if resp.status_code != 200:
+                return {"error": f"Custom search failed ({resp.status_code}): {resp.text[:300]}"}
+            try:
+                body = resp.json()
+            except Exception:
+                return {"error": "Custom search returned non-JSON."}
+            results = body.get("results") if isinstance(body, dict) else body
+            if not isinstance(results, list):
+                return {"error": "Custom search did not return a 'results' list."}
+            return {"query": query, "provider": "custom", "results": results[:max_results]}
+
+        return {"error": f"Unknown web_search provider: {provider}"}
+
+
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+_WHITESPACE_RE = re.compile(r"\s+")
+_HTML_ENTITIES = {"&amp;": "&", "&lt;": "<", "&gt;": ">", "&quot;": '"', "&apos;": "'", "&#39;": "'", "&nbsp;": " "}
+
+
+def _strip_html(raw: str) -> tuple[str, str]:
+    """Return (title, body_text) extracted from HTML. Falls back to raw text."""
+    title = ""
+    title_m = re.search(r"<title[^>]*>(.*?)</title>", raw, re.IGNORECASE | re.DOTALL)
+    if title_m:
+        title = title_m.group(1).strip()
+    # Remove script/style blocks
+    raw = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", raw, flags=re.IGNORECASE | re.DOTALL)
+    # Remove all other tags
+    text = _HTML_TAG_RE.sub(" ", raw)
+    # Decode common HTML entities
+    for ent, ch in _HTML_ENTITIES.items():
+        text = text.replace(ent, ch)
+    text = _WHITESPACE_RE.sub(" ", text).strip()
+    # Clean title entities too
+    for ent, ch in _HTML_ENTITIES.items():
+        title = title.replace(ent, ch)
+    title = _WHITESPACE_RE.sub(" ", title).strip()
+    return title, text
+
+
+async def call_fetch_url(url: str) -> dict:
+    """Fetch a URL and return extracted readable text."""
+    parsed = None
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            return {"error": f"fetch_url only supports http/https URLs (got '{parsed.scheme}')."}
+    except Exception:
+        return {"error": "Invalid URL."}
+    try:
+        async with httpx.AsyncClient(
+            timeout=20.0,
+            follow_redirects=True,
+            headers={"User-Agent": "Mozilla/5.0 BetterWebUI/1.0"},
+        ) as client:
+            resp = await client.get(url)
+        if resp.status_code >= 400:
+            return {"error": f"Server returned {resp.status_code} for {url}."}
+        ct = resp.headers.get("content-type", "")
+        if "html" in ct:
+            title, text = _strip_html(resp.text)
+        else:
+            title, text = "", resp.text
+        max_chars = 12000
+        truncated = len(text) > max_chars
+        return {
+            "url": url,
+            "title": title,
+            "text": text[:max_chars] + (" …[truncated]" if truncated else ""),
+            "word_count": len(text.split()),
+        }
+    except Exception as exc:
+        return {"error": f"Failed to fetch {url}: {exc}"}
 
 
 async def call_openwebui_audio(text: str, voice: str, config: dict) -> dict:
@@ -1725,6 +2143,39 @@ async def execute_tool(call: dict, config: dict, send_event, mode: str = "approv
             return {"error": "mcp_call requires both 'server' and 'name'."}
         return await mcp_manager.call(server, name, arguments)
 
+    if tool == "web_search":
+        query = (args.get("query") or "").strip()
+        if not query:
+            return {"error": "web_search requires a 'query' argument."}
+        try:
+            max_results = int(args.get("max_results") or 5)
+        except Exception:
+            max_results = 5
+        max_results = max(1, min(10, max_results))
+        try:
+            return await call_web_search(query, max_results, config)
+        except HTTPException as exc:
+            return {"error": exc.detail}
+
+    if tool == "fetch_url":
+        url = (args.get("url") or "").strip()
+        if not url:
+            return {"error": "fetch_url requires a 'url' argument."}
+        if mode != "trusted":
+            aid = approvals.new()
+            await send_event("approval_request", {
+                "approval_id": aid,
+                "tool": "fetch_url",
+                "command": f"Fetch: {url}",
+                "reason": "The assistant wants to download the contents of a web page.",
+                "shell": "",
+            })
+            approved = await approvals.wait(aid)
+            if not approved:
+                return {"error": "User denied fetch_url."}
+        await send_event("tool_running", {"tool": "fetch_url", "url": url})
+        return await call_fetch_url(url)
+
     if tool == "cli_call":
         if not config.get("shell_enabled", True):
             return {"error": "Shell execution is disabled in settings."}
@@ -1987,16 +2438,54 @@ async def fetch_models(config: dict) -> list[dict]:
 app = FastAPI(title="BetterWebUI")
 
 
+_transient_sweep_task: Optional[asyncio.Task] = None
+_scheduler_task: Optional[asyncio.Task] = None
+
+
+async def _transient_sweep_loop() -> None:
+    """Background loop: sweep stale transient uploads every hour."""
+    while True:
+        try:
+            removed = _sweep_transient_uploads()
+            if removed:
+                logging.getLogger("betterwebui.uploads").info(
+                    "Swept %d stale transient upload directories.", removed,
+                )
+        except Exception as exc:
+            logging.getLogger("betterwebui.uploads").warning("Sweep failed: %s", exc)
+        await asyncio.sleep(3600)
+
+
 @app.on_event("startup")
 async def _startup() -> None:
+    global _transient_sweep_task, _scheduler_task
     try:
         await mcp_manager.reconcile()
     except Exception as exc:
         print(f"[BetterWebUI] MCP startup error: {exc}")
+    # One sweep at boot so test fixtures get a clean state.
+    try:
+        _sweep_transient_uploads()
+    except Exception:
+        pass
+    _transient_sweep_task = asyncio.create_task(_transient_sweep_loop())
+    try:
+        from scheduler import start_scheduler
+        _scheduler_task = asyncio.create_task(start_scheduler(
+            tasks_path=SCHEDULED_TASKS_PATH,
+            run_callback=_run_scheduled_task,
+            send_notification=_emit_scheduled_notification,
+        ))
+    except Exception as exc:
+        logging.getLogger("betterwebui.scheduler").warning("Scheduler failed to start: %s", exc)
 
 
 @app.on_event("shutdown")
 async def _shutdown() -> None:
+    if _transient_sweep_task is not None:
+        _transient_sweep_task.cancel()
+    if _scheduler_task is not None:
+        _scheduler_task.cancel()
     for client in list(mcp_manager.clients.values()):
         try:
             await client.stop()
@@ -2030,6 +2519,8 @@ class ConfigPatch(BaseModel):
     chat_mode: Optional[str] = None
     onboarding_done: Optional[bool] = None
     display: Optional[dict] = None
+    verification: Optional[dict] = None
+    web_search: Optional[dict] = None
 
 
 def _public_config(cfg: dict, include_paths: bool = False) -> dict:
@@ -2482,6 +2973,12 @@ async def export_workspace(request: Request, wid: str):
         cli_data = load_cli_tools()
         cli_items = [c for c in cli_data.get("tools", []) if c["id"] in w.get("active_cli_tools", [])]
         zf.writestr("cli_tools.json", json.dumps({"tools": cli_items}, indent=2))
+        # Bundle manifest (filenames + hashes provided by client via query param)
+        # The actual file bytes are NOT included — the manifest is just metadata so
+        # the recipient knows which bundles existed and can provide the files themselves.
+        bundle_manifest = w.get("bundle_manifest")
+        if bundle_manifest and isinstance(bundle_manifest, list):
+            zf.writestr("bundle_manifest.json", json.dumps(bundle_manifest, indent=2))
     buf.seek(0)
     safe_name = _slug(w["name"], "workspace")
     return Response(
@@ -2489,6 +2986,37 @@ async def export_workspace(request: Request, wid: str):
         media_type="application/zip",
         headers={"Content-Disposition": f'attachment; filename="{safe_name}.bwui"'},
     )
+
+
+@app.post("/api/workspaces/{wid}/bundle-manifest")
+async def set_workspace_bundle_manifest(request: Request, wid: str):
+    """Client posts bundle metadata (filenames + hashes) to be included in exports."""
+    _require_local_caller(request)
+    body = await request.json()
+    manifest = body.get("manifest") if isinstance(body, dict) else None
+    if not isinstance(manifest, list):
+        raise HTTPException(400, "Expected {'manifest': [...]} body.")
+    data = load_workspaces()
+    w = next((x for x in data["workspaces"] if x["id"] == wid), None)
+    if not w:
+        raise HTTPException(404, "Workspace not found")
+    safe_manifest = []
+    for entry in manifest[:200]:
+        if not isinstance(entry, dict):
+            continue
+        safe_manifest.append({
+            "bundle_id": str(entry.get("bundle_id", ""))[:64],
+            "name": str(entry.get("name", ""))[:128],
+            "files": [
+                {"filename": str(f.get("filename", ""))[:256], "sha256": str(f.get("sha256", ""))[:64]}
+                for f in (entry.get("files") or [])[:500]
+                if isinstance(f, dict)
+            ],
+        })
+    idx = next((i for i, x in enumerate(data["workspaces"]) if x["id"] == wid), None)
+    data["workspaces"][idx]["bundle_manifest"] = safe_manifest
+    save_json(WORKSPACES_PATH, data)
+    return {"ok": True, "bundle_count": len(safe_manifest)}
 
 
 _MAX_BUNDLE_BYTES = 10 * 1024 * 1024       # 10 MB compressed
@@ -2994,6 +3522,283 @@ async def upload_file(file: UploadFile = File(...)):
     return {"url": f"/uploads/{safe_name}", "filename": file.filename, "content_type": file.content_type}
 
 
+# --- Transient uploads (per-chat, TTL-swept). Used for file bundles that
+# live in browser IndexedDB and are streamed up only for the duration of
+# the chat turn — keeps sensitive bytes off the server long-term.
+
+_TRANSIENT_TTL_SECONDS = 24 * 3600
+
+
+def _transient_root() -> Path:
+    """Resolve the transient-uploads directory lazily from the current
+    UPLOADS_DIR. Lazy resolution lets test fixtures rebind UPLOADS_DIR
+    without these endpoints pointing at the stale module-load value."""
+    root = UPLOADS_DIR / "transient"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _sweep_transient_uploads() -> int:
+    """Delete transient-upload chat directories older than the TTL.
+    Returns the count of directories removed. Safe to call on a timer."""
+    cutoff = time.time() - _TRANSIENT_TTL_SECONDS
+    removed = 0
+    try:
+        for chat_dir in _transient_root().iterdir():
+            if not chat_dir.is_dir():
+                continue
+            try:
+                if chat_dir.stat().st_mtime < cutoff:
+                    shutil.rmtree(chat_dir, ignore_errors=True)
+                    removed += 1
+            except Exception:
+                continue
+    except FileNotFoundError:
+        pass
+    return removed
+
+
+@app.post("/api/uploads/transient")
+async def upload_transient_file(request: Request, file: UploadFile = File(...)):
+    """Accept a file scoped to a single chat. Files older than the TTL
+    are swept automatically. The caller passes chat_id as a query param."""
+    _require_local_caller(request)
+    chat_id = request.query_params.get("chat_id") or "anon"
+    # Sanitize chat_id: alphanumeric / dash / underscore only.
+    chat_id = re.sub(r"[^A-Za-z0-9_-]+", "_", chat_id)[:64].strip("._-") or "anon"
+    chat_dir = _transient_root() / chat_id
+    chat_dir.mkdir(parents=True, exist_ok=True)
+    safe_name = f"{uuid.uuid4().hex}_{Path(file.filename or 'file').name}"
+    dest = chat_dir / safe_name
+    async with aiofiles.open(dest, "wb") as f:
+        while chunk := await file.read(1024 * 64):
+            await f.write(chunk)
+    return {
+        "url": f"/uploads/transient/{chat_id}/{safe_name}",
+        "filename": file.filename,
+        "content_type": file.content_type,
+    }
+
+
+@app.delete("/api/uploads/transient/{chat_id}")
+async def delete_transient_chat(chat_id: str, request: Request):
+    _require_local_caller(request)
+    chat_id = re.sub(r"[^A-Za-z0-9_-]+", "_", chat_id)[:64].strip("._-")
+    if not chat_id:
+        raise HTTPException(400, "Invalid chat_id.")
+    chat_dir = _transient_root() / chat_id
+    if chat_dir.exists():
+        shutil.rmtree(chat_dir, ignore_errors=True)
+    return {"ok": True, "chat_id": chat_id}
+
+
+# --- Scheduled tasks ---
+
+# Queue of pending scheduled-task notifications. The /api/scheduled-tasks/notifications/stream
+# SSE endpoint drains this and pushes to the browser; once delivered the
+# in-memory list is cleared. We persist nothing — recently-missed
+# notifications can still be read from each task's history field.
+_scheduled_notifications: list[dict] = []
+
+
+async def _emit_scheduled_notification(task: dict, result: dict) -> None:
+    _scheduled_notifications.append({
+        "id": task.get("id"),
+        "name": task.get("name"),
+        "ok": bool(result.get("ok", True)),
+        "summary": (result.get("summary") or "")[:500],
+        "ts": time.time(),
+    })
+
+
+async def _run_scheduled_task(task: dict) -> dict:
+    """Execute a scheduled task by running its prompt through the same code
+    path as /api/chat. Returns {ok, summary}."""
+    cfg = load_config()
+    if not cfg.get("api_key") or not cfg.get("base_url"):
+        return {"ok": False, "summary": "BetterWebUI is not connected to a backend."}
+    # Honour the task's workspace if it specifies one.
+    if task.get("workspace_id"):
+        cfg = dict(cfg)
+        cfg["active_workspace_id"] = task["workspace_id"]
+    prompts = load_prompts()
+    model = cfg.get("default_model") or ""
+    if not model:
+        return {"ok": False, "summary": "No default model configured."}
+    system_prompt = build_system_prompt(cfg, prompts, mode="trusted")
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": (task.get("prompt") or "").strip() or "(no prompt)"},
+    ]
+    try:
+        text, _usage = await chat_complete(messages, model, cfg)
+    except Exception as exc:
+        return {"ok": False, "summary": f"LLM call failed: {exc}"}
+    return {"ok": True, "summary": (text or "").strip()[:1000]}
+
+
+class ScheduledTaskIn(BaseModel):
+    id: Optional[str] = None
+    name: str
+    prompt: str
+    workspace_id: Optional[str] = ""
+    schedule: dict
+    enabled: Optional[bool] = True
+
+
+@app.get("/api/scheduled-tasks")
+async def list_scheduled_tasks(request: Request):
+    _require_local_caller(request)
+    from scheduler import list_tasks
+    return {"tasks": list_tasks(SCHEDULED_TASKS_PATH)}
+
+
+@app.post("/api/scheduled-tasks")
+async def create_or_update_scheduled_task(body: ScheduledTaskIn, request: Request):
+    _require_local_caller(request)
+    from scheduler import upsert_task
+    task = body.model_dump()
+    if not task.get("id"):
+        task["id"] = uuid.uuid4().hex
+    task.setdefault("history", [])
+    task.setdefault("last_run_at", None)
+    return upsert_task(SCHEDULED_TASKS_PATH, task)
+
+
+@app.delete("/api/scheduled-tasks/{task_id}")
+async def delete_scheduled_task(task_id: str, request: Request):
+    _require_local_caller(request)
+    from scheduler import delete_task
+    ok = delete_task(SCHEDULED_TASKS_PATH, task_id)
+    if not ok:
+        raise HTTPException(404, "Task not found.")
+    return {"ok": True}
+
+
+@app.get("/api/verification/{chat_id}")
+async def get_verification_log(chat_id: str, request: Request):
+    """Return verification trace entries for a chat (one per tool call)."""
+    _require_local_caller(request)
+    chat_id = re.sub(r"[^A-Za-z0-9_-]+", "_", chat_id)[:128].strip("._-")
+    if not chat_id:
+        raise HTTPException(400, "Invalid chat_id.")
+    path = DATA_DIR / "verification" / f"{chat_id}.jsonl"
+    if not path.exists():
+        return {"entries": []}
+    entries: list[dict] = []
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entries.append(json.loads(line))
+                except Exception:
+                    continue
+    except Exception as exc:
+        raise HTTPException(500, f"Could not read verification log: {exc}")
+    return {"entries": entries}
+
+
+@app.get("/api/scheduled-tasks/notifications")
+async def drain_scheduled_notifications(request: Request):
+    """Poll-style: returns and clears pending notifications. The frontend
+    polls this on a short interval rather than holding an SSE open."""
+    _require_local_caller(request)
+    pending = list(_scheduled_notifications)
+    _scheduled_notifications.clear()
+    return {"notifications": pending}
+
+
+# --- Memory extraction (client-side stored, server only synthesizes). ---
+
+class MemoryExtractIn(BaseModel):
+    user_message: str
+    assistant_message: str
+    model: Optional[str] = None
+
+
+@app.post("/api/memory/extract")
+async def memory_extract(body: MemoryExtractIn, request: Request):
+    _require_local_caller(request)
+    cfg = load_config()
+    model = body.model or cfg.get("default_model") or ""
+    if not model or not cfg.get("api_key") or not cfg.get("base_url"):
+        return {"candidates": []}
+    user_msg = (body.user_message or "")[:4000]
+    assistant_msg = (body.assistant_message or "")[:2000]
+    extraction_prompt = (
+        "Examine this single user message and identify any DURABLE preferences, "
+        "facts, or constraints the user revealed that would help in future chats. "
+        "Examples of good memories: 'User is vegetarian', 'User prefers Python', "
+        "'User's company is named Acme'. Skip ephemeral things like a question "
+        "they just asked or a one-off task.\n\n"
+        f"User message:\n{user_msg}\n\n"
+        f"Assistant reply (for context):\n{assistant_msg}\n\n"
+        "Respond with JSON ONLY in this exact shape: "
+        '{"candidates": [{"text": "User ...", "category": "preference|fact|constraint|other"}]} '
+        "or {\"candidates\": []} if nothing notable."
+    )
+    messages = [
+        {"role": "system", "content": "You are a careful assistant that returns JSON only."},
+        {"role": "user", "content": extraction_prompt},
+    ]
+    try:
+        text, _usage = await chat_complete(messages, model, cfg)
+    except Exception as exc:
+        return {"candidates": [], "error": str(exc)[:200]}
+    parsed = _verification._safe_json_parse(text)
+    if not isinstance(parsed, dict):
+        return {"candidates": []}
+    raw_candidates = parsed.get("candidates") if isinstance(parsed.get("candidates"), list) else []
+    cleaned: list[dict] = []
+    for c in raw_candidates[:5]:
+        if not isinstance(c, dict):
+            continue
+        t = (c.get("text") or "").strip()
+        if not t or len(t) > 280:
+            continue
+        cat = (c.get("category") or "other").strip().lower()
+        if cat not in {"preference", "fact", "constraint", "other"}:
+            cat = "other"
+        cleaned.append({"text": t, "category": cat})
+    return {"candidates": cleaned}
+
+
+# --- OAuth helper endpoints ---
+
+@app.get("/api/oauth/status/{provider}")
+async def oauth_status(provider: str, request: Request):
+    _require_local_caller(request)
+    from services.oauth import get_oauth_status
+    return get_oauth_status(provider, DATA_DIR)
+
+
+@app.post("/api/oauth/connect/{provider}")
+async def oauth_connect(provider: str, request: Request):
+    """Return an authorization URL for the user to open in their browser."""
+    _require_local_caller(request)
+    cfg = load_config()
+    try:
+        from services.oauth import start_oauth_flow
+        auth_url = await start_oauth_flow(provider, cfg, DATA_DIR)
+        return {"auth_url": auth_url}
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    except Exception as exc:
+        raise HTTPException(500, f"OAuth connect failed: {exc}")
+
+
+@app.delete("/api/oauth/disconnect/{provider}")
+async def oauth_disconnect(provider: str, request: Request):
+    """Remove stored OAuth token."""
+    _require_local_caller(request)
+    from services.oauth import revoke_oauth_token
+    removed = revoke_oauth_token(provider, DATA_DIR)
+    return {"removed": removed}
+
+
 # --- Voice transcription ---
 
 _MAX_TRANSCRIBE_BYTES = 25 * 1024 * 1024  # 25 MB cap for /api/transcribe uploads
@@ -3101,6 +3906,42 @@ async def list_conversations(request: Request):
         })
     summary.sort(key=lambda x: (not x["pinned"], -x["updated_at"]))
     return {"conversations": summary}
+
+
+@app.get("/api/conversations/recent")
+async def recent_conversations(request: Request, limit: int = 3):
+    """Return the most-recently-updated conversations with their one-line summaries."""
+    _require_local_caller(request)
+    data = load_conversations()
+    convs = sorted(
+        [{"id": cid, **conv} for cid, conv in data["conversations"].items()],
+        key=lambda x: -x.get("updated_at", 0),
+    )[:max(1, min(10, limit))]
+    return {"recent": [
+        {
+            "id": c["id"],
+            "title": c.get("title", "Untitled"),
+            "updated_at": c.get("updated_at", 0),
+            "summary": c.get("summary", ""),
+            "message_count": len(c.get("messages", [])),
+        }
+        for c in convs
+    ]}
+
+
+@app.post("/api/conversations/{cid}/summary")
+async def set_conversation_summary(request: Request, cid: str):
+    """Store a one-line summary for a conversation (generated client-side or by the LLM)."""
+    _require_local_caller(request)
+    body = await request.json()
+    summary = str(body.get("summary", ""))[:300].strip()
+    data = load_conversations()
+    conv = data["conversations"].get(cid)
+    if not conv:
+        raise HTTPException(404, "Not found")
+    conv["summary"] = summary
+    save_json(CONVERSATIONS_PATH, data)
+    return {"ok": True}
 
 
 @app.get("/api/conversations/search")
@@ -3281,6 +4122,11 @@ class ChatRequest(BaseModel):
     model: Optional[str] = None
     title: Optional[str] = None
     mode: Optional[str] = None
+    # Per-turn capability switches set by the composer toggles.
+    use_vision: Optional[bool] = None
+    web_search_mode: Optional[str] = None  # "off" | "if_needed" | "required"
+    user_memories: Optional[list[str]] = None
+    bundle_attachments: Optional[list[dict]] = None
 
 
 _VALID_ROLES = {"system", "user", "assistant", "function", "tool", "developer"}
@@ -3351,7 +4197,29 @@ async def chat(req: ChatRequest, request: Request):
             if m.get("content") is None:
                 m = {**m, "content": ""}
             history.append(m)
-        system_prompt = build_system_prompt(cfg, prompts, effective_mode)
+
+        # Merge bundle_attachments from mounted file workspaces into the most
+        # recent user message so the model has access without the user having
+        # to re-attach. We splice rather than replace so per-message attachments
+        # the user added in the composer survive.
+        if req.bundle_attachments and history:
+            last_user_idx = next(
+                (i for i in range(len(history) - 1, -1, -1) if history[i].get("role") == "user"),
+                None,
+            )
+            if last_user_idx is not None:
+                msg = dict(history[last_user_idx])
+                existing = list(msg.get("attachments") or [])
+                extras = [a for a in req.bundle_attachments if isinstance(a, dict) and a.get("url")]
+                msg["attachments"] = existing + extras
+                history[last_user_idx] = msg
+
+        system_prompt = build_system_prompt(
+            cfg, prompts, effective_mode,
+            user_memories=req.user_memories,
+            use_vision=bool(req.use_vision),
+            web_search_mode=(req.web_search_mode or "off"),
+        )
         try:
             for _step in range(12):  # higher cap for subagent-heavy tasks
                 history, n_dropped = trim_to_context(history, system_prompt)
@@ -3401,8 +4269,83 @@ async def chat(req: ChatRequest, request: Request):
                     break
 
                 await send_event("tool_call", {"tool": call["tool"], "args": call["args"]})
-                result = await execute_tool(call, cfg, send_event, effective_mode, model)
+
+                # Capture the user's most recent message as the goal for the
+                # verification judge. Falls back to empty string if absent.
+                user_goal_for_verif = ""
+                for _m in reversed(history):
+                    if _m.get("role") == "user":
+                        user_goal_for_verif = (_m.get("content") or "")[:2000]
+                        break
+
+                async def _execute_with_args(args_override: dict):
+                    new_call = {"tool": call["tool"], "args": args_override}
+                    return await execute_tool(new_call, cfg, send_event, effective_mode, model)
+
+                async def _screenshot_provider():
+                    try:
+                        from services import state as _svc_state
+                        if not _svc_state.is_enabled("osso"):
+                            return None
+                        from services.clients import get_osso_client
+                        shot = await get_osso_client().screenshot()
+                        if isinstance(shot, dict) and shot.get("image_b64"):
+                            return shot["image_b64"]
+                        if isinstance(shot, dict) and shot.get("data_b64"):
+                            return shot["data_b64"]
+                    except Exception:
+                        return None
+                    return None
+
+                first_result = await execute_tool(call, cfg, send_event, effective_mode, model)
+
+                try:
+                    result, vtrace = await _verification.verify_and_maybe_retry(
+                        tool=call["tool"],
+                        args=call["args"],
+                        result=first_result,
+                        goal=user_goal_for_verif,
+                        config=cfg,
+                        execute_again=_execute_with_args,
+                        chat_complete=chat_complete,
+                        screenshot_provider=_screenshot_provider,
+                    )
+                except Exception:
+                    result, vtrace = first_result, None
+
+                # Emit tool_result first so the UI's checkpoint cache is
+                # populated before the verification card (which may want to
+                # render an Undo button) arrives.
                 await send_event("tool_result", {"tool": call["tool"], "result": result})
+
+                if vtrace is not None and vtrace.events:
+                    await send_event("verification", vtrace.to_dict())
+                    # Append one JSONL line per verification decision so
+                    # power users / debugging can audit after the fact.
+                    try:
+                        _verif_log_dir = DATA_DIR / "verification"
+                        _verif_log_dir.mkdir(parents=True, exist_ok=True)
+                        with open(_verif_log_dir / f"{cid}.jsonl", "a", encoding="utf-8") as _vf:
+                            _vf.write(json.dumps({
+                                "ts": time.time(),
+                                "chat_id": cid,
+                                "tool": call["tool"],
+                                "trace": vtrace.to_dict(),
+                            }) + "\n")
+                    except Exception:
+                        pass
+
+                # Auto-engage consensus when the judge fails repeatedly on
+                # the same turn — surfaced via a notice, then we recompute.
+                if (
+                    vtrace is not None
+                    and not vtrace.final_ok
+                    and cfg.get("verification", {}).get("mode") == "validators_and_judge"
+                    and cfg.get("consensus_runs", 1) <= 1
+                ):
+                    await send_event("notice", {
+                        "message": "I wasn't confident in that result. I'll double-check on the next turn.",
+                    })
 
                 # Persist task plan updates
                 if call["tool"] == "update_task_plan":

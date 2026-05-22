@@ -21,6 +21,7 @@ const state = {
   fileStore: {},
   taskPlan: [],          // current plan items from backend
   convSearchQuery: "",   // conversation search filter
+  convSearchResults: null, // server-side full-text search results (null = not active)
   micListening: false,   // voice input state
   rightRailVisible: false,
   planPaneVisible: false,
@@ -57,6 +58,65 @@ function escape(s) {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
+}
+
+// Map technical errors to language a non-technical user can act on.
+// `raw` is the raw error (Error object or string); `context` is an
+// optional short description ("uploading a file", "loading models").
+// Map raw tool names to verbs a non-technical user understands.
+function humanLabelForTool(tool) {
+  const map = {
+    execute_shell: "Running a command",
+    cli_call: "Running a CLI shortcut",
+    write_file: "Writing a file",
+    delete_file: "Deleting a file",
+    read_file: "Reading a file",
+    generate_image: "Drawing an image",
+    generate_audio: "Generating speech",
+    web_search: "Searching the web",
+    mcp_call: "Calling a connected service",
+    autogui_task: "Controlling the desktop",
+    clk_research: "Researching",
+    screen_action: "Acting on the screen",
+    update_task_plan: "Updating the plan",
+    load_skill: "Loading a skill",
+  };
+  return map[tool] || tool;
+}
+
+function friendlyError(raw, context) {
+  const text = (raw && (raw.message || raw.body || raw.toString())) || "";
+  const status = raw && raw.status;
+  const ctx = context ? ` while ${context}` : "";
+  if (status === 401 || /unauthor/i.test(text)) {
+    return `Your API key isn't being accepted${ctx}. Open Settings → Connection to update it.`;
+  }
+  if (status === 403) {
+    return `You don't have permission for that${ctx}. Check Settings → Connection.`;
+  }
+  if (status === 404) {
+    return `Not found${ctx}. The item may have been deleted or moved.`;
+  }
+  if (status === 413 || /too large|payload/i.test(text)) {
+    return `That file is too large${ctx}. Try a smaller one.`;
+  }
+  if (status === 429 || /rate limit|too many/i.test(text)) {
+    return `The server is rate-limiting requests${ctx}. Wait a moment and try again.`;
+  }
+  if (/timeout|timed out|took too long/i.test(text)) {
+    return `The server took too long to respond${ctx}. Try again, or pick a smaller task.`;
+  }
+  if (/network|failed to fetch|ECONN|ENOTFOUND/i.test(text)) {
+    return `Couldn't reach the server${ctx}. Check your internet connection.`;
+  }
+  if (/invalid data|broken|undecodable/i.test(text)) {
+    return `The result came back broken${ctx}. Click "Try again" or rephrase.`;
+  }
+  if (status >= 500) {
+    return `The server hit an error${ctx}. Try again in a moment.`;
+  }
+  // Last resort: trim and de-jargon the raw text.
+  return text.replace(/^\d+:\s*/, "").slice(0, 200) || `Something went wrong${ctx}.`;
 }
 
 // ---------------------------------------------------------------------------
@@ -220,8 +280,19 @@ async function loadConfig() {
     : "Not set";
   $("#cfg-image-model").value = state.config.image_model || "";
   $("#cfg-tts-voice").value = state.config.tts_voice || "alloy";
-  $("#cfg-consensus-runs").value = state.config.consensus_runs ?? 1;
+  // Snap the consensus value to one of the three select options (1, 3, or 5).
+  const cr = state.config.consensus_runs ?? 1;
+  const snap = cr <= 1 ? "1" : (cr <= 3 ? "3" : "5");
+  $("#cfg-consensus-runs").value = snap;
   $("#cfg-shell-enabled").checked = state.config.shell_enabled !== false;
+  const ws = state.config.web_search || {};
+  const wsProvider = $("#cfg-websearch-provider"); if (wsProvider) wsProvider.value = ws.provider || "";
+  const wsCustomWrap = $("#cfg-websearch-custom-wrap");
+  if (wsCustomWrap) wsCustomWrap.hidden = (ws.provider !== "custom");
+  const wsCustom = $("#cfg-websearch-custom"); if (wsCustom) wsCustom.value = ws.custom_url || "";
+  const ver = state.config.verification || {};
+  const verMode = $("#cfg-verification-mode"); if (verMode) verMode.value = ver.mode || "validators_only";
+  const verRetries = $("#cfg-verification-retries"); if (verRetries) verRetries.value = ver.retries ?? 1;
   // Mode select: prefer the active workspace's mode (if any) so the
   // workspace-scoped setting actually takes effect; fall back to the
   // global config mode, then to "approve-each".
@@ -330,6 +401,62 @@ async function saveDefaults() {
   await loadConfig();
   await refreshModels();
   flash("Defaults saved.", "good");
+}
+
+async function saveWebSearch() {
+  const provider = $("#cfg-websearch-provider").value || "";
+  const apiKey = $("#cfg-websearch-key").value.trim();
+  const customUrl = $("#cfg-websearch-custom").value.trim();
+  const patch = {
+    web_search: {
+      provider,
+      ...(apiKey ? { api_key: apiKey } : {}),
+      custom_url: customUrl,
+    },
+  };
+  const el = $("#websearch-status");
+  try {
+    await api("/api/config", { method: "POST", json: patch });
+    if (el) {
+      el.textContent = provider ? `Saved. Web search will use ${provider}.` : "Saved. Web search is disabled.";
+      el.className = "status-line good";
+    }
+    $("#cfg-websearch-key").value = "";
+    await loadConfig();
+  } catch (e) {
+    if (el) {
+      el.textContent = friendlyError(e, "saving web search settings");
+      el.className = "status-line bad";
+    }
+  }
+}
+
+async function saveVerification() {
+  const mode = $("#cfg-verification-mode").value || "validators_only";
+  const retries = Math.min(3, Math.max(0, parseInt($("#cfg-verification-retries").value, 10) || 1));
+  const enabled = (mode !== "off");
+  const patch = {
+    verification: {
+      ...(state.config.verification || {}),
+      enabled,
+      mode,
+      retries,
+    },
+  };
+  const el = $("#verification-status");
+  try {
+    await api("/api/config", { method: "POST", json: patch });
+    if (el) {
+      el.textContent = "Verification settings saved.";
+      el.className = "status-line good";
+    }
+    await loadConfig();
+  } catch (e) {
+    if (el) {
+      el.textContent = friendlyError(e, "saving verification settings");
+      el.className = "status-line bad";
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -600,6 +727,31 @@ function renderWorkspaceList() {
 
 async function exportWorkspace(id) {
   const w = state.workspaces.find((x) => x.id === id);
+  // Push bundle manifest so the .bwui export contains file-group metadata
+  if (window.bws && w?.bundle_ids?.length) {
+    try {
+      const bundles = await bws.bundleList();
+      const manifest = await Promise.all(
+        (w.bundle_ids || []).map(async (bid) => {
+          const bundle = bundles.find((b) => b.id === bid);
+          if (!bundle) return null;
+          const files = await bws.bundleFiles(bid);
+          return {
+            bundle_id: bid,
+            name: bundle.name || bid,
+            files: files.map((f) => ({ filename: f.filename, sha256: "" })),
+          };
+        })
+      );
+      const validManifest = manifest.filter(Boolean);
+      if (validManifest.length) {
+        await api(`/api/workspaces/${encodeURIComponent(id)}/bundle-manifest`, {
+          method: "POST",
+          json: { manifest: validManifest },
+        }).catch(() => {});
+      }
+    } catch (_) {}
+  }
   const res = await fetch(`/api/workspaces/${encodeURIComponent(id)}/export`);
   if (!res.ok) { flash("Export failed.", "warn"); return; }
   const blob = await res.blob();
@@ -854,6 +1006,84 @@ function renderMcpServers() {
   };
 }
 
+const _CLOUD_SERVICE_META = {
+  "google": { icon: "&#128241;", label: "Google", desc: "Calendar, Gmail, Drive" },
+  "microsoft": { icon: "&#128203;", label: "Microsoft 365", desc: "Outlook, Teams, OneDrive" },
+};
+
+async function renderCloudServices() {
+  const wrap = $("#cloud-services-list");
+  if (!wrap) return;
+  wrap.innerHTML = "";
+  const grid = document.createElement("div");
+  grid.className = "cloud-services-grid";
+  for (const [provider, meta] of Object.entries(_CLOUD_SERVICE_META)) {
+    const card = document.createElement("div");
+    card.className = "cloud-service-card";
+    let statusHtml = '<span class="cloud-status-chip disconnected">Not connected</span>';
+    let btnHtml = `<button class="primary" data-action="connect" data-provider="${provider}">Connect</button>`;
+    try {
+      const status = await api(`/api/oauth/status/${provider}`);
+      if (status.connected) {
+        const label = status.expired ? "Token expired" : "Connected";
+        const cls = status.expired ? "expired" : "connected";
+        const emailPart = status.email ? ` <small>${escape(status.email)}</small>` : "";
+        statusHtml = `<span class="cloud-status-chip ${cls}">${label}</span>${emailPart}`;
+        btnHtml = `<button data-action="reconnect" data-provider="${provider}">Reconnect</button>
+          <button data-action="disconnect" data-provider="${provider}" class="danger-btn">Disconnect</button>`;
+      }
+    } catch (_) { /* not connected */ }
+    card.innerHTML = `
+      <div class="cloud-service-header">
+        <span class="cloud-service-icon">${meta.icon}</span>
+        <div>
+          <div class="cloud-service-name">${meta.label}</div>
+          <div class="cloud-service-desc hint">${meta.desc}</div>
+        </div>
+      </div>
+      <div class="cloud-service-status">${statusHtml}</div>
+      <div class="cloud-service-actions">${btnHtml}</div>`;
+    card.addEventListener("click", async (e) => {
+      const btn = e.target.closest("button[data-action]");
+      if (!btn) return;
+      const action = btn.dataset.action;
+      const prov = btn.dataset.provider;
+      if (action === "disconnect") {
+        await api(`/api/oauth/disconnect/${prov}`, { method: "DELETE" });
+        renderCloudServices();
+        return;
+      }
+      if (action === "connect" || action === "reconnect") {
+        try {
+          const resp = await api(`/api/oauth/connect/${prov}`, { method: "POST" });
+          if (resp.auth_url) {
+            window.open(resp.auth_url, "_blank");
+            flash(`Sign in to ${_CLOUD_SERVICE_META[prov]?.label || prov} in the opened tab, then return here.`, "info");
+            // Poll for completion
+            let tries = 0;
+            const poll = setInterval(async () => {
+              tries++;
+              if (tries > 60) { clearInterval(poll); return; }
+              try {
+                const st = await api(`/api/oauth/status/${prov}`);
+                if (st.connected && !st.expired) {
+                  clearInterval(poll);
+                  flash(`Connected to ${_CLOUD_SERVICE_META[prov]?.label || prov}!`, "good");
+                  renderCloudServices();
+                }
+              } catch (_) {}
+            }, 2000);
+          }
+        } catch (err) {
+          flash(friendlyError(err, `connecting to ${_CLOUD_SERVICE_META[prov]?.label || prov}`), "warn");
+        }
+      }
+    });
+    grid.appendChild(card);
+  }
+  wrap.appendChild(grid);
+}
+
 function openMcpRegistryDialog() {
   const items = state.mcpRegistry
     .map(
@@ -1104,16 +1334,39 @@ async function loadConversations() {
 function renderConversationList() {
   const ul = $("#conversation-list");
   ul.innerHTML = "";
+  const q = state.convSearchQuery.trim();
+
+  // When server-side search results are available, render them instead
+  if (q && state.convSearchResults !== null) {
+    const results = state.convSearchResults;
+    if (!results.length) {
+      ul.innerHTML = `<li class="hint" role="presentation" style="padding: 8px; list-style: none;">No results.</li>`;
+      return;
+    }
+    for (const r of results) {
+      const li = document.createElement("li");
+      if (r.id === state.currentConversationId) li.classList.add("active");
+      li.innerHTML = `
+        <div class="list-item-title">
+          <div>${escape(r.title || "Untitled")}</div>
+          ${r.snippet ? `<div class="conv-snippet hint">&hellip;${escape(r.snippet)}&hellip;</div>` : ""}
+        </div>`;
+      li.onclick = () => openConversation(r.id);
+      ul.appendChild(li);
+    }
+    return;
+  }
+
+  // Default: all conversations, client-side tag/title filter
   let convs = state.conversations;
-  const q = state.convSearchQuery.trim().toLowerCase();
   if (q) {
+    const ql = q.toLowerCase();
     convs = convs.filter((c) =>
-      (c.title || "").toLowerCase().includes(q) ||
-      (c.tags || []).some((t) => t.toLowerCase().includes(q))
+      (c.title || "").toLowerCase().includes(ql) ||
+      (c.tags || []).some((t) => t.toLowerCase().includes(ql))
     );
   }
   if (!convs.length) {
-    // Empty-state must be a list item so the markup remains valid inside <ul>.
     ul.innerHTML = `<li class="hint" role="presentation" style="padding: 8px; list-style: none;">${q ? "No results." : "No chats yet."}</li>`;
     return;
   }
@@ -1127,14 +1380,14 @@ function renderConversationList() {
       <div class="list-item-title">
         <div>${escape(c.title || "Untitled")}</div>
         <div class="conv-meta">
-          ${c.pinned ? '<span class="pin-badge" title="Pinned">📌</span>' : ""}
+          ${c.pinned ? '<span class="pin-badge" title="Pinned">&#128204;</span>' : ""}
           ${tags}
         </div>
       </div>
       <div class="list-actions">
-        <button data-action="pin" data-id="${c.id}" title="${c.pinned ? "Unpin" : "Pin"}" aria-label="${c.pinned ? "Unpin" : "Pin"} conversation ${escape(c.title || "")}" aria-pressed="${c.pinned ? "true" : "false"}">📌</button>
-        <button data-action="fork" data-id="${c.id}" title="Fork this conversation" aria-label="Fork conversation ${escape(c.title || "")}">⎇</button>
-        <button data-action="delete" data-id="${c.id}" title="Delete" aria-label="Delete conversation ${escape(c.title || "")}">×</button>
+        <button data-action="pin" data-id="${c.id}" title="${c.pinned ? "Unpin" : "Pin"}" aria-label="${c.pinned ? "Unpin" : "Pin"} conversation ${escape(c.title || "")}" aria-pressed="${c.pinned ? "true" : "false"}">&#128204;</button>
+        <button data-action="fork" data-id="${c.id}" title="Fork this conversation" aria-label="Fork conversation ${escape(c.title || "")}">&#10167;</button>
+        <button data-action="delete" data-id="${c.id}" title="Delete" aria-label="Delete conversation ${escape(c.title || "")}">&#215;</button>
       </div>`;
     li.onclick = (e) => {
       const btn = e.target instanceof Element ? e.target.closest("button") : null;
@@ -1214,11 +1467,163 @@ function renderMessages() {
         <hr />
         <p class="hint">First time here? Open <b>Settings</b> to enter your OpenWebUI URL and API key.</p>
       </div>`;
+    renderRecentChatsResume(container);
     return;
   }
   for (const m of state.messages) {
     appendMessage(m);
   }
+}
+
+async function renderRecentChatsResume(container) {
+  if (!state.config?.api_key_set) return;
+  try {
+    const data = await api("/api/conversations/recent?limit=3");
+    const recent = (data.recent || []).filter((c) => c.message_count > 0);
+    if (!recent.length) return;
+    const section = document.createElement("div");
+    section.className = "resume-section";
+    const heading = document.createElement("p");
+    heading.className = "hint";
+    heading.textContent = "Pick up where you left off:";
+    section.appendChild(heading);
+    const grid = document.createElement("div");
+    grid.className = "resume-grid";
+    for (const c of recent) {
+      const card = document.createElement("button");
+      card.className = "resume-card";
+      card.type = "button";
+      const when = _relativeTime(c.updated_at);
+      card.innerHTML = `<span class="resume-title">${escape(c.title || "Untitled")}</span>
+        <span class="resume-meta">${escape(when)} &middot; ${c.message_count} message${c.message_count === 1 ? "" : "s"}</span>
+        ${c.summary ? `<span class="resume-summary">${escape(c.summary)}</span>` : ""}`;
+      card.onclick = () => openConversation(c.id);
+      grid.appendChild(card);
+    }
+    section.appendChild(grid);
+    container.appendChild(section);
+  } catch (_) { /* non-critical */ }
+}
+
+function _relativeTime(ts) {
+  if (!ts) return "";
+  const diff = Math.floor(Date.now() / 1000) - ts;
+  if (diff < 60) return "just now";
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+  if (diff < 604800) return `${Math.floor(diff / 86400)}d ago`;
+  return new Date(ts * 1000).toLocaleDateString();
+}
+
+function renderVerificationTrace(trace) {
+  const container = $("#messages");
+  if (!container || !trace) return;
+  const card = document.createElement("div");
+  card.className = "verification-card " + (trace.final_ok ? "vc-ok" : "vc-fail");
+  card.setAttribute("role", "status");
+  const icon = trace.final_ok ? "✓" : "⚠";
+  const summary = document.createElement("div");
+  summary.className = "verification-summary";
+  summary.innerHTML = `<span class="vc-icon">${icon}</span><span>${
+    trace.final_ok ? "Verified" : "Verification failed"
+  } · ${escape(trace.tool)}${
+    trace.final_attempt > 1 ? ` · attempt ${trace.final_attempt}` : ""
+  }</span>`;
+  card.appendChild(summary);
+
+  // Undo button for write_file when we have a checkpoint id from the
+  // most recent tool_result. The verification trace doesn't carry the
+  // checkpoint, but the tool_result event preceded it; we look up the
+  // last tool_result for this tool from the in-memory event log.
+  if (trace.tool === "write_file" && state.lastWriteCheckpoint) {
+    const undo = document.createElement("button");
+    undo.type = "button";
+    undo.className = "vc-undo-btn";
+    undo.textContent = "Undo this write";
+    const { filename, checkpoint_id } = state.lastWriteCheckpoint;
+    undo.onclick = async () => {
+      undo.disabled = true;
+      undo.textContent = "Reverting…";
+      try {
+        await api("/api/project/revert", {
+          method: "POST",
+          json: { filename, checkpoint_id },
+        });
+        undo.textContent = "Reverted ✓";
+        flash(`Reverted ${filename} to the previous version.`, "good");
+      } catch (e) {
+        undo.disabled = false;
+        undo.textContent = "Undo this write";
+        flash(friendlyError(e, "reverting the file"), "bad");
+      }
+    };
+    card.appendChild(undo);
+  }
+
+  if (Array.isArray(trace.events) && trace.events.length) {
+    const det = document.createElement("details");
+    det.className = "verification-details";
+    const sumEl = document.createElement("summary");
+    sumEl.textContent = "Details";
+    det.appendChild(sumEl);
+    const ul = document.createElement("ul");
+    for (const ev of trace.events) {
+      const li = document.createElement("li");
+      const okMark = ev.ok ? "✓" : "✗";
+      const conf = ev.extras && typeof ev.extras.confidence === "number"
+        ? ` (${Math.round(ev.extras.confidence * 100)}% confidence)`
+        : "";
+      li.textContent = `${okMark} [${ev.kind}] ${ev.detail || ""}${conf}`;
+      ul.appendChild(li);
+    }
+    det.appendChild(ul);
+    card.appendChild(det);
+  }
+  container.appendChild(card);
+  container.scrollTop = container.scrollHeight;
+}
+
+function renderBrokenImagePlaceholder(a, m) {
+  const card = document.createElement("div");
+  card.className = "broken-image-card";
+  card.setAttribute("role", "alert");
+  const label = document.createElement("div");
+  label.className = "broken-image-label";
+  label.textContent = "Image didn't load";
+  const detail = document.createElement("div");
+  detail.className = "broken-image-detail";
+  const promptHint = (a && a.filename) ? a.filename : "";
+  detail.textContent = promptHint
+    ? `The file "${promptHint}" couldn't be displayed.`
+    : "The image came back broken.";
+  const actions = document.createElement("div");
+  actions.className = "broken-image-actions";
+  const retryBtn = document.createElement("button");
+  retryBtn.type = "button";
+  retryBtn.className = "broken-image-retry";
+  retryBtn.textContent = "Try again";
+  retryBtn.onclick = () => {
+    const composer = $("#composer-input");
+    if (!composer) return;
+    const seed = (m && m.content) || (promptHint ? `Regenerate this image: ${promptHint}` : "Regenerate the previous image");
+    composer.value = seed;
+    composer.focus();
+    flash("Edit the prompt and send to try again.", "info");
+  };
+  actions.appendChild(retryBtn);
+  if (a && a.url) {
+    const openBtn = document.createElement("a");
+    openBtn.href = a.url;
+    openBtn.target = "_blank";
+    openBtn.rel = "noopener";
+    openBtn.className = "broken-image-open";
+    openBtn.textContent = "Open raw";
+    actions.appendChild(openBtn);
+  }
+  card.appendChild(label);
+  card.appendChild(detail);
+  card.appendChild(actions);
+  return card;
 }
 
 function appendMessage(m) {
@@ -1237,12 +1642,16 @@ function appendMessage(m) {
       m.role === "assistant" ? "Assistant" : m.role === "user" ? "You" : m.role;
   }
 
-  // Per-message action buttons (read-aloud, fork)
+  // Per-message action buttons (read-aloud, why, try-again, fork)
   if (m.role === "assistant" && !m._placeholder) {
     const roleEl = tpl.querySelector(".role");
     const acts = document.createElement("div");
     acts.className = "message-actions";
-    acts.innerHTML = `<button class="read-aloud-btn" title="Read aloud" aria-label="Read this message aloud">🔊</button>`;
+    acts.innerHTML = `
+      <button class="read-aloud-btn" title="Read aloud" aria-label="Read this message aloud">🔊</button>
+      <button class="why-btn" title="Why did you answer that way?" aria-label="Ask for an explanation">Why?</button>
+      <button class="retry-btn" title="Try another phrasing" aria-label="Try another phrasing">Try again</button>
+    `;
     if (m.telemetry) {
       acts.innerHTML += `<span class="telemetry-badge">${m.telemetry.tokens_in ?? "?"}→${m.telemetry.tokens_out ?? "?"}t · ${m.telemetry.elapsed_ms ?? "?"}ms</span>`;
     }
@@ -1288,6 +1697,9 @@ function appendMessage(m) {
         const img = document.createElement("img");
         img.src = a.url;
         img.alt = a.filename || "";
+        img.onerror = () => {
+          img.replaceWith(renderBrokenImagePlaceholder(a, m));
+        };
         att.appendChild(img);
       } else if (ct.startsWith("audio/")) {
         const audio = document.createElement("audio");
@@ -1326,10 +1738,60 @@ function appendMessage(m) {
   if (readBtn) {
     readBtn.onclick = () => readAloud(newEl, m.content || "", readBtn);
   }
+  const whyBtn = newEl?.querySelector(".why-btn");
+  if (whyBtn) {
+    whyBtn.onclick = () => askWhy(m.content || "");
+  }
+  const retryBtn = newEl?.querySelector(".retry-btn");
+  if (retryBtn) {
+    retryBtn.onclick = () => offerRetryVariant(m);
+  }
 
   if (newEl && m.role === "assistant") renderMathIn(newEl);
   container.scrollTop = container.scrollHeight;
   return newEl;
+}
+
+function askWhy(originalAnswer) {
+  const composer = $("#composer-input");
+  if (!composer) return;
+  composer.value =
+    "In one or two paragraphs, explain how you arrived at your last answer, what assumptions you made, and what you're least sure about.";
+  composer.focus();
+  flash("Press Enter to ask for an explanation.", "info");
+}
+
+function offerRetryVariant(m) {
+  showDialog({
+    title: "Try this another way",
+    body: `
+      <p>Pick how you'd like the assistant to retry the previous answer:</p>
+      <button data-variant="shorter" class="retry-variant">Shorter</button>
+      <button data-variant="simpler" class="retry-variant">Simpler (explain like I'm 12)</button>
+      <button data-variant="concrete" class="retry-variant">More concrete (give a real example)</button>
+      <button data-variant="formal" class="retry-variant">More formal</button>
+    `,
+    actions: [{ label: "Cancel", role: "close" }],
+  });
+  setTimeout(() => {
+    document.querySelectorAll(".retry-variant").forEach((btn) => {
+      btn.onclick = () => {
+        const variant = btn.dataset.variant;
+        const prompts = {
+          shorter: "Rewrite your previous answer in three sentences or fewer.",
+          simpler: "Rewrite your previous answer in language a 12-year-old would understand. Keep it accurate.",
+          concrete: "Rewrite your previous answer with a specific, concrete example showing the key idea in action.",
+          formal: "Rewrite your previous answer in a more formal tone, suitable for a professional document.",
+        };
+        const composer = $("#composer-input");
+        if (composer) {
+          composer.value = prompts[variant];
+          closeDialog();
+          send();
+        }
+      };
+    });
+  }, 50);
 }
 
 function buildSubagentCard(sa) {
@@ -1403,10 +1865,281 @@ async function attachFile(file) {
   const fd = new FormData();
   fd.append("file", file);
   const res = await fetch("/api/upload", { method: "POST", body: fd });
-  if (!res.ok) { flash("Upload failed.", "warn"); return; }
+  if (!res.ok) {
+    const err = new Error(`${res.status}: ${await res.text()}`);
+    err.status = res.status;
+    flash(friendlyError(err, "uploading the file"), "warn");
+    return;
+  }
   const a = await res.json();
   state.attachments.push(a);
   renderAttachments();
+}
+
+// ---------------------------------------------------------------------------
+// Image annotation modal
+// ---------------------------------------------------------------------------
+
+const _anno = {
+  attachIdx: -1,
+  tool: "freehand",
+  color: "#ff3b30",
+  size: 3,
+  strokes: [],
+  drawing: false,
+  startX: 0,
+  startY: 0,
+  img: null,
+  offscreen: null, // offscreen canvas with base image only
+};
+
+function openAnnotationModal(attachIdx) {
+  const a = state.attachments[attachIdx];
+  if (!a) return;
+  const modal = $("#annotation-modal");
+  if (!modal) return;
+  _anno.attachIdx = attachIdx;
+  _anno.strokes = [];
+  _anno.img = null;
+  _anno.offscreen = null;
+  // Load the image
+  const imgEl = new Image();
+  imgEl.onload = () => {
+    _anno.img = imgEl;
+    const canvas = $("#annotation-canvas");
+    canvas.width = imgEl.naturalWidth;
+    canvas.height = imgEl.naturalHeight;
+    const offscreen = document.createElement("canvas");
+    offscreen.width = imgEl.naturalWidth;
+    offscreen.height = imgEl.naturalHeight;
+    offscreen.getContext("2d").drawImage(imgEl, 0, 0);
+    _anno.offscreen = offscreen;
+    _annoRedraw(canvas);
+    modal.hidden = false;
+  };
+  imgEl.onerror = () => flash("Could not load image for annotation.", "warn");
+  if (a.url) {
+    imgEl.src = a.url;
+  } else if (a._blob) {
+    imgEl.src = URL.createObjectURL(a._blob);
+  } else {
+    flash("Image data not available for annotation.", "warn");
+    return;
+  }
+}
+
+function _annoRedraw(canvas) {
+  const ctx = canvas.getContext("2d");
+  if (_anno.offscreen) ctx.drawImage(_anno.offscreen, 0, 0);
+  for (const s of _anno.strokes) _annoDrawStroke(ctx, s, false);
+}
+
+function _annoDrawStroke(ctx, s, preview) {
+  ctx.save();
+  ctx.strokeStyle = s.color;
+  ctx.lineWidth = s.size;
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  if (s.tool === "freehand" && s.points && s.points.length > 1) {
+    ctx.beginPath();
+    ctx.moveTo(s.points[0].x, s.points[0].y);
+    for (let i = 1; i < s.points.length; i++) ctx.lineTo(s.points[i].x, s.points[i].y);
+    ctx.stroke();
+  } else if (s.tool === "rect" && !preview) {
+    ctx.beginPath();
+    ctx.strokeRect(s.x, s.y, s.w, s.h);
+  } else if (s.tool === "rect" && preview) {
+    ctx.beginPath();
+    ctx.strokeRect(s.x, s.y, s.w, s.h);
+  } else if (s.tool === "arrow") {
+    const { x, y, x2, y2 } = s;
+    const angle = Math.atan2(y2 - y, x2 - x);
+    const headLen = Math.max(12, s.size * 4);
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+    ctx.lineTo(x2, y2);
+    ctx.lineTo(x2 - headLen * Math.cos(angle - Math.PI / 6), y2 - headLen * Math.sin(angle - Math.PI / 6));
+    ctx.moveTo(x2, y2);
+    ctx.lineTo(x2 - headLen * Math.cos(angle + Math.PI / 6), y2 - headLen * Math.sin(angle + Math.PI / 6));
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function _annoCanvasPos(canvas, e) {
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = canvas.width / rect.width;
+  const scaleY = canvas.height / rect.height;
+  const src = e.touches ? e.touches[0] : e;
+  return {
+    x: (src.clientX - rect.left) * scaleX,
+    y: (src.clientY - rect.top) * scaleY,
+  };
+}
+
+function _initAnnotationCanvas() {
+  const canvas = $("#annotation-canvas");
+  if (!canvas || canvas._annoInited) return;
+  canvas._annoInited = true;
+
+  const onStart = (e) => {
+    if (!_anno.img) return;
+    e.preventDefault();
+    _anno.drawing = true;
+    const pos = _annoCanvasPos(canvas, e);
+    _anno.startX = pos.x;
+    _anno.startY = pos.y;
+    if (_anno.tool === "freehand") {
+      _anno.strokes.push({ tool: "freehand", color: _anno.color, size: _anno.size, points: [pos] });
+    }
+  };
+  const onMove = (e) => {
+    if (!_anno.drawing || !_anno.img) return;
+    e.preventDefault();
+    const pos = _annoCanvasPos(canvas, e);
+    const ctx = canvas.getContext("2d");
+    _annoRedraw(canvas);
+    if (_anno.tool === "freehand") {
+      const stroke = _anno.strokes[_anno.strokes.length - 1];
+      stroke.points.push(pos);
+      _annoDrawStroke(ctx, stroke, true);
+    } else if (_anno.tool === "rect") {
+      _annoDrawStroke(ctx, {
+        tool: "rect", color: _anno.color, size: _anno.size,
+        x: _anno.startX, y: _anno.startY,
+        w: pos.x - _anno.startX, h: pos.y - _anno.startY,
+      }, true);
+    } else if (_anno.tool === "arrow") {
+      _annoDrawStroke(ctx, {
+        tool: "arrow", color: _anno.color, size: _anno.size,
+        x: _anno.startX, y: _anno.startY, x2: pos.x, y2: pos.y,
+      }, true);
+    }
+  };
+  const onEnd = (e) => {
+    if (!_anno.drawing || !_anno.img) return;
+    _anno.drawing = false;
+    const pos = e.changedTouches
+      ? _annoCanvasPos(canvas, { clientX: e.changedTouches[0].clientX, clientY: e.changedTouches[0].clientY })
+      : _annoCanvasPos(canvas, e);
+    if (_anno.tool === "rect") {
+      _anno.strokes.push({
+        tool: "rect", color: _anno.color, size: _anno.size,
+        x: _anno.startX, y: _anno.startY,
+        w: pos.x - _anno.startX, h: pos.y - _anno.startY,
+      });
+    } else if (_anno.tool === "arrow") {
+      _anno.strokes.push({
+        tool: "arrow", color: _anno.color, size: _anno.size,
+        x: _anno.startX, y: _anno.startY, x2: pos.x, y2: pos.y,
+      });
+    }
+    _annoRedraw(canvas);
+  };
+
+  canvas.addEventListener("mousedown", onStart);
+  canvas.addEventListener("mousemove", onMove);
+  canvas.addEventListener("mouseup", onEnd);
+  canvas.addEventListener("touchstart", onStart, { passive: false });
+  canvas.addEventListener("touchmove", onMove, { passive: false });
+  canvas.addEventListener("touchend", onEnd);
+}
+
+async function _applyAnnotation() {
+  const canvas = $("#annotation-canvas");
+  const a = state.attachments[_anno.attachIdx];
+  if (!canvas || !a) return;
+  const blob = await new Promise((res) => canvas.toBlob(res, "image/png"));
+  if (!blob) { flash("Could not export annotated image.", "warn"); return; }
+  // Upload to server
+  const form = new FormData();
+  const name = (a.filename || "annotated").replace(/\.[^.]+$/, "") + "_annotated.png";
+  form.append("file", blob, name);
+  try {
+    const resp = await fetch("/api/upload", { method: "POST", body: form });
+    if (!resp.ok) throw new Error(await resp.text());
+    const data = await resp.json();
+    // Replace the original attachment with the annotated one
+    state.attachments[_anno.attachIdx] = {
+      url: data.url,
+      filename: data.filename || name,
+      content_type: "image/png",
+    };
+    renderAttachments();
+    flash("Annotated image attached.", "good");
+  } catch (err) {
+    flash(friendlyError(err, "uploading annotated image"), "warn");
+  }
+  $("#annotation-modal").hidden = true;
+}
+
+function _initAnnotationModal() {
+  _initAnnotationCanvas();
+  document.querySelectorAll(".anno-tool-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      _anno.tool = btn.dataset.tool;
+      document.querySelectorAll(".anno-tool-btn").forEach((b) => b.classList.toggle("active", b === btn));
+    });
+  });
+  $("#anno-color")?.addEventListener("input", (e) => { _anno.color = e.target.value; });
+  $("#anno-size")?.addEventListener("input", (e) => { _anno.size = +e.target.value; });
+  $("#anno-undo-btn")?.addEventListener("click", () => {
+    _anno.strokes.pop();
+    _annoRedraw($("#annotation-canvas"));
+  });
+  $("#anno-clear-btn")?.addEventListener("click", () => {
+    _anno.strokes = [];
+    _annoRedraw($("#annotation-canvas"));
+  });
+  $("#anno-apply-btn")?.addEventListener("click", _applyAnnotation);
+  $("#anno-cancel-btn")?.addEventListener("click", () => { $("#annotation-modal").hidden = true; });
+}
+
+async function captureScreenshot() {
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+  } catch (e) {
+    flash(friendlyError(e, "capturing the screen"), "warn");
+    return;
+  }
+  try {
+    const track = stream.getVideoTracks()[0];
+    // Briefly wait so the browser has time to render the first frame.
+    await new Promise((r) => setTimeout(r, 200));
+    const settings = track.getSettings();
+    const w = settings.width || 1280;
+    const h = settings.height || 720;
+    // ImageCapture is the most reliable path in Chromium; fall back to a
+    // video-element draw for Firefox.
+    let blob;
+    if (typeof ImageCapture !== "undefined") {
+      const cap = new ImageCapture(track);
+      const bitmap = await cap.grabFrame();
+      const canvas = document.createElement("canvas");
+      canvas.width = bitmap.width; canvas.height = bitmap.height;
+      canvas.getContext("2d").drawImage(bitmap, 0, 0);
+      blob = await new Promise((r) => canvas.toBlob(r, "image/png"));
+    } else {
+      const video = document.createElement("video");
+      video.srcObject = stream;
+      await video.play();
+      const canvas = document.createElement("canvas");
+      canvas.width = w; canvas.height = h;
+      canvas.getContext("2d").drawImage(video, 0, 0, w, h);
+      blob = await new Promise((r) => canvas.toBlob(r, "image/png"));
+    }
+    if (!blob) {
+      flash("Screenshot capture produced no image.", "warn");
+      return;
+    }
+    const file = new File([blob], `screenshot-${Date.now()}.png`, { type: "image/png" });
+    await attachFile(file);
+    const vis = $("#toggle-vision"); if (vis) vis.checked = true;
+    flash("Screenshot attached.", "good");
+  } finally {
+    stream.getTracks().forEach((t) => t.stop());
+  }
 }
 
 function renderAttachments() {
@@ -1415,11 +2148,19 @@ function renderAttachments() {
   state.attachments.forEach((a, i) => {
     const span = document.createElement("span");
     span.className = "pill";
-    span.innerHTML = `${escape(a.filename)} <button data-i="${i}" title="Remove" aria-label="Remove ${escape(a.filename)}">×</button>`;
-    span.querySelector("button").onclick = () => {
+    const isImage = a.content_type && a.content_type.startsWith("image/");
+    const annoBtn = isImage
+      ? `<button class="anno-open-btn" data-i="${i}" title="Annotate this image" aria-label="Annotate ${escape(a.filename)}">&#9998;</button> `
+      : "";
+    span.innerHTML = `${annoBtn}${escape(a.filename)} <button data-rm="${i}" title="Remove" aria-label="Remove ${escape(a.filename)}">&#215;</button>`;
+    span.querySelector(`button[data-rm]`).onclick = () => {
       state.attachments.splice(i, 1);
       renderAttachments();
     };
+    const annoOpenBtn = span.querySelector(".anno-open-btn");
+    if (annoOpenBtn) {
+      annoOpenBtn.onclick = () => openAnnotationModal(i);
+    }
     wrap.appendChild(span);
   });
 }
@@ -1732,7 +2473,7 @@ async function askApproval(req) {
         ${req.reason ? `<p><b>Why:</b> ${escape(req.reason)}</p>` : ""}
         <p><b>Command:</b></p>
         <pre>${escape(req.command)}</pre>
-        <details class="explain-expander" id="explain-details">
+        <details class="explain-expander" id="explain-details" open>
           <summary>Explain this in plain English</summary>
           <div class="explain-body" id="explain-body"><span class="spinner"></span> Loading explanation…</div>
         </details>
@@ -1788,13 +2529,15 @@ async function askApproval(req) {
       resolve({ approved: false });
     };
 
-    // Wire explain-details toggle
-    setTimeout(() => {
+    // Wire explain-details toggle. The expander is open by default so
+    // non-technical users see the explanation without having to know
+    // to click; we kick the fetch immediately when the dialog opens.
+    setTimeout(async () => {
       const det = document.getElementById("explain-details");
       if (!det || req.tool !== "execute_shell") return;
       let explained = false;
-      det.addEventListener("toggle", async () => {
-        if (!det.open || explained) return;
+      const runExplain = async () => {
+        if (explained) return;
         explained = true;
         const bodyEl = document.getElementById("explain-body");
         try {
@@ -1804,9 +2547,13 @@ async function askApproval(req) {
           });
           if (bodyEl) bodyEl.textContent = data.explanation || "No explanation available.";
         } catch (e) {
-          if (bodyEl) bodyEl.textContent = "Could not fetch explanation.";
+          if (bodyEl) bodyEl.textContent = friendlyError(e, "explaining the command");
         }
+      };
+      det.addEventListener("toggle", () => {
+        if (det.open) runExplain();
       });
+      if (det.open) runExplain();
     }, 50);
   });
 }
@@ -1846,6 +2593,22 @@ async function send() {
   sendBtn.disabled = true;
   sendBtn.innerHTML = '<span class="spinner"></span>';
 
+  // Show a Stop button next to the send button while the request is in flight.
+  let stopBtn = $("#stop-btn");
+  if (!stopBtn) {
+    stopBtn = document.createElement("button");
+    stopBtn.id = "stop-btn";
+    stopBtn.type = "button";
+    stopBtn.textContent = "Stop";
+    stopBtn.className = "stop-btn";
+    sendBtn.parentElement.insertBefore(stopBtn, sendBtn.nextSibling);
+  }
+  stopBtn.hidden = false;
+  stopBtn.onclick = () => {
+    try { state.sendAbortController?.abort(); } catch (_) {}
+    flash("Stopped.", "info");
+  };
+
   const placeholder = { role: "assistant", content: "", _placeholder: true };
   state.messages.push(placeholder);
   appendMessage(placeholder);
@@ -1858,6 +2621,23 @@ async function send() {
     const sendable = state.messages.filter(
       (m) => !m._placeholder && (m.role === "user" || m.role === "assistant"),
     );
+    const visionToggle = $("#toggle-vision");
+    const webToggle = $("#toggle-websearch");
+    const useVision = !!(visionToggle && visionToggle.checked);
+    const webMode = (webToggle && webToggle.value) || "off";
+
+    // Collect user memories (if enabled in browser storage and not paused)
+    let userMemories = [];
+    if (window.bws && !state.memoryPaused) {
+      try {
+        userMemories = await bws.memoryEnabledTexts(state.config?.active_workspace_id || "");
+      } catch (_) { userMemories = []; }
+    }
+    // Upload mounted file bundles transiently for this turn
+    let bundleAttachments = [];
+    try { bundleAttachments = await gatherMountedBundleAttachments(); } catch (_) { bundleAttachments = []; }
+
+    state.sendAbortController = new AbortController();
     const res = await fetch("/api/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1866,7 +2646,12 @@ async function send() {
         messages: sendable,
         model,
         mode: chatMode,
+        use_vision: useVision,
+        web_search_mode: webMode,
+        user_memories: userMemories,
+        bundle_attachments: bundleAttachments,
       }),
+      signal: state.sendAbortController.signal,
     });
     if (!res.ok) {
       const t = await res.text();
@@ -1922,9 +2707,10 @@ async function send() {
         return;
       }
       if (event === "tool_running") {
+        const human = humanLabelForTool(data.tool);
         const sysMsg = {
           role: "system-event",
-          content: `Running ${data.tool}: ${data.command || ""}`,
+          content: data.command ? `${human}: ${data.command}` : human,
         };
         state.messages.push(sysMsg);
         appendMessage(sysMsg);
@@ -1935,6 +2721,10 @@ async function send() {
         return;
       }
       if (event === "tool_call") return;
+      if (event === "verification") {
+        renderVerificationTrace(data);
+        return;
+      }
       if (event === "tool_result") {
         await handleToolResult(data);
         return;
@@ -1950,10 +2740,32 @@ async function send() {
           renderPlan();
         }
         await loadConversations();
+        // Trigger memory extraction on the last user+assistant pair.
+        const lastAssistant = [...state.messages].reverse().find((m) => m.role === "assistant" && m.content);
+        const lastUser = [...state.messages].reverse().find((m) => m.role === "user" && m.content);
+        if (lastAssistant && lastUser) {
+          suggestMemoryCandidates(lastUser.content, lastAssistant.content);
+        }
+        // Cache a one-line summary for the resume surface (uses the title + first user message)
+        if (state.currentConversationId && !state.messages.some((m) => m._hasSummary)) {
+          const firstUser = state.messages.find((m) => m.role === "user" && m.content);
+          if (firstUser) {
+            const rawSummary = (typeof firstUser.content === "string"
+              ? firstUser.content
+              : "").slice(0, 120).replace(/\n/g, " ").trim();
+            if (rawSummary) {
+              api(`/api/conversations/${state.currentConversationId}/summary`, {
+                method: "POST",
+                json: { summary: rawSummary },
+              }).catch(() => {});
+            }
+          }
+        }
         return;
       }
       if (event === "error") {
-        const sysMsg = { role: "system-event", content: "Error: " + data.message };
+        const human = friendlyError({ message: data.message || "" }, "running that step");
+        const sysMsg = { role: "system-event", content: human };
         state.messages.push(sysMsg);
         appendMessage(sysMsg);
         return;
@@ -1962,12 +2774,14 @@ async function send() {
   } catch (e) {
     placeholderEl?.remove();
     state.messages = state.messages.filter((m) => !m._placeholder);
-    flash("Send failed: " + e.message, "warn");
+    flash(friendlyError(e, "sending the message"), "warn");
   } finally {
     state.busy = false;
+    state.sendAbortController = null;
     const btn = $("#send-btn");
     btn.disabled = false;
     btn.textContent = "Send";
+    const sb = $("#stop-btn"); if (sb) sb.hidden = true;
   }
 }
 
@@ -1982,6 +2796,13 @@ function showTelemetryLine(t) {
 
 async function handleToolResult(data) {
   const r = data.result || {};
+
+  // Stash checkpoint info from the most recent write_file so the
+  // verification card (which arrives moments later) can render an
+  // "Undo" button without re-plumbing the trace.
+  if (data.tool === "write_file" && r && r.checkpoint_id && r.filename) {
+    state.lastWriteCheckpoint = { filename: r.filename, checkpoint_id: r.checkpoint_id };
+  }
 
   // write_file result: backend sends data_b64 only on failure (so the user
   // can still recover the bytes via download). On success, the file is on
@@ -2438,6 +3259,416 @@ function switchTab(tabName) {
   $$(".tab-panel").forEach((p) => p.classList.remove("active"));
   const panel = $(`#tab-${tabName}`);
   if (panel) panel.classList.add("active");
+  // Lazy-load tab content the first time the user visits.
+  if (tabName === "files") renderBundleList();
+  if (tabName === "memory") renderMemoryList();
+  if (tabName === "scheduled") renderScheduledList();
+  if (tabName === "tools") renderCloudServices();
+}
+
+// ---------------------------------------------------------------------------
+// File bundles (IndexedDB-backed; mounted bundles ride per-message attachments)
+// ---------------------------------------------------------------------------
+
+state.mountedBundleIds = state.mountedBundleIds || [];
+
+async function renderBundleList() {
+  if (!window.bws) return;
+  const ul = $("#bundle-list");
+  if (!ul) return;
+  let bundles;
+  try { bundles = await bws.bundleList(); }
+  catch (e) { ul.innerHTML = `<li class="hint">Couldn't read browser storage: ${escape(e.message || e)}</li>`; return; }
+  if (!bundles.length) {
+    ul.innerHTML = '<li class="hint">No bundles yet. Click "+ New file bundle" to create one.</li>';
+  } else {
+    ul.innerHTML = "";
+    for (const b of bundles) {
+      const li = document.createElement("li");
+      li.className = "bundle-item";
+      const mounted = state.mountedBundleIds.includes(b.id);
+      li.innerHTML = `
+        <div class="bundle-header">
+          <strong>${escape(b.name)}</strong>
+          <span class="bundle-meta">${b.file_count} file(s) · ${(b.total_bytes/1024).toFixed(0)} KB</span>
+        </div>
+        ${b.description ? `<div class="bundle-desc">${escape(b.description)}</div>` : ""}
+        <div class="bundle-actions">
+          <label class="checkbox">
+            <input type="checkbox" data-action="mount" ${mounted ? "checked" : ""} />
+            Mount in this chat
+          </label>
+          <button data-action="open">Open</button>
+          <button data-action="delete">Delete</button>
+        </div>
+      `;
+      li.querySelector('[data-action="mount"]').addEventListener("change", (e) => {
+        toggleBundleMount(b.id, e.target.checked);
+      });
+      li.querySelector('[data-action="open"]').onclick = () => openBundleDialog(b.id);
+      li.querySelector('[data-action="delete"]').onclick = async () => {
+        if (!confirm(`Delete bundle "${b.name}" and all its files?`)) return;
+        await bws.bundleDelete(b.id);
+        state.mountedBundleIds = state.mountedBundleIds.filter((id) => id !== b.id);
+        renderBundleList();
+        renderMountedBundleChip();
+      };
+      ul.appendChild(li);
+    }
+  }
+  // Show storage quota
+  const quota = await bws.storageEstimate();
+  const quotaEl = $("#bundles-quota");
+  if (quotaEl && quota) {
+    const usedMb = (quota.usage / (1024 * 1024)).toFixed(1);
+    const totalMb = (quota.quota / (1024 * 1024)).toFixed(0);
+    quotaEl.textContent = ` Storage: ${usedMb} MB used of ~${totalMb} MB.`;
+  }
+}
+
+function toggleBundleMount(bundleId, mount) {
+  if (mount) {
+    if (!state.mountedBundleIds.includes(bundleId)) state.mountedBundleIds.push(bundleId);
+  } else {
+    state.mountedBundleIds = state.mountedBundleIds.filter((id) => id !== bundleId);
+  }
+  renderMountedBundleChip();
+}
+
+async function renderMountedBundleChip() {
+  const wrap = $("#mounted-bundles-chip");
+  if (!wrap) return;
+  if (!state.mountedBundleIds.length) {
+    wrap.hidden = true;
+    wrap.innerHTML = "";
+    return;
+  }
+  const bundles = await bws.bundleList();
+  const mounted = bundles.filter((b) => state.mountedBundleIds.includes(b.id));
+  if (!mounted.length) {
+    wrap.hidden = true;
+    return;
+  }
+  wrap.hidden = false;
+  wrap.innerHTML = `📎 ${mounted.length} bundle(s) mounted: ${mounted.map((b) => escape(b.name)).join(", ")}`;
+}
+
+async function openNewBundleDialog() {
+  const name = prompt("Bundle name?", "Untitled bundle");
+  if (!name) return;
+  const desc = prompt("Short description? (optional)", "") || "";
+  const b = await bws.bundleCreate(name, desc);
+  flash(`Created bundle "${b.name}".`, "good");
+  renderBundleList();
+}
+
+async function openBundleDialog(bundleId) {
+  const files = await bws.bundleFiles(bundleId);
+  const bundles = await bws.bundleList();
+  const b = bundles.find((x) => x.id === bundleId);
+  if (!b) return;
+  const list = files.map((f) =>
+    `<li>${escape(f.filename)} <small>(${(f.size/1024).toFixed(0)} KB)</small>
+      <button data-fid="${f.id}" class="btn-remove">Remove</button></li>`
+  ).join("");
+  showDialog({
+    title: `${b.name} — ${files.length} file(s)`,
+    body: `
+      <p>${escape(b.description || "")}</p>
+      <input type="file" id="bundle-add-input" multiple />
+      <ul id="bundle-file-list" class="bundle-file-list">${list}</ul>
+    `,
+    actions: [{ label: "Done", role: "close" }],
+  });
+  setTimeout(() => {
+    document.getElementById("bundle-add-input").addEventListener("change", async (e) => {
+      for (const f of e.target.files) {
+        try { await bws.bundleAddFile(bundleId, f); }
+        catch (err) { flash(friendlyError(err, "adding the file"), "bad"); }
+      }
+      closeDialog();
+      openBundleDialog(bundleId);
+    });
+    document.querySelectorAll(".btn-remove").forEach((btn) => {
+      btn.onclick = async () => {
+        await bws.bundleRemoveFile(btn.dataset.fid);
+        closeDialog();
+        openBundleDialog(bundleId);
+      };
+    });
+  }, 50);
+}
+
+// Upload mounted bundles to the transient store and return attachment records.
+async function gatherMountedBundleAttachments() {
+  if (!state.mountedBundleIds.length || !window.bws) return [];
+  const chatId = state.currentConversationId || "anon";
+  const out = [];
+  for (const bundleId of state.mountedBundleIds) {
+    let files;
+    try { files = await bws.bundleFiles(bundleId); } catch (_) { continue; }
+    for (const f of files) {
+      try {
+        const fd = new FormData();
+        fd.append("file", f.blob, f.filename);
+        const res = await fetch(`/api/uploads/transient?chat_id=${encodeURIComponent(chatId)}`, {
+          method: "POST",
+          body: fd,
+        });
+        if (!res.ok) continue;
+        const a = await res.json();
+        out.push({ url: a.url, filename: a.filename, content_type: a.content_type });
+      } catch (_) { continue; }
+    }
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// User memories (IndexedDB-backed; injected via system prompt)
+// ---------------------------------------------------------------------------
+
+state.memoryPaused = false;
+
+async function renderMemoryList() {
+  if (!window.bws) return;
+  const ul = $("#memory-list");
+  if (!ul) return;
+  const mems = await bws.memoryList();
+  if (!mems.length) {
+    ul.innerHTML = '<li class="hint">No memories yet. Add one yourself or wait for BetterWebUI to suggest some.</li>';
+    return;
+  }
+  ul.innerHTML = "";
+  for (const m of mems) {
+    const li = document.createElement("li");
+    li.className = "memory-item mem-" + (m.source || "user");
+    li.innerHTML = `
+      <label class="memory-toggle">
+        <input type="checkbox" data-action="toggle" ${m.enabled ? "checked" : ""} ${m.source === "auto_extracted_pending" ? "disabled" : ""} />
+        <span class="memory-text">${escape(m.text)}</span>
+        <span class="memory-meta">${m.category} · ${m.source === "auto_extracted_pending" ? "Pending — accept below" : m.source}</span>
+      </label>
+      <div class="memory-actions">
+        ${m.source === "auto_extracted_pending"
+          ? `<button data-action="accept">Accept</button>`
+          : ""}
+        <button data-action="delete">Delete</button>
+      </div>`;
+    li.querySelector('[data-action="toggle"]').addEventListener("change", async (e) => {
+      await bws.memoryUpdate(m.id, { enabled: e.target.checked });
+    });
+    const acceptBtn = li.querySelector('[data-action="accept"]');
+    if (acceptBtn) {
+      acceptBtn.onclick = async () => {
+        await bws.memoryUpdate(m.id, { source: "auto_extracted_accepted", enabled: true });
+        renderMemoryList();
+        updateMemoryBell();
+      };
+    }
+    li.querySelector('[data-action="delete"]').onclick = async () => {
+      await bws.memoryDelete(m.id);
+      renderMemoryList();
+      updateMemoryBell();
+    };
+    ul.appendChild(li);
+  }
+}
+
+async function addMemoryFromPrompt() {
+  const text = prompt("What should I remember about you?");
+  if (!text) return;
+  try {
+    await bws.memoryAdd({ text, category: "preference", source: "user_added", enabled: true });
+    flash("I'll remember that.", "good");
+    renderMemoryList();
+  } catch (e) {
+    flash(friendlyError(e, "saving the memory"), "bad");
+  }
+}
+
+async function updateMemoryBell() {
+  const bell = $("#memory-bell");
+  if (!bell || !window.bws) return;
+  const pending = await bws.memoryPendingCount();
+  if (pending > 0) {
+    bell.hidden = false;
+    bell.textContent = `🔔 ${pending}`;
+    bell.title = `${pending} memory candidate(s) pending`;
+  } else {
+    bell.hidden = true;
+  }
+}
+
+async function suggestMemoryCandidates(userMessage, assistantMessage) {
+  if (state.memoryPaused || !window.bws) return;
+  let data;
+  try {
+    data = await api("/api/memory/extract", {
+      method: "POST",
+      json: { user_message: userMessage, assistant_message: assistantMessage },
+    });
+  } catch (_) { return; }
+  const candidates = (data && data.candidates) || [];
+  for (const c of candidates) {
+    try {
+      await bws.memoryAdd({
+        text: c.text,
+        category: c.category || "other",
+        source: "auto_extracted_pending",
+        enabled: false,
+      });
+    } catch (_) { continue; }
+  }
+  if (candidates.length) {
+    updateMemoryBell();
+    flash(`${candidates.length} memory suggestion(s) ready in the Memory tab.`, "info");
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Scheduled tasks
+// ---------------------------------------------------------------------------
+
+async function renderScheduledList() {
+  const ul = $("#scheduled-list");
+  if (!ul) return;
+  let tasks;
+  try {
+    const data = await api("/api/scheduled-tasks");
+    tasks = data.tasks || [];
+  } catch (e) {
+    ul.innerHTML = `<li class="hint">${escape(friendlyError(e, "loading scheduled tasks"))}</li>`;
+    return;
+  }
+  if (!tasks.length) {
+    ul.innerHTML = '<li class="hint">No scheduled tasks. Click "+ Schedule a task" to create one.</li>';
+    return;
+  }
+  ul.innerHTML = "";
+  for (const t of tasks) {
+    const li = document.createElement("li");
+    li.className = "scheduled-item";
+    const nextStr = t.next_run_at
+      ? new Date(t.next_run_at * 1000).toLocaleString()
+      : "—";
+    li.innerHTML = `
+      <div class="scheduled-header">
+        <strong>${escape(t.name)}</strong>
+        <span class="scheduled-meta">${t.enabled ? "On" : "Paused"} · next: ${escape(nextStr)}</span>
+      </div>
+      <div class="scheduled-prompt">${escape((t.prompt || "").slice(0, 200))}</div>
+      <div class="scheduled-actions">
+        <button data-action="toggle">${t.enabled ? "Pause" : "Resume"}</button>
+        <button data-action="delete">Delete</button>
+      </div>
+    `;
+    li.querySelector('[data-action="toggle"]').onclick = async () => {
+      await api("/api/scheduled-tasks", { method: "POST", json: { ...t, enabled: !t.enabled } });
+      renderScheduledList();
+    };
+    li.querySelector('[data-action="delete"]').onclick = async () => {
+      if (!confirm(`Delete scheduled task "${t.name}"?`)) return;
+      await api(`/api/scheduled-tasks/${encodeURIComponent(t.id)}`, { method: "DELETE" });
+      renderScheduledList();
+    };
+    ul.appendChild(li);
+  }
+}
+
+function openNewScheduledDialog() {
+  showDialog({
+    title: "Schedule a task",
+    body: `
+      <label>Name <input id="sch-name" type="text" placeholder="Morning email summary" /></label>
+      <label>Prompt <textarea id="sch-prompt" rows="3" placeholder="Summarise my Outlook unread"></textarea></label>
+      <label>Repeat
+        <select id="sch-kind">
+          <option value="once">Once</option>
+          <option value="cron-lite" selected>Daily / Weekly (pick days &amp; time)</option>
+          <option value="interval">Every N seconds</option>
+        </select>
+      </label>
+      <div id="sch-once-wrap" hidden>
+        <label>When (date &amp; time) <input id="sch-at" type="datetime-local" /></label>
+      </div>
+      <div id="sch-cron-wrap">
+        <label>Time <input id="sch-time" type="time" value="09:00" /></label>
+        <label>Days
+          <span class="day-row">
+            <label class="day-chip"><input type="checkbox" data-d="1" checked /> Mon</label>
+            <label class="day-chip"><input type="checkbox" data-d="2" checked /> Tue</label>
+            <label class="day-chip"><input type="checkbox" data-d="3" checked /> Wed</label>
+            <label class="day-chip"><input type="checkbox" data-d="4" checked /> Thu</label>
+            <label class="day-chip"><input type="checkbox" data-d="5" checked /> Fri</label>
+            <label class="day-chip"><input type="checkbox" data-d="6" /> Sat</label>
+            <label class="day-chip"><input type="checkbox" data-d="0" /> Sun</label>
+          </span>
+        </label>
+      </div>
+      <div id="sch-interval-wrap" hidden>
+        <label>Every N seconds <input id="sch-every" type="number" min="60" value="3600" /></label>
+      </div>
+    `,
+    actions: [
+      { label: "Cancel", role: "close" },
+      { label: "Create", role: "primary", onClick: async () => {
+        const name = document.getElementById("sch-name").value.trim();
+        const promptText = document.getElementById("sch-prompt").value.trim();
+        const kind = document.getElementById("sch-kind").value;
+        if (!name || !promptText) { flash("Name and prompt are required.", "warn"); return; }
+        let schedule;
+        if (kind === "once") {
+          const at = document.getElementById("sch-at").value;
+          if (!at) { flash("Pick a date/time.", "warn"); return; }
+          schedule = { kind: "once", at_iso: new Date(at).toISOString() };
+        } else if (kind === "interval") {
+          const every = Math.max(60, parseInt(document.getElementById("sch-every").value, 10) || 3600);
+          schedule = { kind: "interval", every_seconds: every };
+        } else {
+          const t = document.getElementById("sch-time").value || "09:00";
+          const [h, m] = t.split(":").map((x) => parseInt(x, 10));
+          const days = [];
+          document.querySelectorAll(".day-chip input").forEach((cb) => {
+            if (cb.checked) days.push(parseInt(cb.dataset.d, 10));
+          });
+          schedule = { kind: "cron-lite", hour: h, minute: m, weekdays: days };
+        }
+        await api("/api/scheduled-tasks", {
+          method: "POST",
+          json: { name, prompt: promptText, schedule, enabled: true, workspace_id: state.config?.active_workspace_id || "" },
+        });
+        closeDialog();
+        renderScheduledList();
+        flash(`Scheduled "${name}".`, "good");
+      } },
+    ],
+  });
+  setTimeout(() => {
+    const kindSel = document.getElementById("sch-kind");
+    const onChange = () => {
+      document.getElementById("sch-once-wrap").hidden = (kindSel.value !== "once");
+      document.getElementById("sch-cron-wrap").hidden = (kindSel.value !== "cron-lite");
+      document.getElementById("sch-interval-wrap").hidden = (kindSel.value !== "interval");
+    };
+    kindSel.addEventListener("change", onChange);
+    onChange();
+  }, 50);
+}
+
+// Poll for scheduled-task notifications every 30s.
+async function pollScheduledNotifications() {
+  try {
+    const data = await api("/api/scheduled-tasks/notifications");
+    for (const n of (data.notifications || [])) {
+      const icon = n.ok ? "✓" : "⚠";
+      flash(`${icon} ${n.name}: ${(n.summary || "").slice(0, 200)}`, n.ok ? "good" : "warn");
+      if ("Notification" in window && Notification.permission === "granted") {
+        try { new Notification(`BetterWebUI · ${n.name}`, { body: (n.summary || "").slice(0, 200) }); }
+        catch (_) {}
+      }
+    }
+  } catch (_) {}
 }
 
 // ---------------------------------------------------------------------------
@@ -2472,11 +3703,43 @@ function wireEvents() {
       send();
     }
   });
+  $("#composer-input").addEventListener("paste", async (e) => {
+    const items = e.clipboardData && e.clipboardData.items;
+    if (!items) return;
+    for (const it of items) {
+      if (it.kind === "file" && it.type.startsWith("image/")) {
+        e.preventDefault();
+        const f = it.getAsFile();
+        if (!f) continue;
+        const named = new File([f], f.name || `pasted-${Date.now()}.png`, { type: f.type });
+        await attachFile(named);
+        const vis = $("#toggle-vision"); if (vis) vis.checked = true;
+        flash("Pasted image attached.", "good");
+        return;
+      }
+    }
+  });
   $("#attach-input").addEventListener("change", (e) => {
     const f = e.target.files[0];
-    if (f) attachFile(f);
+    if (f) {
+      attachFile(f);
+      if (f.type && f.type.startsWith("image/")) {
+        const vis = $("#toggle-vision"); if (vis) vis.checked = true;
+      }
+    }
     e.target.value = "";
   });
+
+  // Screenshot capture (Chromium / Firefox; hidden on Safari which lacks getDisplayMedia)
+  const screenshotBtn = $("#screenshot-btn");
+  if (screenshotBtn) {
+    if (navigator.mediaDevices && typeof navigator.mediaDevices.getDisplayMedia === "function") {
+      screenshotBtn.hidden = false;
+      screenshotBtn.addEventListener("click", captureScreenshot);
+    } else {
+      screenshotBtn.hidden = true;
+    }
+  }
 
   // Mic
   $("#mic-btn")?.addEventListener("click", toggleMic);
@@ -2485,6 +3748,12 @@ function wireEvents() {
   $("#save-connection").onclick = saveConnection;
   $("#save-defaults").onclick = saveDefaults;
   $("#save-display")?.addEventListener("click", saveDisplay);
+  $("#save-websearch")?.addEventListener("click", saveWebSearch);
+  $("#save-verification")?.addEventListener("click", saveVerification);
+  $("#cfg-websearch-provider")?.addEventListener("change", (e) => {
+    const wrap = $("#cfg-websearch-custom-wrap");
+    if (wrap) wrap.hidden = (e.target.value !== "custom");
+  });
 
   // Services enable/disable
   ["clk", "autogui", "osso"].forEach((name) => {
@@ -2503,6 +3772,15 @@ function wireEvents() {
     if (f) uploadSkill(f);
     e.target.value = "";
   });
+
+  // File bundles, memories, scheduled tasks
+  $("#new-bundle-btn")?.addEventListener("click", openNewBundleDialog);
+  $("#new-memory-btn")?.addEventListener("click", addMemoryFromPrompt);
+  $("#memory-pause-toggle")?.addEventListener("change", (e) => {
+    state.memoryPaused = !!e.target.checked;
+  });
+  $("#new-scheduled-btn")?.addEventListener("click", openNewScheduledDialog);
+  $("#memory-bell")?.addEventListener("click", () => switchTab("memory"));
 
   // Workspaces
   $("#new-workspace-btn").onclick = () => openWorkspaceDialog(null);
@@ -2527,17 +3805,35 @@ function wireEvents() {
   $("#plan-pane-close")?.addEventListener("click", () => setPlanPaneVisible(false));
   $("#files-pane-close")?.addEventListener("click", () => setFilesPaneVisible(false));
 
-  // Conversation search
+  // Conversation search (debounced, uses server-side full-text search)
+  let _searchTimer = null;
   $("#search-toggle-btn")?.addEventListener("click", () => {
     const wrap = $("#conv-search-wrap");
     if (!wrap) return;
     wrap.hidden = !wrap.hidden;
     if (!wrap.hidden) $("#conv-search")?.focus();
-    else { state.convSearchQuery = ""; renderConversationList(); }
+    else {
+      state.convSearchQuery = "";
+      state.convSearchResults = null;
+      renderConversationList();
+    }
   });
   $("#conv-search")?.addEventListener("input", (e) => {
-    state.convSearchQuery = e.target.value;
-    renderConversationList();
+    const q = e.target.value;
+    state.convSearchQuery = q;
+    clearTimeout(_searchTimer);
+    if (!q.trim()) {
+      state.convSearchResults = null;
+      renderConversationList();
+      return;
+    }
+    _searchTimer = setTimeout(async () => {
+      try {
+        const data = await api(`/api/conversations/search?q=${encodeURIComponent(q)}`);
+        state.convSearchResults = data.results || [];
+        renderConversationList();
+      } catch (_) {}
+    }, 250);
   });
 
   // Mode select — persist per-workspace when a workspace is active, otherwise globally
@@ -2582,6 +3878,7 @@ async function init() {
   wireTabs();
   wireEvents();
   initMic();
+  _initAnnotationModal();
   // Load workspaces before config so loadConfig's #mode-select lookup can
   // see the active workspace's stored mode on first paint; otherwise the
   // select would fall back to config.chat_mode until the next config
@@ -2598,6 +3895,14 @@ async function init() {
   ]);
   populateWorkspaceSelect();
   newChat();
+  // Memory bell + scheduled notification poll
+  try { updateMemoryBell(); } catch (_) {}
+  setInterval(() => { try { pollScheduledNotifications(); } catch (_) {} }, 30000);
+  pollScheduledNotifications();
+  // Request notification permission once, non-blocking.
+  if ("Notification" in window && Notification.permission === "default") {
+    setTimeout(() => { try { Notification.requestPermission(); } catch (_) {} }, 3000);
+  }
   // Check if onboarding is needed
   await checkOnboarding();
 }
