@@ -2137,6 +2137,17 @@ async function send() {
     const useVision = !!(visionToggle && visionToggle.checked);
     const webMode = (webToggle && webToggle.value) || "off";
 
+    // Collect user memories (if enabled in browser storage and not paused)
+    let userMemories = [];
+    if (window.bws && !state.memoryPaused) {
+      try {
+        userMemories = await bws.memoryEnabledTexts(state.config?.active_workspace_id || "");
+      } catch (_) { userMemories = []; }
+    }
+    // Upload mounted file bundles transiently for this turn
+    let bundleAttachments = [];
+    try { bundleAttachments = await gatherMountedBundleAttachments(); } catch (_) { bundleAttachments = []; }
+
     const res = await fetch("/api/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -2147,6 +2158,8 @@ async function send() {
         mode: chatMode,
         use_vision: useVision,
         web_search_mode: webMode,
+        user_memories: userMemories,
+        bundle_attachments: bundleAttachments,
       }),
     });
     if (!res.ok) {
@@ -2235,6 +2248,12 @@ async function send() {
           renderPlan();
         }
         await loadConversations();
+        // Trigger memory extraction on the last user+assistant pair.
+        const lastAssistant = [...state.messages].reverse().find((m) => m.role === "assistant" && m.content);
+        const lastUser = [...state.messages].reverse().find((m) => m.role === "user" && m.content);
+        if (lastAssistant && lastUser) {
+          suggestMemoryCandidates(lastUser.content, lastAssistant.content);
+        }
         return;
       }
       if (event === "error") {
@@ -2248,7 +2267,7 @@ async function send() {
   } catch (e) {
     placeholderEl?.remove();
     state.messages = state.messages.filter((m) => !m._placeholder);
-    flash("Send failed: " + e.message, "warn");
+    flash(friendlyError(e, "sending the message"), "warn");
   } finally {
     state.busy = false;
     const btn = $("#send-btn");
@@ -2731,6 +2750,415 @@ function switchTab(tabName) {
   $$(".tab-panel").forEach((p) => p.classList.remove("active"));
   const panel = $(`#tab-${tabName}`);
   if (panel) panel.classList.add("active");
+  // Lazy-load tab content the first time the user visits.
+  if (tabName === "files") renderBundleList();
+  if (tabName === "memory") renderMemoryList();
+  if (tabName === "scheduled") renderScheduledList();
+}
+
+// ---------------------------------------------------------------------------
+// File bundles (IndexedDB-backed; mounted bundles ride per-message attachments)
+// ---------------------------------------------------------------------------
+
+state.mountedBundleIds = state.mountedBundleIds || [];
+
+async function renderBundleList() {
+  if (!window.bws) return;
+  const ul = $("#bundle-list");
+  if (!ul) return;
+  let bundles;
+  try { bundles = await bws.bundleList(); }
+  catch (e) { ul.innerHTML = `<li class="hint">Couldn't read browser storage: ${escape(e.message || e)}</li>`; return; }
+  if (!bundles.length) {
+    ul.innerHTML = '<li class="hint">No bundles yet. Click "+ New file bundle" to create one.</li>';
+  } else {
+    ul.innerHTML = "";
+    for (const b of bundles) {
+      const li = document.createElement("li");
+      li.className = "bundle-item";
+      const mounted = state.mountedBundleIds.includes(b.id);
+      li.innerHTML = `
+        <div class="bundle-header">
+          <strong>${escape(b.name)}</strong>
+          <span class="bundle-meta">${b.file_count} file(s) · ${(b.total_bytes/1024).toFixed(0)} KB</span>
+        </div>
+        ${b.description ? `<div class="bundle-desc">${escape(b.description)}</div>` : ""}
+        <div class="bundle-actions">
+          <label class="checkbox">
+            <input type="checkbox" data-action="mount" ${mounted ? "checked" : ""} />
+            Mount in this chat
+          </label>
+          <button data-action="open">Open</button>
+          <button data-action="delete">Delete</button>
+        </div>
+      `;
+      li.querySelector('[data-action="mount"]').addEventListener("change", (e) => {
+        toggleBundleMount(b.id, e.target.checked);
+      });
+      li.querySelector('[data-action="open"]').onclick = () => openBundleDialog(b.id);
+      li.querySelector('[data-action="delete"]').onclick = async () => {
+        if (!confirm(`Delete bundle "${b.name}" and all its files?`)) return;
+        await bws.bundleDelete(b.id);
+        state.mountedBundleIds = state.mountedBundleIds.filter((id) => id !== b.id);
+        renderBundleList();
+        renderMountedBundleChip();
+      };
+      ul.appendChild(li);
+    }
+  }
+  // Show storage quota
+  const quota = await bws.storageEstimate();
+  const quotaEl = $("#bundles-quota");
+  if (quotaEl && quota) {
+    const usedMb = (quota.usage / (1024 * 1024)).toFixed(1);
+    const totalMb = (quota.quota / (1024 * 1024)).toFixed(0);
+    quotaEl.textContent = ` Storage: ${usedMb} MB used of ~${totalMb} MB.`;
+  }
+}
+
+function toggleBundleMount(bundleId, mount) {
+  if (mount) {
+    if (!state.mountedBundleIds.includes(bundleId)) state.mountedBundleIds.push(bundleId);
+  } else {
+    state.mountedBundleIds = state.mountedBundleIds.filter((id) => id !== bundleId);
+  }
+  renderMountedBundleChip();
+}
+
+async function renderMountedBundleChip() {
+  const wrap = $("#mounted-bundles-chip");
+  if (!wrap) return;
+  if (!state.mountedBundleIds.length) {
+    wrap.hidden = true;
+    wrap.innerHTML = "";
+    return;
+  }
+  const bundles = await bws.bundleList();
+  const mounted = bundles.filter((b) => state.mountedBundleIds.includes(b.id));
+  if (!mounted.length) {
+    wrap.hidden = true;
+    return;
+  }
+  wrap.hidden = false;
+  wrap.innerHTML = `📎 ${mounted.length} bundle(s) mounted: ${mounted.map((b) => escape(b.name)).join(", ")}`;
+}
+
+async function openNewBundleDialog() {
+  const name = prompt("Bundle name?", "Untitled bundle");
+  if (!name) return;
+  const desc = prompt("Short description? (optional)", "") || "";
+  const b = await bws.bundleCreate(name, desc);
+  flash(`Created bundle "${b.name}".`, "good");
+  renderBundleList();
+}
+
+async function openBundleDialog(bundleId) {
+  const files = await bws.bundleFiles(bundleId);
+  const bundles = await bws.bundleList();
+  const b = bundles.find((x) => x.id === bundleId);
+  if (!b) return;
+  const list = files.map((f) =>
+    `<li>${escape(f.filename)} <small>(${(f.size/1024).toFixed(0)} KB)</small>
+      <button data-fid="${f.id}" class="btn-remove">Remove</button></li>`
+  ).join("");
+  showDialog({
+    title: `${b.name} — ${files.length} file(s)`,
+    body: `
+      <p>${escape(b.description || "")}</p>
+      <input type="file" id="bundle-add-input" multiple />
+      <ul id="bundle-file-list" class="bundle-file-list">${list}</ul>
+    `,
+    actions: [{ label: "Done", role: "close" }],
+  });
+  setTimeout(() => {
+    document.getElementById("bundle-add-input").addEventListener("change", async (e) => {
+      for (const f of e.target.files) {
+        try { await bws.bundleAddFile(bundleId, f); }
+        catch (err) { flash(friendlyError(err, "adding the file"), "bad"); }
+      }
+      closeDialog();
+      openBundleDialog(bundleId);
+    });
+    document.querySelectorAll(".btn-remove").forEach((btn) => {
+      btn.onclick = async () => {
+        await bws.bundleRemoveFile(btn.dataset.fid);
+        closeDialog();
+        openBundleDialog(bundleId);
+      };
+    });
+  }, 50);
+}
+
+// Upload mounted bundles to the transient store and return attachment records.
+async function gatherMountedBundleAttachments() {
+  if (!state.mountedBundleIds.length || !window.bws) return [];
+  const chatId = state.currentConversationId || "anon";
+  const out = [];
+  for (const bundleId of state.mountedBundleIds) {
+    let files;
+    try { files = await bws.bundleFiles(bundleId); } catch (_) { continue; }
+    for (const f of files) {
+      try {
+        const fd = new FormData();
+        fd.append("file", f.blob, f.filename);
+        const res = await fetch(`/api/uploads/transient?chat_id=${encodeURIComponent(chatId)}`, {
+          method: "POST",
+          body: fd,
+        });
+        if (!res.ok) continue;
+        const a = await res.json();
+        out.push({ url: a.url, filename: a.filename, content_type: a.content_type });
+      } catch (_) { continue; }
+    }
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// User memories (IndexedDB-backed; injected via system prompt)
+// ---------------------------------------------------------------------------
+
+state.memoryPaused = false;
+
+async function renderMemoryList() {
+  if (!window.bws) return;
+  const ul = $("#memory-list");
+  if (!ul) return;
+  const mems = await bws.memoryList();
+  if (!mems.length) {
+    ul.innerHTML = '<li class="hint">No memories yet. Add one yourself or wait for BetterWebUI to suggest some.</li>';
+    return;
+  }
+  ul.innerHTML = "";
+  for (const m of mems) {
+    const li = document.createElement("li");
+    li.className = "memory-item mem-" + (m.source || "user");
+    li.innerHTML = `
+      <label class="memory-toggle">
+        <input type="checkbox" data-action="toggle" ${m.enabled ? "checked" : ""} ${m.source === "auto_extracted_pending" ? "disabled" : ""} />
+        <span class="memory-text">${escape(m.text)}</span>
+        <span class="memory-meta">${m.category} · ${m.source === "auto_extracted_pending" ? "Pending — accept below" : m.source}</span>
+      </label>
+      <div class="memory-actions">
+        ${m.source === "auto_extracted_pending"
+          ? `<button data-action="accept">Accept</button>`
+          : ""}
+        <button data-action="delete">Delete</button>
+      </div>`;
+    li.querySelector('[data-action="toggle"]').addEventListener("change", async (e) => {
+      await bws.memoryUpdate(m.id, { enabled: e.target.checked });
+    });
+    const acceptBtn = li.querySelector('[data-action="accept"]');
+    if (acceptBtn) {
+      acceptBtn.onclick = async () => {
+        await bws.memoryUpdate(m.id, { source: "auto_extracted_accepted", enabled: true });
+        renderMemoryList();
+        updateMemoryBell();
+      };
+    }
+    li.querySelector('[data-action="delete"]').onclick = async () => {
+      await bws.memoryDelete(m.id);
+      renderMemoryList();
+      updateMemoryBell();
+    };
+    ul.appendChild(li);
+  }
+}
+
+async function addMemoryFromPrompt() {
+  const text = prompt("What should I remember about you?");
+  if (!text) return;
+  try {
+    await bws.memoryAdd({ text, category: "preference", source: "user_added", enabled: true });
+    flash("I'll remember that.", "good");
+    renderMemoryList();
+  } catch (e) {
+    flash(friendlyError(e, "saving the memory"), "bad");
+  }
+}
+
+async function updateMemoryBell() {
+  const bell = $("#memory-bell");
+  if (!bell || !window.bws) return;
+  const pending = await bws.memoryPendingCount();
+  if (pending > 0) {
+    bell.hidden = false;
+    bell.textContent = `🔔 ${pending}`;
+    bell.title = `${pending} memory candidate(s) pending`;
+  } else {
+    bell.hidden = true;
+  }
+}
+
+async function suggestMemoryCandidates(userMessage, assistantMessage) {
+  if (state.memoryPaused || !window.bws) return;
+  let data;
+  try {
+    data = await api("/api/memory/extract", {
+      method: "POST",
+      json: { user_message: userMessage, assistant_message: assistantMessage },
+    });
+  } catch (_) { return; }
+  const candidates = (data && data.candidates) || [];
+  for (const c of candidates) {
+    try {
+      await bws.memoryAdd({
+        text: c.text,
+        category: c.category || "other",
+        source: "auto_extracted_pending",
+        enabled: false,
+      });
+    } catch (_) { continue; }
+  }
+  if (candidates.length) {
+    updateMemoryBell();
+    flash(`${candidates.length} memory suggestion(s) ready in the Memory tab.`, "info");
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Scheduled tasks
+// ---------------------------------------------------------------------------
+
+async function renderScheduledList() {
+  const ul = $("#scheduled-list");
+  if (!ul) return;
+  let tasks;
+  try {
+    const data = await api("/api/scheduled-tasks");
+    tasks = data.tasks || [];
+  } catch (e) {
+    ul.innerHTML = `<li class="hint">${escape(friendlyError(e, "loading scheduled tasks"))}</li>`;
+    return;
+  }
+  if (!tasks.length) {
+    ul.innerHTML = '<li class="hint">No scheduled tasks. Click "+ Schedule a task" to create one.</li>';
+    return;
+  }
+  ul.innerHTML = "";
+  for (const t of tasks) {
+    const li = document.createElement("li");
+    li.className = "scheduled-item";
+    const nextStr = t.next_run_at
+      ? new Date(t.next_run_at * 1000).toLocaleString()
+      : "—";
+    li.innerHTML = `
+      <div class="scheduled-header">
+        <strong>${escape(t.name)}</strong>
+        <span class="scheduled-meta">${t.enabled ? "On" : "Paused"} · next: ${escape(nextStr)}</span>
+      </div>
+      <div class="scheduled-prompt">${escape((t.prompt || "").slice(0, 200))}</div>
+      <div class="scheduled-actions">
+        <button data-action="toggle">${t.enabled ? "Pause" : "Resume"}</button>
+        <button data-action="delete">Delete</button>
+      </div>
+    `;
+    li.querySelector('[data-action="toggle"]').onclick = async () => {
+      await api("/api/scheduled-tasks", { method: "POST", json: { ...t, enabled: !t.enabled } });
+      renderScheduledList();
+    };
+    li.querySelector('[data-action="delete"]').onclick = async () => {
+      if (!confirm(`Delete scheduled task "${t.name}"?`)) return;
+      await api(`/api/scheduled-tasks/${encodeURIComponent(t.id)}`, { method: "DELETE" });
+      renderScheduledList();
+    };
+    ul.appendChild(li);
+  }
+}
+
+function openNewScheduledDialog() {
+  showDialog({
+    title: "Schedule a task",
+    body: `
+      <label>Name <input id="sch-name" type="text" placeholder="Morning email summary" /></label>
+      <label>Prompt <textarea id="sch-prompt" rows="3" placeholder="Summarise my Outlook unread"></textarea></label>
+      <label>Repeat
+        <select id="sch-kind">
+          <option value="once">Once</option>
+          <option value="cron-lite" selected>Daily / Weekly (pick days &amp; time)</option>
+          <option value="interval">Every N seconds</option>
+        </select>
+      </label>
+      <div id="sch-once-wrap" hidden>
+        <label>When (date &amp; time) <input id="sch-at" type="datetime-local" /></label>
+      </div>
+      <div id="sch-cron-wrap">
+        <label>Time <input id="sch-time" type="time" value="09:00" /></label>
+        <label>Days
+          <span class="day-row">
+            <label class="day-chip"><input type="checkbox" data-d="1" checked /> Mon</label>
+            <label class="day-chip"><input type="checkbox" data-d="2" checked /> Tue</label>
+            <label class="day-chip"><input type="checkbox" data-d="3" checked /> Wed</label>
+            <label class="day-chip"><input type="checkbox" data-d="4" checked /> Thu</label>
+            <label class="day-chip"><input type="checkbox" data-d="5" checked /> Fri</label>
+            <label class="day-chip"><input type="checkbox" data-d="6" /> Sat</label>
+            <label class="day-chip"><input type="checkbox" data-d="0" /> Sun</label>
+          </span>
+        </label>
+      </div>
+      <div id="sch-interval-wrap" hidden>
+        <label>Every N seconds <input id="sch-every" type="number" min="60" value="3600" /></label>
+      </div>
+    `,
+    actions: [
+      { label: "Cancel", role: "close" },
+      { label: "Create", role: "primary", onClick: async () => {
+        const name = document.getElementById("sch-name").value.trim();
+        const promptText = document.getElementById("sch-prompt").value.trim();
+        const kind = document.getElementById("sch-kind").value;
+        if (!name || !promptText) { flash("Name and prompt are required.", "warn"); return; }
+        let schedule;
+        if (kind === "once") {
+          const at = document.getElementById("sch-at").value;
+          if (!at) { flash("Pick a date/time.", "warn"); return; }
+          schedule = { kind: "once", at_iso: new Date(at).toISOString() };
+        } else if (kind === "interval") {
+          const every = Math.max(60, parseInt(document.getElementById("sch-every").value, 10) || 3600);
+          schedule = { kind: "interval", every_seconds: every };
+        } else {
+          const t = document.getElementById("sch-time").value || "09:00";
+          const [h, m] = t.split(":").map((x) => parseInt(x, 10));
+          const days = [];
+          document.querySelectorAll(".day-chip input").forEach((cb) => {
+            if (cb.checked) days.push(parseInt(cb.dataset.d, 10));
+          });
+          schedule = { kind: "cron-lite", hour: h, minute: m, weekdays: days };
+        }
+        await api("/api/scheduled-tasks", {
+          method: "POST",
+          json: { name, prompt: promptText, schedule, enabled: true, workspace_id: state.config?.active_workspace_id || "" },
+        });
+        closeDialog();
+        renderScheduledList();
+        flash(`Scheduled "${name}".`, "good");
+      } },
+    ],
+  });
+  setTimeout(() => {
+    const kindSel = document.getElementById("sch-kind");
+    const onChange = () => {
+      document.getElementById("sch-once-wrap").hidden = (kindSel.value !== "once");
+      document.getElementById("sch-cron-wrap").hidden = (kindSel.value !== "cron-lite");
+      document.getElementById("sch-interval-wrap").hidden = (kindSel.value !== "interval");
+    };
+    kindSel.addEventListener("change", onChange);
+    onChange();
+  }, 50);
+}
+
+// Poll for scheduled-task notifications every 30s.
+async function pollScheduledNotifications() {
+  try {
+    const data = await api("/api/scheduled-tasks/notifications");
+    for (const n of (data.notifications || [])) {
+      const icon = n.ok ? "✓" : "⚠";
+      flash(`${icon} ${n.name}: ${(n.summary || "").slice(0, 200)}`, n.ok ? "good" : "warn");
+      if ("Notification" in window && Notification.permission === "granted") {
+        try { new Notification(`BetterWebUI · ${n.name}`, { body: (n.summary || "").slice(0, 200) }); }
+        catch (_) {}
+      }
+    }
+  } catch (_) {}
 }
 
 // ---------------------------------------------------------------------------
@@ -2835,6 +3263,15 @@ function wireEvents() {
     e.target.value = "";
   });
 
+  // File bundles, memories, scheduled tasks
+  $("#new-bundle-btn")?.addEventListener("click", openNewBundleDialog);
+  $("#new-memory-btn")?.addEventListener("click", addMemoryFromPrompt);
+  $("#memory-pause-toggle")?.addEventListener("change", (e) => {
+    state.memoryPaused = !!e.target.checked;
+  });
+  $("#new-scheduled-btn")?.addEventListener("click", openNewScheduledDialog);
+  $("#memory-bell")?.addEventListener("click", () => switchTab("memory"));
+
   // Workspaces
   $("#new-workspace-btn").onclick = () => openWorkspaceDialog(null);
   $("#workspace-select").onchange = (e) => activateWorkspace(e.target.value);
@@ -2929,6 +3366,14 @@ async function init() {
   ]);
   populateWorkspaceSelect();
   newChat();
+  // Memory bell + scheduled notification poll
+  try { updateMemoryBell(); } catch (_) {}
+  setInterval(() => { try { pollScheduledNotifications(); } catch (_) {} }, 30000);
+  pollScheduledNotifications();
+  // Request notification permission once, non-blocking.
+  if ("Notification" in window && Notification.permission === "default") {
+    setTimeout(() => { try { Notification.requestPermission(); } catch (_) {} }, 3000);
+  }
   // Check if onboarding is needed
   await checkOnboarding();
 }

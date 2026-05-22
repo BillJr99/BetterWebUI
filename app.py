@@ -14,6 +14,7 @@ import ipaddress
 import json
 import os
 import platform
+import re
 import shutil
 import time
 import uuid
@@ -3389,9 +3390,16 @@ async def upload_file(file: UploadFile = File(...)):
 # live in browser IndexedDB and are streamed up only for the duration of
 # the chat turn — keeps sensitive bytes off the server long-term.
 
-UPLOADS_TRANSIENT_DIR = UPLOADS_DIR / "transient"
-UPLOADS_TRANSIENT_DIR.mkdir(parents=True, exist_ok=True)
 _TRANSIENT_TTL_SECONDS = 24 * 3600
+
+
+def _transient_root() -> Path:
+    """Resolve the transient-uploads directory lazily from the current
+    UPLOADS_DIR. Lazy resolution lets test fixtures rebind UPLOADS_DIR
+    without these endpoints pointing at the stale module-load value."""
+    root = UPLOADS_DIR / "transient"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
 
 
 def _sweep_transient_uploads() -> int:
@@ -3400,7 +3408,7 @@ def _sweep_transient_uploads() -> int:
     cutoff = time.time() - _TRANSIENT_TTL_SECONDS
     removed = 0
     try:
-        for chat_dir in UPLOADS_TRANSIENT_DIR.iterdir():
+        for chat_dir in _transient_root().iterdir():
             if not chat_dir.is_dir():
                 continue
             try:
@@ -3421,8 +3429,8 @@ async def upload_transient_file(request: Request, file: UploadFile = File(...)):
     _require_local_caller(request)
     chat_id = request.query_params.get("chat_id") or "anon"
     # Sanitize chat_id: alphanumeric / dash / underscore only.
-    chat_id = re.sub(r"[^A-Za-z0-9._-]+", "_", chat_id)[:64] or "anon"
-    chat_dir = UPLOADS_TRANSIENT_DIR / chat_id
+    chat_id = re.sub(r"[^A-Za-z0-9_-]+", "_", chat_id)[:64].strip("._-") or "anon"
+    chat_dir = _transient_root() / chat_id
     chat_dir.mkdir(parents=True, exist_ok=True)
     safe_name = f"{uuid.uuid4().hex}_{Path(file.filename or 'file').name}"
     dest = chat_dir / safe_name
@@ -3439,10 +3447,10 @@ async def upload_transient_file(request: Request, file: UploadFile = File(...)):
 @app.delete("/api/uploads/transient/{chat_id}")
 async def delete_transient_chat(chat_id: str, request: Request):
     _require_local_caller(request)
-    chat_id = re.sub(r"[^A-Za-z0-9._-]+", "_", chat_id)[:64]
+    chat_id = re.sub(r"[^A-Za-z0-9_-]+", "_", chat_id)[:64].strip("._-")
     if not chat_id:
         raise HTTPException(400, "Invalid chat_id.")
-    chat_dir = UPLOADS_TRANSIENT_DIR / chat_id
+    chat_dir = _transient_root() / chat_id
     if chat_dir.exists():
         shutil.rmtree(chat_dir, ignore_errors=True)
     return {"ok": True, "chat_id": chat_id}

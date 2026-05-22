@@ -117,6 +117,9 @@
       <nav class="tabs" role="tablist" aria-label="Sidebar tabs">
         <button class="tab active" data-tab="chats" role="tab" aria-selected="true" aria-controls="tab-chats" id="tab-btn-chats">Chats</button>
         <button class="tab" data-tab="workspaces" role="tab" aria-selected="false" aria-controls="tab-workspaces" id="tab-btn-workspaces">Workspaces</button>
+        <button class="tab" data-tab="files" role="tab" aria-selected="false" aria-controls="tab-files" id="tab-btn-files">Files</button>
+        <button class="tab" data-tab="memory" role="tab" aria-selected="false" aria-controls="tab-memory" id="tab-btn-memory">Memory</button>
+        <button class="tab" data-tab="scheduled" role="tab" aria-selected="false" aria-controls="tab-scheduled" id="tab-btn-scheduled">Scheduled</button>
         <button class="tab" data-tab="skills" role="tab" aria-selected="false" aria-controls="tab-skills" id="tab-btn-skills">Skills</button>
         <button class="tab" data-tab="prompts" role="tab" aria-selected="false" aria-controls="tab-prompts" id="tab-btn-prompts">Prompts</button>
         <button class="tab" data-tab="tools" role="tab" aria-selected="false" aria-controls="tab-tools" id="tab-btn-tools">Tools</button>
@@ -141,6 +144,45 @@
           you can return to.
         </p>
         <ul id="workspace-list" aria-label="Workspaces"></ul>
+      </section>
+
+      <section id="tab-files" class="tab-panel" role="tabpanel" aria-labelledby="tab-btn-files">
+        <div class="panel-actions">
+          <button id="new-bundle-btn">+ New file bundle</button>
+        </div>
+        <p class="hint">
+          A file bundle is a named group of files (PDFs, notes, images, code) that you can
+          mount in any chat. Files are stored in your browser; they're sent to the model only
+          while a chat is open. <span id="bundles-quota" class="hint-small"></span>
+        </p>
+        <ul id="bundle-list" aria-label="File bundles"></ul>
+      </section>
+
+      <section id="tab-memory" class="tab-panel" role="tabpanel" aria-labelledby="tab-btn-memory">
+        <div class="panel-actions">
+          <button id="new-memory-btn">+ Add a memory</button>
+          <label class="checkbox">
+            <input type="checkbox" id="memory-pause-toggle" />
+            Pause memory
+          </label>
+        </div>
+        <p class="hint">
+          Things BetterWebUI remembers about you, stored in your browser. Memories are added
+          to every chat's context. Toggle "Pause memory" to stop suggestions and prompt
+          injection without deleting anything.
+        </p>
+        <ul id="memory-list" aria-label="Memories"></ul>
+      </section>
+
+      <section id="tab-scheduled" class="tab-panel" role="tabpanel" aria-labelledby="tab-btn-scheduled">
+        <div class="panel-actions">
+          <button id="new-scheduled-btn">+ Schedule a task</button>
+        </div>
+        <p class="hint">
+          Scheduled prompts run automatically while BetterWebUI is open. Use "Once" for
+          one-shot reminders, "Daily" or "Weekly" for recurring tasks.
+        </p>
+        <ul id="scheduled-list" aria-label="Scheduled tasks"></ul>
       </section>
 
       <section id="tab-skills" class="tab-panel" role="tabpanel" aria-labelledby="tab-btn-skills">
@@ -339,9 +381,11 @@
           <!-- Toggle right-rail panes -->
           <button id="toggle-plan-btn" class="icon-btn" title="Toggle task plan (P)" aria-pressed="false" aria-label="Toggle task plan pane">☰ Plan</button>
           <button id="toggle-files-btn" class="icon-btn" title="Toggle file tree (F)" aria-pressed="false" aria-label="Toggle file tree pane">🗂 Files</button>
+          <button id="memory-bell" class="icon-btn memory-bell" title="Pending memory suggestions" aria-label="Pending memory suggestions" hidden>🔔</button>
           <span id="active-workspace-label" class="muted-label" aria-live="polite"></span>
         </div>
       </header>
+      <div id="mounted-bundles-chip" class="mounted-bundles-chip" aria-live="polite" hidden></div>
 
       <div id="chat-body">
         <div id="messages" role="log" aria-live="polite" aria-label="Conversation messages" aria-relevant="additions"></div>
@@ -444,6 +488,7 @@
       crossorigin="anonymous"
     ></script>
 
+    <script src="/static/browser-store.js"></script>
     <script src="/static/app.js"></script>
   </body>
 </html>
