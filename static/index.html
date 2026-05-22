@@ -211,6 +211,41 @@
         <button id="save-connection" class="primary">Save &amp; test</button>
         <p class="status-line" id="connection-status" aria-live="polite"></p>
 
+        <h2>Web search</h2>
+        <label>Provider
+          <select id="cfg-websearch-provider" aria-label="Web search provider">
+            <option value="">— None (web search disabled) —</option>
+            <option value="tavily">Tavily</option>
+            <option value="brave">Brave</option>
+            <option value="serpapi">SerpAPI</option>
+            <option value="custom">Custom endpoint</option>
+          </select>
+        </label>
+        <label>Provider API key
+          <input id="cfg-websearch-key" type="password" placeholder="Leave blank for unauthenticated custom endpoints" autocomplete="off" />
+        </label>
+        <label id="cfg-websearch-custom-wrap" hidden>Custom endpoint URL
+          <input id="cfg-websearch-custom" type="text" placeholder="https://example.com/search" />
+          <small>Must accept POST {query, max_results} and return {results:[{title,url,snippet}]}.</small>
+        </label>
+        <button id="save-websearch" class="primary">Save web search</button>
+        <p class="status-line" id="websearch-status" aria-live="polite"></p>
+
+        <h2>Verification</h2>
+        <label>Mode
+          <select id="cfg-verification-mode" aria-label="Verification mode">
+            <option value="off">Off</option>
+            <option value="validators_only">Quick checks</option>
+            <option value="validators_and_judge">Quick checks + AI review</option>
+          </select>
+          <small>Quick checks validate tool outputs (image bytes, file existence, shell exit codes). AI review additionally asks the model whether each tool actually achieved your goal.</small>
+        </label>
+        <label>Retries on failure
+          <input id="cfg-verification-retries" type="number" min="0" max="3" value="1" />
+        </label>
+        <button id="save-verification" class="primary">Save verification</button>
+        <p class="status-line" id="verification-status" aria-live="polite"></p>
+
         <h2>Defaults</h2>
         <label>Default chat model
           <select id="cfg-default-model" aria-label="Default chat model"></select>
@@ -336,6 +371,26 @@
               aria-multiline="true"
             ></textarea>
             <button id="send-btn" class="primary" aria-label="Send message">Send</button>
+          </div>
+          <div class="composer-toggles" role="group" aria-label="Capabilities for this message">
+            <label class="composer-toggle" title="When checked, attached images will be analyzed in detail.">
+              <input type="checkbox" id="toggle-vision" />
+              <span aria-hidden="true">👁️</span>
+              Use vision
+            </label>
+            <label class="composer-toggle" title="Allow the assistant to search the web.">
+              <span aria-hidden="true">🌐</span>
+              Web search:
+              <select id="toggle-websearch" aria-label="Web search mode">
+                <option value="off">Off</option>
+                <option value="if_needed">If needed</option>
+                <option value="required">Required for this turn</option>
+              </select>
+            </label>
+            <button type="button" id="screenshot-btn" class="composer-toggle composer-toggle-btn" title="Capture a screenshot of a window or your screen and attach it." hidden>
+              <span aria-hidden="true">📸</span>
+              Capture screenshot
+            </button>
           </div>
           <div id="telemetry-line" class="telemetry-line" aria-live="polite" hidden></div>
         </div>

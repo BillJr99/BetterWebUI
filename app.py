@@ -159,6 +159,11 @@ def load_config() -> dict:
                     "mcp_call": False,
                 },
             },
+            "web_search": {
+                "provider": "",         # "tavily" | "brave" | "serpapi" | "custom" | ""
+                "api_key": "",
+                "custom_url": "",
+            },
         },
     )
 
@@ -377,6 +382,145 @@ MCP_REGISTRY: list[dict] = [
         "args_template": ["mcp-server-time"],
         "fields": [],
         "requires": "Python with uv installed.",
+    },
+    # ---- Cloud services (community-maintained MCP servers) ----
+    {
+        "id": "gdrive",
+        "name": "Google Drive",
+        "description": "Browse, search, and read files from Google Drive.",
+        "homepage": "https://github.com/modelcontextprotocol/servers-archived/tree/main/src/gdrive",
+        "command": "npx",
+        "args_template": ["-y", "@modelcontextprotocol/server-gdrive"],
+        "env_template": {
+            "GDRIVE_CREDENTIALS_PATH": "{credentials_path}",
+        },
+        "fields": [
+            {"name": "credentials_path", "label": "Path to gcp-oauth.keys.json", "type": "path"},
+        ],
+        "requires": "Node.js plus a Google Cloud OAuth credentials JSON. Run the server once interactively to mint a refresh token.",
+        "category": "cloud",
+    },
+    {
+        "id": "google-workspace",
+        "name": "Google Workspace",
+        "description": "Read Gmail, manage Google Calendar events, and search Drive in one server.",
+        "homepage": "https://github.com/taylorwilsdon/google_workspace_mcp",
+        "command": "uvx",
+        "args_template": ["google-workspace-mcp"],
+        "env_template": {
+            "GOOGLE_OAUTH_CLIENT_ID": "{client_id}",
+            "GOOGLE_OAUTH_CLIENT_SECRET": "{client_secret}",
+        },
+        "fields": [
+            {"name": "client_id", "label": "Google OAuth client ID", "type": "text"},
+            {"name": "client_secret", "label": "Google OAuth client secret", "type": "password"},
+        ],
+        "requires": "Python with uv installed plus a Google Cloud OAuth client. Follow the server's README for the consent-screen setup.",
+        "category": "cloud",
+    },
+    {
+        "id": "microsoft-graph",
+        "name": "Microsoft 365 (Graph)",
+        "description": "Outlook mail, calendar, OneDrive, SharePoint, and Teams via Microsoft Graph.",
+        "homepage": "https://github.com/softeria/ms-365-mcp-server",
+        "command": "npx",
+        "args_template": ["-y", "@softeria/ms-365-mcp-server"],
+        "env_template": {
+            "MS365_MCP_CLIENT_ID": "{client_id}",
+            "MS365_MCP_TENANT_ID": "{tenant_id}",
+        },
+        "fields": [
+            {"name": "client_id", "label": "Azure AD app client ID", "type": "text"},
+            {"name": "tenant_id", "label": "Tenant ID (or 'common')", "type": "text"},
+        ],
+        "requires": "Node.js plus an Azure AD app registration with Microsoft Graph delegated permissions.",
+        "category": "cloud",
+    },
+    {
+        "id": "slack",
+        "name": "Slack",
+        "description": "Read channels, post messages, search history.",
+        "homepage": "https://github.com/modelcontextprotocol/servers-archived/tree/main/src/slack",
+        "command": "npx",
+        "args_template": ["-y", "@modelcontextprotocol/server-slack"],
+        "env_template": {
+            "SLACK_BOT_TOKEN": "{bot_token}",
+            "SLACK_TEAM_ID": "{team_id}",
+        },
+        "fields": [
+            {"name": "bot_token", "label": "Slack bot token (xoxb-...)", "type": "password"},
+            {"name": "team_id", "label": "Slack team / workspace ID", "type": "text"},
+        ],
+        "requires": "Node.js plus a Slack app installed in your workspace with the required scopes.",
+        "category": "cloud",
+    },
+    {
+        "id": "notion",
+        "name": "Notion",
+        "description": "Search, read, and update Notion pages and databases.",
+        "homepage": "https://github.com/makenotion/notion-mcp-server",
+        "command": "npx",
+        "args_template": ["-y", "@notionhq/notion-mcp-server"],
+        "env_template": {
+            "OPENAPI_MCP_HEADERS": "{headers_json}",
+        },
+        "fields": [
+            {"name": "headers_json", "label": "Headers JSON (e.g. {\"Authorization\":\"Bearer ntn_...\",\"Notion-Version\":\"2022-06-28\"})", "type": "password"},
+        ],
+        "requires": "Node.js plus a Notion integration token with workspace access.",
+        "category": "cloud",
+    },
+    {
+        "id": "linear",
+        "name": "Linear",
+        "description": "Browse and update Linear issues, projects, and cycles.",
+        "homepage": "https://github.com/jerhadf/linear-mcp-server",
+        "command": "npx",
+        "args_template": ["-y", "linear-mcp-server"],
+        "env_template": {
+            "LINEAR_API_KEY": "{api_key}",
+        },
+        "fields": [
+            {"name": "api_key", "label": "Linear personal API key", "type": "password"},
+        ],
+        "requires": "Node.js plus a Linear API key from Settings → API.",
+        "category": "cloud",
+    },
+    {
+        "id": "asana",
+        "name": "Asana",
+        "description": "Read and update Asana tasks, projects, and workspaces.",
+        "homepage": "https://github.com/cristip73/mcp-server-asana",
+        "command": "npx",
+        "args_template": ["-y", "@cristip73/mcp-server-asana"],
+        "env_template": {
+            "ASANA_ACCESS_TOKEN": "{access_token}",
+        },
+        "fields": [
+            {"name": "access_token", "label": "Asana personal access token", "type": "password"},
+        ],
+        "requires": "Node.js plus an Asana personal access token from My Settings → Apps.",
+        "category": "cloud",
+    },
+    {
+        "id": "jira",
+        "name": "Jira",
+        "description": "Search, read, and update Jira issues.",
+        "homepage": "https://github.com/sooperset/mcp-atlassian",
+        "command": "uvx",
+        "args_template": ["mcp-atlassian"],
+        "env_template": {
+            "JIRA_URL": "{jira_url}",
+            "JIRA_USERNAME": "{username}",
+            "JIRA_API_TOKEN": "{api_token}",
+        },
+        "fields": [
+            {"name": "jira_url", "label": "Jira base URL (e.g. https://acme.atlassian.net)", "type": "text"},
+            {"name": "username", "label": "Atlassian account email", "type": "text"},
+            {"name": "api_token", "label": "Atlassian API token", "type": "password"},
+        ],
+        "requires": "Python with uv installed plus an Atlassian API token.",
+        "category": "cloud",
     },
 ]
 
@@ -851,6 +995,11 @@ Available tools:
 - cli_call: run one of the user's pre-registered CLI shortcuts. Routes
   through execute_shell with approval (unless the shortcut has always-allow
   policy). Args: {"id": "shortcut_id", "args": "command-line arguments"}.
+
+- web_search: search the public web. Use only when the user has enabled
+  web search for this turn (the system prompt will say so). Args:
+  {"query": "...", "max_results": 5}. Returns a list of
+  {title, url, snippet} items.
 """.strip()
 
 PLAN_MODE_BLOCK = """
@@ -946,7 +1095,15 @@ def resolve_active_workspace(config: dict) -> Optional[dict]:
     return next((w for w in data["workspaces"] if w["id"] == wid), None)
 
 
-def build_system_prompt(config: dict, prompts: dict, mode: str = "approve-each") -> str:
+def build_system_prompt(
+    config: dict,
+    prompts: dict,
+    mode: str = "approve-each",
+    *,
+    user_memories: Optional[list[str]] = None,
+    use_vision: bool = False,
+    web_search_mode: str = "off",
+) -> str:
     parts: list[str] = []
     workspace = resolve_active_workspace(config)
 
@@ -963,6 +1120,35 @@ def build_system_prompt(config: dict, prompts: dict, mode: str = "approve-each")
         parts.append(
             f"Active workspace: {workspace['name']}."
             + (f" {workspace['description']}" if workspace.get("description") else "")
+        )
+
+    # User memories — durable preferences/facts/constraints stored client-side
+    # in the browser and injected here on every turn. Subject to context trim.
+    if user_memories:
+        cleaned = [m.strip() for m in user_memories if isinstance(m, str) and m.strip()]
+        if cleaned:
+            parts.append(
+                "Things to remember about the user:\n"
+                + "\n".join(f"- {m}" for m in cleaned[:50])  # hard cap so a runaway list can't blow the budget
+            )
+
+    # Per-turn capability hints
+    if use_vision:
+        parts.append(
+            "The user has explicitly asked you to USE VISION on this turn. "
+            "If any images are attached, analyse them in detail and incorporate "
+            "what you see into your reply."
+        )
+    if web_search_mode == "required":
+        parts.append(
+            "The user requires web search on this turn. You MUST call the "
+            "web_search tool before answering so your reply reflects current "
+            "information."
+        )
+    elif web_search_mode == "if_needed":
+        parts.append(
+            "If answering accurately requires current or specialised information "
+            "you don't have, call the web_search tool first."
         )
 
     # Plan mode block (injected before other tools if active)
@@ -1382,6 +1568,93 @@ async def call_openwebui_image(prompt: str, size: str, config: dict) -> dict:
     return {"raw": body, "error": "Image generation response had neither b64_json nor url."}
 
 
+async def call_web_search(query: str, max_results: int, config: dict) -> dict:
+    """Dispatch to the configured web-search provider. Returns a dict with
+    keys: query, provider, results=[{title, url, snippet}], or {error: ...}.
+    """
+    web = (config or {}).get("web_search") or {}
+    provider = (web.get("provider") or "").lower()
+    api_key = web.get("api_key") or ""
+    if not provider:
+        return {"error": "Web search is not configured. Settings → Connection → Web search."}
+
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        if provider == "tavily":
+            if not api_key:
+                return {"error": "Tavily requires an API key (Settings → Connection → Web search)."}
+            resp = await client.post(
+                "https://api.tavily.com/search",
+                json={
+                    "api_key": api_key,
+                    "query": query,
+                    "max_results": max_results,
+                    "search_depth": "basic",
+                },
+            )
+            if resp.status_code != 200:
+                return {"error": f"Tavily search failed ({resp.status_code}): {resp.text[:300]}"}
+            body = resp.json()
+            results = [
+                {"title": r.get("title", ""), "url": r.get("url", ""), "snippet": r.get("content", "")}
+                for r in (body.get("results") or [])[:max_results]
+            ]
+            return {"query": query, "provider": "tavily", "results": results}
+
+        if provider == "brave":
+            if not api_key:
+                return {"error": "Brave Search requires an API key."}
+            resp = await client.get(
+                "https://api.search.brave.com/res/v1/web/search",
+                params={"q": query, "count": max_results},
+                headers={"X-Subscription-Token": api_key, "Accept": "application/json"},
+            )
+            if resp.status_code != 200:
+                return {"error": f"Brave search failed ({resp.status_code}): {resp.text[:300]}"}
+            body = resp.json()
+            results = [
+                {"title": r.get("title", ""), "url": r.get("url", ""), "snippet": r.get("description", "")}
+                for r in ((body.get("web") or {}).get("results") or [])[:max_results]
+            ]
+            return {"query": query, "provider": "brave", "results": results}
+
+        if provider == "serpapi":
+            if not api_key:
+                return {"error": "SerpAPI requires an API key."}
+            resp = await client.get(
+                "https://serpapi.com/search.json",
+                params={"q": query, "engine": "google", "num": max_results, "api_key": api_key},
+            )
+            if resp.status_code != 200:
+                return {"error": f"SerpAPI search failed ({resp.status_code}): {resp.text[:300]}"}
+            body = resp.json()
+            results = [
+                {"title": r.get("title", ""), "url": r.get("link", ""), "snippet": r.get("snippet", "")}
+                for r in (body.get("organic_results") or [])[:max_results]
+            ]
+            return {"query": query, "provider": "serpapi", "results": results}
+
+        if provider == "custom":
+            url = web.get("custom_url") or ""
+            if not url:
+                return {"error": "Custom web search needs a 'custom_url' in settings."}
+            headers = {}
+            if api_key:
+                headers["Authorization"] = f"Bearer {api_key}"
+            resp = await client.post(url, json={"query": query, "max_results": max_results}, headers=headers)
+            if resp.status_code != 200:
+                return {"error": f"Custom search failed ({resp.status_code}): {resp.text[:300]}"}
+            try:
+                body = resp.json()
+            except Exception:
+                return {"error": "Custom search returned non-JSON."}
+            results = body.get("results") if isinstance(body, dict) else body
+            if not isinstance(results, list):
+                return {"error": "Custom search did not return a 'results' list."}
+            return {"query": query, "provider": "custom", "results": results[:max_results]}
+
+        return {"error": f"Unknown web_search provider: {provider}"}
+
+
 async def call_openwebui_audio(text: str, voice: str, config: dict) -> dict:
     base = normalize_base_url(config["base_url"])
     profile = active_profile(config)
@@ -1787,6 +2060,20 @@ async def execute_tool(call: dict, config: dict, send_event, mode: str = "approv
             return {"error": "mcp_call requires both 'server' and 'name'."}
         return await mcp_manager.call(server, name, arguments)
 
+    if tool == "web_search":
+        query = (args.get("query") or "").strip()
+        if not query:
+            return {"error": "web_search requires a 'query' argument."}
+        try:
+            max_results = int(args.get("max_results") or 5)
+        except Exception:
+            max_results = 5
+        max_results = max(1, min(10, max_results))
+        try:
+            return await call_web_search(query, max_results, config)
+        except HTTPException as exc:
+            return {"error": exc.detail}
+
     if tool == "cli_call":
         if not config.get("shell_enabled", True):
             return {"error": "Shell execution is disabled in settings."}
@@ -2092,6 +2379,8 @@ class ConfigPatch(BaseModel):
     chat_mode: Optional[str] = None
     onboarding_done: Optional[bool] = None
     display: Optional[dict] = None
+    verification: Optional[dict] = None
+    web_search: Optional[dict] = None
 
 
 def _public_config(cfg: dict, include_paths: bool = False) -> dict:
@@ -3343,6 +3632,11 @@ class ChatRequest(BaseModel):
     model: Optional[str] = None
     title: Optional[str] = None
     mode: Optional[str] = None
+    # Per-turn capability switches set by the composer toggles.
+    use_vision: Optional[bool] = None
+    web_search_mode: Optional[str] = None  # "off" | "if_needed" | "required"
+    user_memories: Optional[list[str]] = None
+    bundle_attachments: Optional[list[dict]] = None
 
 
 _VALID_ROLES = {"system", "user", "assistant", "function", "tool", "developer"}
@@ -3413,7 +3707,12 @@ async def chat(req: ChatRequest, request: Request):
             if m.get("content") is None:
                 m = {**m, "content": ""}
             history.append(m)
-        system_prompt = build_system_prompt(cfg, prompts, effective_mode)
+        system_prompt = build_system_prompt(
+            cfg, prompts, effective_mode,
+            user_memories=req.user_memories,
+            use_vision=bool(req.use_vision),
+            web_search_mode=(req.web_search_mode or "off"),
+        )
         try:
             for _step in range(12):  # higher cap for subagent-heavy tasks
                 history, n_dropped = trim_to_context(history, system_prompt)

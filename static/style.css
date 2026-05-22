@@ -979,6 +979,42 @@ button.upload-label { -webkit-appearance: none; appearance: none; }
 .vc-undo-btn:hover { background: var(--parchment-edge); }
 .vc-undo-btn:disabled { opacity: 0.6; cursor: progress; }
 
+.composer-toggles {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin-top: 6px;
+  padding: 0 6px;
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+.composer-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+  user-select: none;
+}
+.composer-toggle input[type="checkbox"] { margin: 0; }
+.composer-toggle select {
+  background: var(--parchment-soft);
+  border: 1px solid var(--parchment-edge);
+  border-radius: 8px;
+  padding: 2px 6px;
+  font-size: 12px;
+  color: var(--ink);
+}
+.composer-toggle-btn {
+  background: var(--parchment-soft);
+  border: 1px solid var(--parchment-edge);
+  border-radius: 10px;
+  padding: 3px 10px;
+  font-size: 12px;
+  color: var(--ink);
+}
+.composer-toggle-btn:hover { background: var(--parchment-edge); }
+
 .message pre {
   background: var(--code-bg);
   color: var(--code-text);

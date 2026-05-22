@@ -260,6 +260,14 @@ async function loadConfig() {
   $("#cfg-tts-voice").value = state.config.tts_voice || "alloy";
   $("#cfg-consensus-runs").value = state.config.consensus_runs ?? 1;
   $("#cfg-shell-enabled").checked = state.config.shell_enabled !== false;
+  const ws = state.config.web_search || {};
+  const wsProvider = $("#cfg-websearch-provider"); if (wsProvider) wsProvider.value = ws.provider || "";
+  const wsCustomWrap = $("#cfg-websearch-custom-wrap");
+  if (wsCustomWrap) wsCustomWrap.hidden = (ws.provider !== "custom");
+  const wsCustom = $("#cfg-websearch-custom"); if (wsCustom) wsCustom.value = ws.custom_url || "";
+  const ver = state.config.verification || {};
+  const verMode = $("#cfg-verification-mode"); if (verMode) verMode.value = ver.mode || "validators_only";
+  const verRetries = $("#cfg-verification-retries"); if (verRetries) verRetries.value = ver.retries ?? 1;
   // Mode select: prefer the active workspace's mode (if any) so the
   // workspace-scoped setting actually takes effect; fall back to the
   // global config mode, then to "approve-each".
@@ -368,6 +376,62 @@ async function saveDefaults() {
   await loadConfig();
   await refreshModels();
   flash("Defaults saved.", "good");
+}
+
+async function saveWebSearch() {
+  const provider = $("#cfg-websearch-provider").value || "";
+  const apiKey = $("#cfg-websearch-key").value.trim();
+  const customUrl = $("#cfg-websearch-custom").value.trim();
+  const patch = {
+    web_search: {
+      provider,
+      ...(apiKey ? { api_key: apiKey } : {}),
+      custom_url: customUrl,
+    },
+  };
+  const el = $("#websearch-status");
+  try {
+    await api("/api/config", { method: "POST", json: patch });
+    if (el) {
+      el.textContent = provider ? `Saved. Web search will use ${provider}.` : "Saved. Web search is disabled.";
+      el.className = "status-line good";
+    }
+    $("#cfg-websearch-key").value = "";
+    await loadConfig();
+  } catch (e) {
+    if (el) {
+      el.textContent = friendlyError(e, "saving web search settings");
+      el.className = "status-line bad";
+    }
+  }
+}
+
+async function saveVerification() {
+  const mode = $("#cfg-verification-mode").value || "validators_only";
+  const retries = Math.min(3, Math.max(0, parseInt($("#cfg-verification-retries").value, 10) || 1));
+  const enabled = (mode !== "off");
+  const patch = {
+    verification: {
+      ...(state.config.verification || {}),
+      enabled,
+      mode,
+      retries,
+    },
+  };
+  const el = $("#verification-status");
+  try {
+    await api("/api/config", { method: "POST", json: patch });
+    if (el) {
+      el.textContent = "Verification settings saved.";
+      el.className = "status-line good";
+    }
+    await loadConfig();
+  } catch (e) {
+    if (el) {
+      el.textContent = friendlyError(e, "saving verification settings");
+      el.className = "status-line bad";
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1555,10 +1619,62 @@ async function attachFile(file) {
   const fd = new FormData();
   fd.append("file", file);
   const res = await fetch("/api/upload", { method: "POST", body: fd });
-  if (!res.ok) { flash("Upload failed.", "warn"); return; }
+  if (!res.ok) {
+    const err = new Error(`${res.status}: ${await res.text()}`);
+    err.status = res.status;
+    flash(friendlyError(err, "uploading the file"), "warn");
+    return;
+  }
   const a = await res.json();
   state.attachments.push(a);
   renderAttachments();
+}
+
+async function captureScreenshot() {
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+  } catch (e) {
+    flash(friendlyError(e, "capturing the screen"), "warn");
+    return;
+  }
+  try {
+    const track = stream.getVideoTracks()[0];
+    // Briefly wait so the browser has time to render the first frame.
+    await new Promise((r) => setTimeout(r, 200));
+    const settings = track.getSettings();
+    const w = settings.width || 1280;
+    const h = settings.height || 720;
+    // ImageCapture is the most reliable path in Chromium; fall back to a
+    // video-element draw for Firefox.
+    let blob;
+    if (typeof ImageCapture !== "undefined") {
+      const cap = new ImageCapture(track);
+      const bitmap = await cap.grabFrame();
+      const canvas = document.createElement("canvas");
+      canvas.width = bitmap.width; canvas.height = bitmap.height;
+      canvas.getContext("2d").drawImage(bitmap, 0, 0);
+      blob = await new Promise((r) => canvas.toBlob(r, "image/png"));
+    } else {
+      const video = document.createElement("video");
+      video.srcObject = stream;
+      await video.play();
+      const canvas = document.createElement("canvas");
+      canvas.width = w; canvas.height = h;
+      canvas.getContext("2d").drawImage(video, 0, 0, w, h);
+      blob = await new Promise((r) => canvas.toBlob(r, "image/png"));
+    }
+    if (!blob) {
+      flash("Screenshot capture produced no image.", "warn");
+      return;
+    }
+    const file = new File([blob], `screenshot-${Date.now()}.png`, { type: "image/png" });
+    await attachFile(file);
+    const vis = $("#toggle-vision"); if (vis) vis.checked = true;
+    flash("Screenshot attached.", "good");
+  } finally {
+    stream.getTracks().forEach((t) => t.stop());
+  }
 }
 
 function renderAttachments() {
@@ -2016,6 +2132,11 @@ async function send() {
     const sendable = state.messages.filter(
       (m) => !m._placeholder && (m.role === "user" || m.role === "assistant"),
     );
+    const visionToggle = $("#toggle-vision");
+    const webToggle = $("#toggle-websearch");
+    const useVision = !!(visionToggle && visionToggle.checked);
+    const webMode = (webToggle && webToggle.value) || "off";
+
     const res = await fetch("/api/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -2024,6 +2145,8 @@ async function send() {
         messages: sendable,
         model,
         mode: chatMode,
+        use_vision: useVision,
+        web_search_mode: webMode,
       }),
     });
     if (!res.ok) {
@@ -2642,11 +2765,43 @@ function wireEvents() {
       send();
     }
   });
+  $("#composer-input").addEventListener("paste", async (e) => {
+    const items = e.clipboardData && e.clipboardData.items;
+    if (!items) return;
+    for (const it of items) {
+      if (it.kind === "file" && it.type.startsWith("image/")) {
+        e.preventDefault();
+        const f = it.getAsFile();
+        if (!f) continue;
+        const named = new File([f], f.name || `pasted-${Date.now()}.png`, { type: f.type });
+        await attachFile(named);
+        const vis = $("#toggle-vision"); if (vis) vis.checked = true;
+        flash("Pasted image attached.", "good");
+        return;
+      }
+    }
+  });
   $("#attach-input").addEventListener("change", (e) => {
     const f = e.target.files[0];
-    if (f) attachFile(f);
+    if (f) {
+      attachFile(f);
+      if (f.type && f.type.startsWith("image/")) {
+        const vis = $("#toggle-vision"); if (vis) vis.checked = true;
+      }
+    }
     e.target.value = "";
   });
+
+  // Screenshot capture (Chromium / Firefox; hidden on Safari which lacks getDisplayMedia)
+  const screenshotBtn = $("#screenshot-btn");
+  if (screenshotBtn) {
+    if (navigator.mediaDevices && typeof navigator.mediaDevices.getDisplayMedia === "function") {
+      screenshotBtn.hidden = false;
+      screenshotBtn.addEventListener("click", captureScreenshot);
+    } else {
+      screenshotBtn.hidden = true;
+    }
+  }
 
   // Mic
   $("#mic-btn")?.addEventListener("click", toggleMic);
@@ -2655,6 +2810,12 @@ function wireEvents() {
   $("#save-connection").onclick = saveConnection;
   $("#save-defaults").onclick = saveDefaults;
   $("#save-display")?.addEventListener("click", saveDisplay);
+  $("#save-websearch")?.addEventListener("click", saveWebSearch);
+  $("#save-verification")?.addEventListener("click", saveVerification);
+  $("#cfg-websearch-provider")?.addEventListener("change", (e) => {
+    const wrap = $("#cfg-websearch-custom-wrap");
+    if (wrap) wrap.hidden = (e.target.value !== "custom");
+  });
 
   // Services enable/disable
   ["clk", "autogui", "osso"].forEach((name) => {
