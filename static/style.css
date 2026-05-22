@@ -909,6 +909,64 @@ button.upload-label { -webkit-appearance: none; appearance: none; }
   color: var(--ink-soft);
 }
 
+.broken-image-card {
+  background: var(--parchment-soft);
+  border: 1px dashed var(--parchment-edge);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  max-width: 360px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  color: var(--ink-soft);
+}
+.broken-image-label {
+  font-weight: 600;
+  color: var(--ink);
+}
+.broken-image-detail {
+  font-size: 13px;
+}
+.broken-image-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 2px;
+}
+.broken-image-retry,
+.broken-image-open {
+  background: var(--parchment-pale);
+  border: 1px solid var(--parchment-edge);
+  border-radius: 14px;
+  padding: 4px 12px;
+  font-size: 12px;
+  color: var(--ink);
+  text-decoration: none;
+  cursor: pointer;
+}
+.broken-image-retry:hover,
+.broken-image-open:hover {
+  background: var(--parchment-edge);
+}
+
+.verification-card {
+  margin: 8px 0 0 0;
+  padding: 8px 12px;
+  border-radius: var(--radius);
+  border-left: 3px solid transparent;
+  background: var(--parchment-soft);
+  font-size: 13px;
+  color: var(--ink-soft);
+}
+.verification-card.vc-ok { border-left-color: #2c8a3d; }
+.verification-card.vc-fail { border-left-color: #c14a2a; background: rgba(193, 74, 42, 0.06); color: var(--ink); }
+.verification-summary { display: flex; gap: 8px; align-items: center; font-weight: 500; }
+.verification-summary .vc-icon { font-weight: 700; }
+.verification-details { margin-top: 6px; }
+.verification-details summary { cursor: pointer; font-size: 12px; opacity: 0.85; }
+.verification-details ul { margin: 6px 0 0 0; padding-left: 18px; }
+.verification-details li { font-size: 12px; line-height: 1.5; }
+
 .message pre {
   background: var(--code-bg);
   color: var(--code-text);

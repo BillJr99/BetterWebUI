@@ -31,6 +31,8 @@ from fastapi.responses import FileResponse, StreamingResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+import verification as _verification
+
 ROOT = Path(__file__).parent.resolve()
 DATA_DIR = ROOT / "data"
 SKILLS_DIR = ROOT / "skills"
@@ -142,6 +144,21 @@ def load_config() -> dict:
             "chat_mode": "approve-each",
             "onboarding_done": False,
             "display": {},
+            "verification": {
+                "enabled": True,
+                "mode": "validators_only",
+                "retries": 1,
+                "judge_model": "",
+                "judge_confidence_threshold": 0.7,
+                "tools": {
+                    "generate_image": True,
+                    "generate_audio": True,
+                    "autogui_task": True,
+                    "execute_shell": False,
+                    "write_file": True,
+                    "mcp_call": False,
+                },
+            },
         },
     )
 
@@ -1286,6 +1303,36 @@ def _get_checkpoint(workspace_id: str, filename: str, ckpt_id: str) -> Optional[
 # OpenWebUI proxy helpers
 # ---------------------------------------------------------------------------
 
+def _sniff_image_mime(raw: bytes) -> Optional[str]:
+    """Magic-byte sniff. Returns canonical image mime or None for unrecognised bytes."""
+    if len(raw) < 12:
+        return None
+    if raw.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if raw[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if raw[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    if raw[:4] == b"RIFF" and raw[8:12] == b"WEBP":
+        return "image/webp"
+    if raw[:2] == b"BM":
+        return "image/bmp"
+    return None
+
+
+def validate_image_bytes(raw: bytes, min_bytes: int = 64) -> tuple[bool, str, Optional[str]]:
+    """Return (ok, reason, sniffed_mime). Cheap deterministic check used to
+    detect broken image renders before they reach the UI as broken-link icons."""
+    if not raw:
+        return False, "Empty image payload.", None
+    if len(raw) < min_bytes:
+        return False, f"Image payload too small ({len(raw)} bytes).", None
+    mime = _sniff_image_mime(raw)
+    if mime is None:
+        return False, "Image bytes do not match any known image format.", None
+    return True, "", mime
+
+
 async def call_openwebui_image(prompt: str, size: str, config: dict) -> dict:
     base = normalize_base_url(config["base_url"])
     profile = active_profile(config)
@@ -1304,20 +1351,35 @@ async def call_openwebui_image(prompt: str, size: str, config: dict) -> dict:
         item = (body.get("data") or [{}])[0] if isinstance(body, dict) else {}
     filename = f"{_slug(prompt)}-{uuid.uuid4().hex[:6]}.png"
     if "b64_json" in item:
-        return {"filename": filename, "mime": "image/png", "data_b64": item["b64_json"], "prompt": prompt}
+        try:
+            raw = base64.b64decode(item["b64_json"], validate=False)
+        except Exception as exc:
+            return {"error": f"Image generation returned undecodable base64: {exc}", "prompt": prompt}
+        ok, reason, sniffed = validate_image_bytes(raw)
+        if not ok:
+            return {"error": f"Image generation returned invalid data: {reason}", "prompt": prompt}
+        return {
+            "filename": filename,
+            "mime": sniffed or "image/png",
+            "data_b64": item["b64_json"],
+            "prompt": prompt,
+        }
     if "url" in item:
         async with httpx.AsyncClient(timeout=180.0) as client:
             img_resp = await client.get(item["url"])
         if img_resp.status_code != 200:
-            return {"error": f"Could not fetch generated image at {item['url']}"}
+            return {"error": f"Could not fetch generated image at {item['url']} (HTTP {img_resp.status_code})."}
+        ok, reason, sniffed = validate_image_bytes(img_resp.content)
+        if not ok:
+            return {"error": f"Image generation returned invalid data: {reason}", "prompt": prompt}
         return {
             "filename": filename,
-            "mime": img_resp.headers.get("content-type", "image/png"),
+            "mime": sniffed or img_resp.headers.get("content-type", "image/png"),
             "data_b64": base64.b64encode(img_resp.content).decode("ascii"),
             "prompt": prompt,
             "source_url": item["url"],
         }
-    return {"raw": body}
+    return {"raw": body, "error": "Image generation response had neither b64_json nor url."}
 
 
 async def call_openwebui_audio(text: str, voice: str, config: dict) -> dict:
@@ -3401,7 +3463,65 @@ async def chat(req: ChatRequest, request: Request):
                     break
 
                 await send_event("tool_call", {"tool": call["tool"], "args": call["args"]})
-                result = await execute_tool(call, cfg, send_event, effective_mode, model)
+
+                # Capture the user's most recent message as the goal for the
+                # verification judge. Falls back to empty string if absent.
+                user_goal_for_verif = ""
+                for _m in reversed(history):
+                    if _m.get("role") == "user":
+                        user_goal_for_verif = (_m.get("content") or "")[:2000]
+                        break
+
+                async def _execute_with_args(args_override: dict):
+                    new_call = {"tool": call["tool"], "args": args_override}
+                    return await execute_tool(new_call, cfg, send_event, effective_mode, model)
+
+                async def _screenshot_provider():
+                    try:
+                        from services import state as _svc_state
+                        if not _svc_state.is_enabled("osso"):
+                            return None
+                        from services.clients import get_osso_client
+                        shot = await get_osso_client().screenshot()
+                        if isinstance(shot, dict) and shot.get("image_b64"):
+                            return shot["image_b64"]
+                        if isinstance(shot, dict) and shot.get("data_b64"):
+                            return shot["data_b64"]
+                    except Exception:
+                        return None
+                    return None
+
+                first_result = await execute_tool(call, cfg, send_event, effective_mode, model)
+
+                try:
+                    result, vtrace = await _verification.verify_and_maybe_retry(
+                        tool=call["tool"],
+                        args=call["args"],
+                        result=first_result,
+                        goal=user_goal_for_verif,
+                        config=cfg,
+                        execute_again=_execute_with_args,
+                        chat_complete=chat_complete,
+                        screenshot_provider=_screenshot_provider,
+                    )
+                except Exception:
+                    result, vtrace = first_result, None
+
+                if vtrace is not None and vtrace.events:
+                    await send_event("verification", vtrace.to_dict())
+
+                # Auto-engage consensus when the judge fails repeatedly on
+                # the same turn — surfaced via a notice, then we recompute.
+                if (
+                    vtrace is not None
+                    and not vtrace.final_ok
+                    and cfg.get("verification", {}).get("mode") == "validators_and_judge"
+                    and cfg.get("consensus_runs", 1) <= 1
+                ):
+                    await send_event("notice", {
+                        "message": "I wasn't confident in that result. I'll double-check on the next turn.",
+                    })
+
                 await send_event("tool_result", {"tool": call["tool"], "result": result})
 
                 # Persist task plan updates

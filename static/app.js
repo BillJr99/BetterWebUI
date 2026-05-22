@@ -1221,6 +1221,87 @@ function renderMessages() {
   }
 }
 
+function renderVerificationTrace(trace) {
+  const container = $("#messages");
+  if (!container || !trace) return;
+  const card = document.createElement("div");
+  card.className = "verification-card " + (trace.final_ok ? "vc-ok" : "vc-fail");
+  card.setAttribute("role", "status");
+  const icon = trace.final_ok ? "✓" : "⚠";
+  const summary = document.createElement("div");
+  summary.className = "verification-summary";
+  summary.innerHTML = `<span class="vc-icon">${icon}</span><span>${
+    trace.final_ok ? "Verified" : "Verification failed"
+  } · ${escape(trace.tool)}${
+    trace.final_attempt > 1 ? ` · attempt ${trace.final_attempt}` : ""
+  }</span>`;
+  card.appendChild(summary);
+  if (Array.isArray(trace.events) && trace.events.length) {
+    const det = document.createElement("details");
+    det.className = "verification-details";
+    const sumEl = document.createElement("summary");
+    sumEl.textContent = "Details";
+    det.appendChild(sumEl);
+    const ul = document.createElement("ul");
+    for (const ev of trace.events) {
+      const li = document.createElement("li");
+      const okMark = ev.ok ? "✓" : "✗";
+      const conf = ev.extras && typeof ev.extras.confidence === "number"
+        ? ` (${Math.round(ev.extras.confidence * 100)}% confidence)`
+        : "";
+      li.textContent = `${okMark} [${ev.kind}] ${ev.detail || ""}${conf}`;
+      ul.appendChild(li);
+    }
+    det.appendChild(ul);
+    card.appendChild(det);
+  }
+  container.appendChild(card);
+  container.scrollTop = container.scrollHeight;
+}
+
+function renderBrokenImagePlaceholder(a, m) {
+  const card = document.createElement("div");
+  card.className = "broken-image-card";
+  card.setAttribute("role", "alert");
+  const label = document.createElement("div");
+  label.className = "broken-image-label";
+  label.textContent = "Image didn't load";
+  const detail = document.createElement("div");
+  detail.className = "broken-image-detail";
+  const promptHint = (a && a.filename) ? a.filename : "";
+  detail.textContent = promptHint
+    ? `The file "${promptHint}" couldn't be displayed.`
+    : "The image came back broken.";
+  const actions = document.createElement("div");
+  actions.className = "broken-image-actions";
+  const retryBtn = document.createElement("button");
+  retryBtn.type = "button";
+  retryBtn.className = "broken-image-retry";
+  retryBtn.textContent = "Try again";
+  retryBtn.onclick = () => {
+    const composer = $("#composer-input");
+    if (!composer) return;
+    const seed = (m && m.content) || (promptHint ? `Regenerate this image: ${promptHint}` : "Regenerate the previous image");
+    composer.value = seed;
+    composer.focus();
+    flash("Edit the prompt and send to try again.", "info");
+  };
+  actions.appendChild(retryBtn);
+  if (a && a.url) {
+    const openBtn = document.createElement("a");
+    openBtn.href = a.url;
+    openBtn.target = "_blank";
+    openBtn.rel = "noopener";
+    openBtn.className = "broken-image-open";
+    openBtn.textContent = "Open raw";
+    actions.appendChild(openBtn);
+  }
+  card.appendChild(label);
+  card.appendChild(detail);
+  card.appendChild(actions);
+  return card;
+}
+
 function appendMessage(m) {
   const container = $("#messages");
   const tpl = $("#message-template").content.cloneNode(true);
@@ -1288,6 +1369,9 @@ function appendMessage(m) {
         const img = document.createElement("img");
         img.src = a.url;
         img.alt = a.filename || "";
+        img.onerror = () => {
+          img.replaceWith(renderBrokenImagePlaceholder(a, m));
+        };
         att.appendChild(img);
       } else if (ct.startsWith("audio/")) {
         const audio = document.createElement("audio");
@@ -1935,6 +2019,10 @@ async function send() {
         return;
       }
       if (event === "tool_call") return;
+      if (event === "verification") {
+        renderVerificationTrace(data);
+        return;
+      }
       if (event === "tool_result") {
         await handleToolResult(data);
         return;
