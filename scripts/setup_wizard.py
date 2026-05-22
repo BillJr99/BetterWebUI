@@ -381,6 +381,20 @@ def _prompt_openwebui(env: dict, force: bool) -> tuple:
         else:
             print(red("✗"))
             print(f"  {red(conn_err)}")
+    elif url and not key and not force:
+        # URL is saved but no key yet — probe reachability so we know whether the
+        # URL itself needs re-entering before we ask for the key.
+        print(f"  Checking {cyan(url)} …", end=" ", flush=True)
+        _, probe_err = validate_connection(url, "")
+        if "Cannot reach" in probe_err:
+            conn_ok = False
+            conn_err = probe_err          # URL is down or wrong
+            print(red("✗"))
+            print(f"  {red(conn_err)}")
+        else:
+            conn_ok = False
+            conn_err = "Missing API key."  # server is up, just needs a key
+            print(dim("(API key required)"))
     else:
         conn_ok = False
         conn_err = "Not configured." if not url else "Missing API key."
