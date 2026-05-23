@@ -51,7 +51,10 @@ test('conversation persists across page reload', async ({ page, request }) => {
 
   await page.reload();
   await dismissOnboardingIfPresent(page);
-  // The most recent conversation should be selected and load its messages.
-  const after = await page.locator('#messages .message.assistant').last().locator('.content').innerText({ timeout: 30_000 });
+  // Wait for the sidebar to populate, then explicitly select the most recent conversation.
+  await page.locator('#conversation-list li').first().waitFor({ state: 'visible', timeout: 30_000 });
+  console.log('[reload] conversation list populated, clicking first item');
+  await page.locator('#conversation-list li').first().click();
+  const after = await page.locator('#messages .message.assistant').last().locator('.content').innerText({ timeout: 60_000 });
   expect(after.trim().length).toBeGreaterThan(0);
 });

@@ -21,6 +21,7 @@ import uuid
 import zipfile
 import logging
 import logging.handlers
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, AsyncGenerator, Optional
 
@@ -2448,9 +2449,6 @@ async def fetch_models(config: dict) -> list[dict]:
 # FastAPI app
 # ---------------------------------------------------------------------------
 
-app = FastAPI(title="BetterWebUI")
-
-
 _transient_sweep_task: Optional[asyncio.Task] = None
 _scheduler_task: Optional[asyncio.Task] = None
 
@@ -2469,9 +2467,10 @@ async def _transient_sweep_loop() -> None:
         await asyncio.sleep(3600)
 
 
-@app.on_event("startup")
-async def _startup() -> None:
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     global _transient_sweep_task, _scheduler_task
+    # ── startup ────────────────────────────────────────────────────────────
     try:
         await mcp_manager.reconcile()
     except Exception as exc:
@@ -2491,10 +2490,8 @@ async def _startup() -> None:
         ))
     except Exception as exc:
         logging.getLogger("betterwebui.scheduler").warning("Scheduler failed to start: %s", exc)
-
-
-@app.on_event("shutdown")
-async def _shutdown() -> None:
+    yield
+    # ── shutdown ───────────────────────────────────────────────────────────
     if _transient_sweep_task is not None:
         _transient_sweep_task.cancel()
     if _scheduler_task is not None:
@@ -2504,6 +2501,9 @@ async def _shutdown() -> None:
             await client.stop()
         except Exception:
             pass
+
+
+app = FastAPI(title="BetterWebUI", lifespan=lifespan)
 
 
 @app.get("/")
