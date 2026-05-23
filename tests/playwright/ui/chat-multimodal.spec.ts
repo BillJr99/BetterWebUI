@@ -44,7 +44,7 @@ test('attach an image and get a non-empty response', async ({ page, request }) =
   await page.locator('#attachments-preview').waitFor({ state: 'visible' });
 
   await sendChatMessage(page, 'Briefly describe the attached image.');
-  await waitForAssistantResponse(page, { timeoutMs: 240_000 });
+  await waitForAssistantResponse(page);
   const text = await getLastAssistantText(page);
   expectNonEmptyText(text);
 });

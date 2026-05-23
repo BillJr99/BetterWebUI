@@ -28,7 +28,9 @@ async function nlPromptShouldGetResponse(
   const model = await pickModel(request);
   test.skip(!model, 'no model configured');
   await sendChatMessage(page, prompt);
-  await waitForAssistantResponse(page, { timeoutMs: 240_000 });
+  // Accepts the default timeout — tinyllama responds to the prompt in text
+  // even if it doesn't call the tool; we just assert something came back.
+  await waitForAssistantResponse(page);
   // Outcome: an assistant message exists with non-empty text. Whether the
   // model chose to call a tool depends on its training; we accept either
   // path as long as the system handles the prompt without crashing.

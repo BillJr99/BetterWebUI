@@ -7,6 +7,19 @@
 import { Page, expect, APIRequestContext } from '@playwright/test';
 
 export async function gotoApp(page: Page): Promise<void> {
+  // Surface browser console errors in the test runner output so CI logs show
+  // JS exceptions without needing to download Playwright traces.
+  page.on('console', msg => {
+    if (msg.type() === 'error') console.log(`[browser:error] ${msg.text()}`);
+  });
+  // Log non-2xx responses on key API routes so we can tell "network error"
+  // from "model too slow" in CI without reading SSE body content.
+  page.on('response', resp => {
+    const url = resp.url();
+    if ((url.includes('/api/chat') || url.includes('/api/config')) && resp.status() >= 400) {
+      console.log(`[net] ${resp.request().method()} ${url} → ${resp.status()}`);
+    }
+  });
   await page.goto('/');
   await page.waitForLoadState('networkidle').catch(() => {});
 }
@@ -53,22 +66,35 @@ export async function sendChatMessage(page: Page, text: string): Promise<void> {
  * Outcome: at least one assistant message with non-empty text content exists
  * in #messages by the timeout.
  *
- * Default timeout 240 s. tinyllama on a 2-core CI runner has a measured
- * end-to-end latency of ~120–180 s for a short reply when the system prompt
- * includes the full tool-protocol block (~1k tokens). Tests that need to do
- * multiple round-trips (e.g. new-chat creation) rely on the suite-level
- * timeout in ui.config.ts (currently 480 s) to give two slow turns room.
+ * Default timeout 480 s. tinyllama on a 2-core CI runner has a measured
+ * end-to-end latency of ~120–250 s for a short reply when the system prompt
+ * includes the full tool-protocol block (~1k tokens). Vision turns bloat the
+ * prompt with base64 image data and can take 3–5 min even for a 1×1 PNG.
+ * 480 s gives us ~2× headroom on the worst observed case.
+ *
+ * Tests that need multiple round-trips (e.g. new-chat creation) rely on the
+ * suite-level timeout in ui.config.ts (currently 960 s) to give two slow
+ * turns room.
  */
 export async function waitForAssistantResponse(
   page: Page,
   opts: { timeoutMs?: number; minLengthChars?: number } = {},
 ): Promise<void> {
-  const timeoutMs = opts.timeoutMs ?? 240_000;
+  const timeoutMs = opts.timeoutMs ?? 480_000;
   const minLen   = opts.minLengthChars ?? 1;
   const last = page.locator('#messages [data-role="assistant"]').last();
   await expect(last).toBeVisible({ timeout: timeoutMs });
+  let loggedAt = Date.now();
   await expect.poll(
-    async () => (await last.innerText().catch(() => '')).trim().length,
+    async () => {
+      const len = (await last.innerText().catch(() => '')).trim().length;
+      const now = Date.now();
+      if (now - loggedAt > 15_000) {
+        console.log(`[wait] assistant bubble length=${len} elapsed=${Math.round((now - loggedAt) / 1000)}s`);
+        loggedAt = now;
+      }
+      return len;
+    },
     { timeout: timeoutMs, intervals: [1000, 2000, 3000] },
   ).toBeGreaterThanOrEqual(minLen);
   // Settle: streaming class should clear (best-effort).

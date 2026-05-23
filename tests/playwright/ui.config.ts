@@ -13,10 +13,11 @@ import { defineConfig, devices } from '@playwright/test';
 
 export default defineConfig({
   testDir: './ui',
-  // 8 min per test: chat-basic does up to 2 model round-trips per case
-  // (new-chat test) and a cold tinyllama on a 2-core CI runner has been
-  // observed at 150-200 s for a single short reply. 480 s gives ~2× headroom.
-  timeout: 480_000,
+  // 16 min per test: chat-basic does up to 2 model round-trips per case
+  // (new-chat test) and chat-multimodal sends a base64 image that bloats
+  // tinyllama's context to ~5 min/turn on a 2-core CI runner. 960 s = 2×
+  // the per-turn response budget, leaving room for setup + a second turn.
+  timeout: 960_000,
   expect: { timeout: 30_000 },
   retries: process.env.CI ? 1 : 0,
   workers: 1,             // UI tests share state (config.json, conversations) — serialize
