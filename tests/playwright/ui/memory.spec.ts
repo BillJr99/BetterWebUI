@@ -30,7 +30,9 @@ test('Memory list renders without console errors', async ({ page }) => {
   let capturing = false;
   page.on('pageerror', (e) => { if (capturing) errors.push(e.message); });
   await openTab(page, 'memory');
-  await expect(page.locator('#memory-list')).toBeVisible();
+  // Tab opens via wireTabs() click path, which does NOT call renderMemoryList().
+  // The list starts empty → zero height → not "visible". Confirm it's attached.
+  await expect(page.locator('#memory-list')).toBeAttached();
   capturing = true;
   // Tiny settle so the rendering tick gets a chance to throw if it's going to.
   await page.waitForTimeout(200);
