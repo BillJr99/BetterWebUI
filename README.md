@@ -19,9 +19,12 @@ and audio, calling MCP servers — without having to be a developer.
 
 ## What it does
 
-- Connects to your existing OpenWebUI instance (auto-detects whether the API
-  lives at `/api`, `/v1`, `/openai/v1`, etc.)
-- Lets you pick from any model your OpenWebUI knows about
+- Connects to your LLM provider of choice — **OpenWebUI**, **Ollama** (direct),
+  **OpenAI**, **Anthropic**, or any **OpenAI-compatible** endpoint. A friendly
+  setup wizard runs on first launch, picks defaults per provider, and validates
+  the connection before saving.
+- Lets you pick from any model your provider knows about (scrollable, filterable
+  picker — `↑↓` to navigate, type to filter).
 - **Workspaces** — bundle a system prompt, chosen skills, MCP servers, CLI
   shortcuts, and persistent files into a saved configuration you can return
   to. "Grading", "Research", "Course prep" — switch with one click.
@@ -142,6 +145,33 @@ pip install -r requirements.txt
 pytest tests/ --ignore=tests/playwright
 ```
 
+### Everything — unified runner (recommended)
+
+`scripts/run-all-tests.sh` is the single entry point. It drives the same
+setup wizard the launchers use, then runs (in order) pytest, the existing
+Playwright integration suite, the comprehensive browser-driven UI suite
+(~155 tests, 55 spec files), and the curl smoke tests.
+
+```bash
+./scripts/run-all-tests.sh
+```
+
+Useful flags:
+
+| Flag | What it does |
+|---|---|
+| `--no-wizard` | Skip the wizard; assume env is already set (CI mode) |
+| `--reconfigure` | Force re-prompt for provider / URL / key / model |
+| `--docker` | Bring up `deploy/docker-compose.e2e.yml` (Ollama + OpenWebUI) and tear it down on exit |
+| `--docker-compose <file>` | Tear down the given compose stack on exit (assume it's already up) |
+| `--skip-python` / `--skip-playwright` / `--skip-ui` / `--skip-smoke` | Selectively run stages |
+| `--keep-going` | Don't fail-fast — run every stage even if an earlier one fails |
+| `-- <args>` | Pass remaining args to `playwright test` (e.g. `-- --grep settings`) |
+
+The runner owns the lifecycle of any docker stack it uses: the cleanup
+trap runs `docker compose down -v --remove-orphans` on `EXIT`/`INT`/`TERM`,
+guaranteeing teardown even when tests fail or the script is interrupted.
+
 ### End-to-end tests — Docker (Ollama + OpenWebUI, fully self-contained)
 
 Requires Docker Desktop and Node.js 18+. The script pulls the model on first
@@ -172,10 +202,8 @@ services, and runs the full Playwright suite (service-integration + chat).
 ./scripts/run-e2e-local.sh
 ```
 
-The script prompts for:
-- **OpenWebUI base URL** — e.g. `http://localhost:3000`
-- **OpenWebUI API key** — from OpenWebUI → Settings → Account → API Keys
-- **Model name** — leave blank to auto-select the first available model
+The same setup wizard prompts for provider, base URL, API key, and model on
+first run; subsequent runs reuse the saved configuration in `deploy/.env`.
 
 Services started locally (all stopped automatically when the script exits):
 
@@ -198,8 +226,22 @@ parent/
 
 ## First-time setup
 
-You need an **OpenWebUI instance you can reach** and its **API key**
-(OpenWebUI: Settings → Account → API Keys).
+You need an **LLM endpoint you can reach** and (for most providers) an
+**API key**. The bundled setup wizard supports:
+
+| Provider | Default URL | API key needed? |
+|---|---|---|
+| OpenWebUI | `http://localhost:3000` | yes (Settings → Account → API Keys) |
+| Ollama (direct) | `http://localhost:11434` | no |
+| OpenAI | `https://api.openai.com/v1` | yes |
+| Anthropic | `https://api.anthropic.com/v1` | yes |
+| Custom (OpenAI-compatible) | (you supply) | yes |
+
+The wizard runs automatically the first time you launch — it picks a
+provider, validates the connection, lets you pick a default model from
+a scrollable list, and writes the result to `deploy/.env`. To re-run it
+later, pass `--reconfigure` to `scripts/setup_wizard.py` or use the
+**Settings → Connection** tab in the UI.
 
 Choose whichever installation method suits you:
 
@@ -277,15 +319,16 @@ When the server is running, open <http://127.0.0.1:8765> in your browser.
 
 ### Configure on first run
 
-1. Click **Settings** in the sidebar.
-2. Paste your OpenWebUI URL (just the root, e.g. `http://localhost:3000`)
-   and your API key. Click **Save & test** — the URL is auto-detected and
-   the model dropdown populates.
-3. Pick a default chat model. Click **Save defaults**.
-4. If you have CLK, AutoGUI, or OSScreenObserver running, scroll to
-   **Settings → Services** to enable/disable each one. (All three are enabled
-   by default; they degrade gracefully if not reachable.)
-5. Start a new chat (or use the onboarding wizard if prompted).
+The Python launchers (`start.sh` / `start-mac.sh` / `start.bat`) run the
+setup wizard automatically before booting any services — so on first
+launch you'll be walked through the four prompts (provider menu → base
+URL → API key → model picker) and the rest is configured for you. You
+can return to **Settings → Connection** in the UI at any time to change
+values without re-running the wizard.
+
+If you have CLK, AutoGUI, or OSScreenObserver running, scroll to
+**Settings → Services** to enable/disable each one. (All three are
+enabled by default; they degrade gracefully if not reachable.)
 
 Optional, only if you want to use MCP servers:
 
@@ -300,8 +343,9 @@ or `start.bat`, the server starts on your machine. That means:
 - Shell commands the assistant runs → execute on **your** computer
 - Files you pick → stay on **your** computer
 - Files the assistant generates → download to **your** Downloads folder
-- The OpenWebUI server (a separate thing) is the only remote piece, and
-  it only ever sees the messages and base64'd attachments you send
+- The LLM endpoint you configured (OpenWebUI, Ollama, OpenAI, Anthropic,
+  …) is the only remote piece — it only ever sees the messages and
+  base64'd attachments you send
 
 If you want to host BetterWebUI on a remote server and have shell
 commands still execute locally, that's a different architecture (a local
