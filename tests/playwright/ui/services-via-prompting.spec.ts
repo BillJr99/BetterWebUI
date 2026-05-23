@@ -34,7 +34,7 @@ async function nlPromptShouldGetResponse(
   // Outcome: an assistant message exists with non-empty text. Whether the
   // model chose to call a tool depends on its training; we accept either
   // path as long as the system handles the prompt without crashing.
-  const text = await page.locator('#messages [data-role="assistant"]').last().innerText();
+  const text = await page.locator('#messages .message.assistant').last().locator('.content').innerText();
   expect(text.trim().length).toBeGreaterThan(0);
 }
 

@@ -322,11 +322,17 @@ jobs:
                      docker compose -f deploy/docker-compose.e2e.yml logs --tail=200 "$s" 2>&1 || true
                    done \
                 && exit 1)
-          # Pull the model via the Ollama API; tinyllama is small.
+          # Pull models via the Ollama API.
+          # qwen3:0.6b — fast model used by non-tool-call tests (DEFAULT_MODEL).
+          # tinyllama:1.1b — kept available for tool-calling tests (MODEL_SUPPORTS_TOOLS).
           for i in $(seq 1 60); do
             if curl -sf http://localhost:11434/api/tags >/dev/null; then break; fi
             sleep 2
           done
+          curl -X POST http://localhost:11434/api/pull \
+               -H 'Content-Type: application/json' \
+               -d '{"model":"qwen3:0.6b","stream":false}' \
+               --max-time 600 -sf
           curl -X POST http://localhost:11434/api/pull \
                -H 'Content-Type: application/json' \
                -d '{"model":"tinyllama:1.1b","stream":false}' \
@@ -341,17 +347,17 @@ jobs:
 
       - name: Wait for tinyllama in Ollama
         run: |
-          # Poll Ollama's unauthenticated /api/tags endpoint until tinyllama
-          # appears. This avoids creating any OpenWebUI users early (first
-          # signup becomes admin; we need that slot for the CI user below).
+          # Poll until both models appear (tinyllama + qwen3). We need at least
+          # 2 to know the slower pull finished. Avoids creating OpenWebUI users
+          # early (first signup becomes admin; we need that slot for CI user).
           for i in $(seq 1 90); do
             COUNT=$(curl -s http://localhost:11434/api/tags \
                     | python3 -c "import sys,json; d=json.load(sys.stdin); print(len(d.get('models',[])))" 2>/dev/null || echo 0)
-            if [[ "$COUNT" -gt 0 ]]; then
-              echo "Ollama reports $COUNT model(s) — tinyllama ready."
+            if [[ "$COUNT" -ge 2 ]]; then
+              echo "Ollama reports $COUNT model(s) — qwen3:0.6b + tinyllama ready."
               break
             fi
-            echo "Waiting for tinyllama in Ollama ($i/90)..."
+            echo "Waiting for models in Ollama ($COUNT/2 ready, attempt $i/90)..."
             sleep 2
           done
 
@@ -381,6 +387,10 @@ jobs:
           # any host-gateway access needed.
           OPENWEBUI_DOCKER_URL: http://openwebui:3000
           OPENWEBUI_API_KEY: ${{ steps.ow.outputs.key }}
+          # DEFAULT_MODEL: fast model for all UI tests that just need a response.
+          # qwen3:0.6b is ~400 MB vs tinyllama's 638 MB, and responds faster on CPU.
+          DEFAULT_MODEL: qwen3:0.6b
+          # OPENWEBUI_MODEL: fallback used by e2e/chat.spec.ts and tool-call tests.
           OPENWEBUI_MODEL: tinyllama:1.1b
           # OLLAMA_MODEL is read by e2e/chat.spec.ts to target a specific model.
           OLLAMA_MODEL: tinyllama:1.1b

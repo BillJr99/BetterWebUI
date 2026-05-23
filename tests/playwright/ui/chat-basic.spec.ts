@@ -52,6 +52,6 @@ test('conversation persists across page reload', async ({ page, request }) => {
   await page.reload();
   await dismissOnboardingIfPresent(page);
   // The most recent conversation should be selected and load its messages.
-  const after = await page.locator('#messages [data-role="assistant"]').last().innerText({ timeout: 30_000 });
+  const after = await page.locator('#messages .message.assistant').last().locator('.content').innerText({ timeout: 30_000 });
   expect(after.trim().length).toBeGreaterThan(0);
 });

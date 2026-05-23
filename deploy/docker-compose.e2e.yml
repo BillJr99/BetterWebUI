@@ -67,6 +67,10 @@ services:
       CLK_BASE_URL: http://clk:8001
       AUTOGUI_BASE_URL: http://autogui:8002
       OSSO_BASE_URL: http://osso:5001
+      # Trim system prompt and cap output so the test suite finishes fast
+      # on a CPU-only CI runner. Has no effect outside test runs.
+      BWUI_TEST_MODE: "1"
+      BWUI_TEST_MAX_TOKENS: "30"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:

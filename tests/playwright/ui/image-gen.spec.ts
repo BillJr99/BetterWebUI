@@ -26,7 +26,7 @@ test('asking for an image either renders one inline or returns a service-unavail
 
   await sendChatMessage(page, 'Generate a tiny image of a red square.');
   await waitForAssistantResponse(page, { timeoutMs: 240_000 }).catch(() => {});
-  const lastBubble = page.locator('#messages [data-role="assistant"]').last();
+  const lastBubble = page.locator('#messages .message.assistant').last();
   const html = await lastBubble.innerHTML();
   // Outcome: either an <img> appeared, or there's text explaining unavailability.
   expect(html.length).toBeGreaterThan(0);

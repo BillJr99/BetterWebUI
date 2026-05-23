@@ -25,7 +25,7 @@ test('code-block prompt renders a <pre><code>', async ({ page, request }) => {
   await waitForAssistantResponse(page);
   // Code block rendering is best-effort because the model may not comply
   // perfectly. We assert pre/code is in the page somewhere within the last bubble.
-  const lastBubble = page.locator('#messages [data-role="assistant"]').last();
+  const lastBubble = page.locator('#messages .message.assistant').last();
   // Tolerant — either pre/code rendered, or the text contains the fence.
   const html = await lastBubble.innerHTML();
   expect(html).toMatch(/<pre|<code|```/i);
@@ -39,7 +39,7 @@ test('math prompt renders KaTeX OR plain text', async ({ page, request }) => {
     'Reply with exactly this LaTeX: $E = mc^2$',
   );
   await waitForAssistantResponse(page);
-  const lastBubble = page.locator('#messages [data-role="assistant"]').last();
+  const lastBubble = page.locator('#messages .message.assistant').last();
   const html = await lastBubble.innerHTML();
   // KaTeX rendering attaches a span.katex; if disabled, the literal $...$ is fine.
   expect(html).toMatch(/katex|\$E\s*=\s*mc\^2\$|E\s*=\s*mc\^2/i);

@@ -79,7 +79,14 @@ export async function openTab(page: Page, tabId: string): Promise<void> {
   console.log(`[tab] opening tab: ${tabId}`);
   await page.locator(`#tab-btn-${tabId}`).click();
   await expect(page.locator(`#tab-${tabId}`)).toHaveClass(/active/);
-  console.log(`[tab] tab active: ${tabId}`);
+  // Confirm computed display is actually 'block' — toHaveClass passing isn't
+  // enough if a later async init pass overwrites the class set (or if some
+  // other panel ends up overlapping). A few past failures looked like
+  // "panel has .active but elements still report not-visible".
+  const display = await page.locator(`#tab-${tabId}`).evaluate(
+    (el) => getComputedStyle(el).display,
+  ).catch(() => '?');
+  console.log(`[tab] tab active: ${tabId} (display=${display})`);
 }
 
 export async function sendChatMessage(page: Page, text: string): Promise<void> {
@@ -116,14 +123,14 @@ export async function waitForAssistantResponse(
   const startedAt = Date.now();
   console.log(`[wait] waiting for assistant response (timeout=${timeoutMs / 1000}s, minLen=${minLen})`);
 
-  const last = page.locator('#messages [data-role="assistant"]').last();
+  const last = page.locator('#messages .message.assistant').last();
   // Log how many assistant bubbles already exist before we start waiting.
-  const countBefore = await page.locator('#messages [data-role="assistant"]').count().catch(() => -1);
+  const countBefore = await page.locator('#messages .message.assistant').count().catch(() => -1);
   console.log(`[wait] assistant bubbles already in DOM: ${countBefore}`);
 
   await expect(last).toBeVisible({ timeout: timeoutMs }).catch(async (err) => {
     // Dump page state before re-throwing so CI logs show what went wrong.
-    const msgCount = await page.locator('#messages').locator('[data-role]').count().catch(() => -1);
+    const msgCount = await page.locator('#messages .message').count().catch(() => -1);
     const html = await page.locator('#messages').innerHTML().catch(() => '<unavailable>');
     console.log(`[wait:ERR] assistant bubble never became visible after ${Math.round((Date.now() - startedAt) / 1000)}s`);
     console.log(`[wait:ERR] #messages child count: ${msgCount}`);
@@ -133,13 +140,18 @@ export async function waitForAssistantResponse(
 
   console.log(`[wait] assistant bubble appeared after ${Math.round((Date.now() - startedAt) / 1000)}s`);
 
+  // Watch the .content element specifically: the bubble's outer text always
+  // contains the role label ("Assistant") plus action button labels, even
+  // during the placeholder phase. .content is empty (typing dots have no
+  // text) until the model's response starts streaming in.
+  const content = last.locator('.content');
   let loggedAt = Date.now();
   await expect.poll(
     async () => {
-      const len = (await last.innerText().catch(() => '')).trim().length;
+      const len = (await content.innerText().catch(() => '')).trim().length;
       const now = Date.now();
       if (now - loggedAt > 15_000) {
-        console.log(`[wait] assistant bubble length=${len} elapsed=${Math.round((now - startedAt) / 1000)}s`);
+        console.log(`[wait] assistant content length=${len} elapsed=${Math.round((now - startedAt) / 1000)}s`);
         loggedAt = now;
       }
       return len;
@@ -147,14 +159,16 @@ export async function waitForAssistantResponse(
     { timeout: timeoutMs, intervals: [1000, 2000, 3000] },
   ).toBeGreaterThanOrEqual(minLen);
 
-  const finalLen = (await last.innerText().catch(() => '')).trim().length;
+  const finalLen = (await content.innerText().catch(() => '')).trim().length;
   console.log(`[wait] response complete: length=${finalLen} total=${Math.round((Date.now() - startedAt) / 1000)}s`);
   // Settle: streaming class should clear (best-effort).
   await page.waitForTimeout(500);
 }
 
 export async function getLastAssistantText(page: Page): Promise<string> {
-  const last = page.locator('#messages [data-role="assistant"]').last();
+  // Read .content only so we get the model's reply, not the "Assistant" role
+  // label or the action-button labels that surround it.
+  const last = page.locator('#messages .message.assistant').last().locator('.content');
   return (await last.innerText().catch(() => '')).trim();
 }
 

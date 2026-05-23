@@ -37,6 +37,11 @@ import verification as _verification
 ROOT = Path(__file__).parent.resolve()
 DATA_DIR = ROOT / "data"
 SKILLS_DIR = ROOT / "skills"
+
+# When BWUI_TEST_MODE=1 the server trims its system prompt and caps model
+# output so the test suite can complete in reasonable CI time without a GPU.
+_TEST_MODE = os.environ.get("BWUI_TEST_MODE") == "1"
+_TEST_MAX_TOKENS = int(os.environ.get("BWUI_TEST_MAX_TOKENS", "30"))
 UPLOADS_DIR = DATA_DIR / "uploads"
 CHECKPOINTS_DIR = DATA_DIR / "checkpoints"
 TASKS_DIR = DATA_DIR / "tasks"
@@ -1188,6 +1193,12 @@ def build_system_prompt(
     # Rendering rules
     parts.append(RENDERING_PROTOCOL)
 
+    # In test mode skip the tool-protocol block and all tool / service listings.
+    # The basic prompt + memories above are sufficient for outcome assertions;
+    # omitting ~1 k tokens of tool instructions cuts inference time by ~40 %.
+    if _TEST_MODE:
+        return "\n\n".join(parts)
+
     # 2. Available skills
     if workspace:
         active_skill_ids = workspace.get("active_skills") or []
@@ -1764,6 +1775,8 @@ async def chat_complete(messages: list, model: str, config: dict, chat_id: str =
     payload: dict = {"model": model, "messages": messages, "stream": False}
     if chat_id and profile.get("name") == "openwebui":
         payload["chat_id"] = chat_id
+    if _TEST_MODE:
+        payload["max_tokens"] = _TEST_MAX_TOKENS
     t0 = time.time()
     async with httpx.AsyncClient(timeout=300.0, follow_redirects=True) as client:
         resp = await client.post(f"{base}{profile['chat']}", json=payload, headers=headers)
