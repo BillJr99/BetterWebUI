@@ -15,11 +15,22 @@ export async function gotoApp(page: Page): Promise<void> {
  * Bypass onboarding by either ensuring config is already set (so the overlay
  * never shows) or by closing it if it does. The full onboarding flow is
  * exercised in onboarding.spec.ts.
+ *
+ * `init()` in app.js calls `checkOnboarding()` LAST, after several network
+ * awaits (loadConfig, refreshModels, …). A one-shot `isHidden` check can
+ * therefore pass while the overlay is briefly hidden, then init() finishes
+ * loading, sees `onboarding_done === false` for any reason (stale config,
+ * race with /api/config POST, etc.) and pops the overlay open AFTER we've
+ * "dismissed" it — blocking the next click. We address this by also
+ * injecting a permanent CSS rule that keeps the overlay hidden for the
+ * remainder of the page lifetime.
  */
 export async function dismissOnboardingIfPresent(page: Page): Promise<void> {
+  await page.addStyleTag({
+    content: '#onboarding-overlay { display: none !important; }',
+  }).catch(() => {});
   const overlay = page.locator('#onboarding-overlay');
   if (await overlay.isHidden().catch(() => true)) return;
-  // If visible, just hide it via DOM — most specs aren't testing the wizard.
   await overlay.evaluate((el) => el.setAttribute('hidden', ''));
 }
 
@@ -41,12 +52,18 @@ export async function sendChatMessage(page: Page, text: string): Promise<void> {
  * Wait for an assistant response bubble to appear and finish streaming.
  * Outcome: at least one assistant message with non-empty text content exists
  * in #messages by the timeout.
+ *
+ * Default timeout 240 s. tinyllama on a 2-core CI runner has a measured
+ * end-to-end latency of ~120–180 s for a short reply when the system prompt
+ * includes the full tool-protocol block (~1k tokens). Tests that need to do
+ * multiple round-trips (e.g. new-chat creation) rely on the suite-level
+ * timeout in ui.config.ts (currently 480 s) to give two slow turns room.
  */
 export async function waitForAssistantResponse(
   page: Page,
   opts: { timeoutMs?: number; minLengthChars?: number } = {},
 ): Promise<void> {
-  const timeoutMs = opts.timeoutMs ?? 180_000;
+  const timeoutMs = opts.timeoutMs ?? 240_000;
   const minLen   = opts.minLengthChars ?? 1;
   const last = page.locator('#messages [data-role="assistant"]').last();
   await expect(last).toBeVisible({ timeout: timeoutMs });
