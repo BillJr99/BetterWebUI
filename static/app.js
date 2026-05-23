@@ -792,6 +792,9 @@ async function activateWorkspace(id) {
     method: "POST",
     json: { active_workspace_id: id || "" },
   });
+  // Optimistically update state so populateWorkspaceSelect() (called inside
+  // loadWorkspaces()) sees the new active ID before loadConfig() round-trips.
+  if (state.config) state.config.active_workspace_id = id || "";
   // Refresh workspaces before config so loadConfig's mode-select lookup
   // can find the new active workspace's stored mode.
   await loadWorkspaces();

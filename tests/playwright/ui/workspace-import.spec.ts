@@ -33,7 +33,7 @@ test('export a workspace as bundle, then import it back', async ({ page, request
   // Import the bytes back via multipart upload.
   const imp = await request.post('/api/workspaces/import', {
     multipart: {
-      bundle: {
+      file: {
         name: 'roundtrip.bwui',
         mimeType: 'application/octet-stream',
         buffer: blob,

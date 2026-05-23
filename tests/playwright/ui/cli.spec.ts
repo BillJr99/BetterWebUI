@@ -15,7 +15,7 @@ test.beforeEach(async ({ page, request }) => {
 
 test('register a CLI tool via API; UI list shows it', async ({ page, request }) => {
   const r = await request.post('/api/cli/tools', {
-    data: { id: ID, name: 'PW Echo', template: 'echo {args}', description: 'Echo for PW UI test' },
+    data: { id: ID, name: 'PW Echo', command_template: 'echo {args}', description: 'Echo for PW UI test' },
   });
   expect(r.ok()).toBeTruthy();
   // Reload so the JS fetches the updated CLI tool list before we switch tabs.
