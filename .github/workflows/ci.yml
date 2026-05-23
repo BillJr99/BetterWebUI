@@ -339,25 +339,19 @@ jobs:
             sleep 3
           done
 
-      - name: Wait for OpenWebUI to index tinyllama
+      - name: Wait for tinyllama in Ollama
         run: |
-          # After Ollama pull, OpenWebUI needs a moment to refresh its model list.
-          # Poll up to 3 minutes; create a throwaway session first so the model
-          # endpoint is accessible.
-          SIGNUP=$(curl -s -X POST http://localhost:3000/api/v1/auths/signup \
-               -H 'Content-Type: application/json' \
-               -d '{"name":"Probe","email":"probe@bwui.test","password":"bwui-ci-pass2"}' \
-               || echo '{}')
-          TOKEN=$(echo "$SIGNUP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('token',''))" 2>/dev/null || echo '')
+          # Poll Ollama's unauthenticated /api/tags endpoint until tinyllama
+          # appears. This avoids creating any OpenWebUI users early (first
+          # signup becomes admin; we need that slot for the CI user below).
           for i in $(seq 1 90); do
-            COUNT=$(curl -s -H "Authorization: Bearer $TOKEN" \
-                      http://localhost:3000/api/v1/models \
-                    | python3 -c "import sys,json; d=json.load(sys.stdin); print(len(d.get('data',d) if isinstance(d,dict) else d))" 2>/dev/null || echo 0)
+            COUNT=$(curl -s http://localhost:11434/api/tags \
+                    | python3 -c "import sys,json; d=json.load(sys.stdin); print(len(d.get('models',[])))" 2>/dev/null || echo 0)
             if [[ "$COUNT" -gt 0 ]]; then
-              echo "OpenWebUI reports $COUNT model(s) — ready."
+              echo "Ollama reports $COUNT model(s) — tinyllama ready."
               break
             fi
-            echo "Waiting for tinyllama to appear in OpenWebUI model list ($i/90)..."
+            echo "Waiting for tinyllama in Ollama ($i/90)..."
             sleep 2
           done
 
@@ -368,8 +362,17 @@ jobs:
           SIGNUP=$(curl -s -X POST http://localhost:3000/api/v1/auths/signup \
                -H 'Content-Type: application/json' \
                -d '{"name":"CI","email":"ci@bwui.test","password":"bwui-ci-pass"}')
-          echo "signup role: $(echo "$SIGNUP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('role','?'))" 2>/dev/null)"
-          TOKEN=$(echo "$SIGNUP" | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])")
+          echo "signup response: $SIGNUP"
+          TOKEN=$(echo "$SIGNUP" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+t = d.get('token', '')
+if not t:
+    print('ERROR: no token in response: ' + str(d), file=sys.stderr)
+    sys.exit(1)
+print(t)
+")
+          [[ -z "$TOKEN" ]] && { echo "ERROR: failed to extract token from OpenWebUI signup" >&2; exit 1; }
           # Try dedicated API key; fall back to JWT bearer token if unavailable.
           KEY=$(curl -s -X POST http://localhost:3000/api/v1/auths/api_key \
                -H "Authorization: Bearer $TOKEN" \
