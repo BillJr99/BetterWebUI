@@ -19,12 +19,13 @@ export default defineConfig({
   // the per-turn response budget, leaving room for setup + a second turn.
   timeout: 960_000,
   expect: { timeout: 30_000 },
-  retries: process.env.CI ? 1 : 0,
+  retries: 0,             // No retries: slow tests already use generous timeouts;
+                          // retries double CI time without adding diagnostic value.
   workers: 1,             // UI tests share state (config.json, conversations) — serialize
   reporter: [['list'], ['html', { open: 'never', outputFolder: 'ui-report' }]],
   use: {
     baseURL: process.env.BETTERWEBUI_URL ?? 'http://localhost:8765',
-    trace: 'on-first-retry',
+    trace: 'on',          // Always capture traces — cheap to produce, invaluable to debug.
     video: 'retain-on-failure',
     screenshot: 'only-on-failure',
     actionTimeout: 15_000,

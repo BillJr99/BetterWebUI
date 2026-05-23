@@ -7,21 +7,43 @@
 import { Page, expect, APIRequestContext } from '@playwright/test';
 
 export async function gotoApp(page: Page): Promise<void> {
-  // Surface browser console errors in the test runner output so CI logs show
-  // JS exceptions without needing to download Playwright traces.
+  // Surface browser console warnings+errors so CI logs show JS exceptions
+  // without needing to download Playwright traces.
   page.on('console', msg => {
-    if (msg.type() === 'error') console.log(`[browser:error] ${msg.text()}`);
+    const t = msg.type();
+    if (t === 'error') {
+      console.log(`[browser:error] ${msg.text()}`);
+    } else if (t === 'warning') {
+      console.log(`[browser:warn]  ${msg.text()}`);
+    }
   });
-  // Log non-2xx responses on key API routes so we can tell "network error"
-  // from "model too slow" in CI without reading SSE body content.
+  // Log every /api/ response so we can see the full picture of what the app
+  // called and whether it succeeded — not just the two endpoints we first
+  // expected to fail.
   page.on('response', resp => {
     const url = resp.url();
-    if ((url.includes('/api/chat') || url.includes('/api/config')) && resp.status() >= 400) {
-      console.log(`[net] ${resp.request().method()} ${url} → ${resp.status()}`);
+    if (url.includes('/api/')) {
+      const status = resp.status();
+      const method = resp.request().method();
+      if (status >= 400) {
+        console.log(`[net:ERR] ${method} ${url} → ${status}`);
+      } else if (status >= 300) {
+        console.log(`[net:redirect] ${method} ${url} → ${status}`);
+      }
+      // Log slow responses (>5 s) regardless of status so we can spot hangs.
+      resp.finished().then(() => {
+        const timing = resp.request().timing();
+        const elapsed = timing ? Math.round(timing.responseEnd - timing.requestStart) : -1;
+        if (elapsed > 5_000) {
+          console.log(`[net:slow] ${method} ${url} → ${status} (${elapsed}ms)`);
+        }
+      }).catch(() => {});
     }
   });
   await page.goto('/');
   await page.waitForLoadState('networkidle').catch(() => {});
+  const title = await page.title().catch(() => '?');
+  console.log(`[nav] loaded → title="${title}" url=${page.url()}`);
 }
 
 /**
@@ -43,22 +65,31 @@ export async function dismissOnboardingIfPresent(page: Page): Promise<void> {
     content: '#onboarding-overlay { display: none !important; }',
   }).catch(() => {});
   const overlay = page.locator('#onboarding-overlay');
-  if (await overlay.isHidden().catch(() => true)) return;
+  if (await overlay.isHidden().catch(() => true)) {
+    console.log('[onboarding] overlay not visible — skipping dismiss');
+    return;
+  }
+  console.log('[onboarding] overlay visible — injecting hidden attribute');
   await overlay.evaluate((el) => el.setAttribute('hidden', ''));
 }
 
 export async function openTab(page: Page, tabId: string): Promise<void> {
   // tabId is one of: chats, workspaces, files, memory, scheduled, skills,
   // prompts, tools, settings.
+  console.log(`[tab] opening tab: ${tabId}`);
   await page.locator(`#tab-btn-${tabId}`).click();
   await expect(page.locator(`#tab-${tabId}`)).toHaveClass(/active/);
+  console.log(`[tab] tab active: ${tabId}`);
 }
 
 export async function sendChatMessage(page: Page, text: string): Promise<void> {
+  const preview = text.length > 80 ? text.slice(0, 77) + '...' : text;
+  console.log(`[chat] sending: "${preview}"`);
   const input = page.locator('#composer-input');
   await input.click();
   await input.fill(text);
   await page.locator('#send-btn').click();
+  console.log(`[chat] message sent`);
 }
 
 /**
@@ -82,21 +113,42 @@ export async function waitForAssistantResponse(
 ): Promise<void> {
   const timeoutMs = opts.timeoutMs ?? 480_000;
   const minLen   = opts.minLengthChars ?? 1;
+  const startedAt = Date.now();
+  console.log(`[wait] waiting for assistant response (timeout=${timeoutMs / 1000}s, minLen=${minLen})`);
+
   const last = page.locator('#messages [data-role="assistant"]').last();
-  await expect(last).toBeVisible({ timeout: timeoutMs });
+  // Log how many assistant bubbles already exist before we start waiting.
+  const countBefore = await page.locator('#messages [data-role="assistant"]').count().catch(() => -1);
+  console.log(`[wait] assistant bubbles already in DOM: ${countBefore}`);
+
+  await expect(last).toBeVisible({ timeout: timeoutMs }).catch(async (err) => {
+    // Dump page state before re-throwing so CI logs show what went wrong.
+    const msgCount = await page.locator('#messages').locator('[data-role]').count().catch(() => -1);
+    const html = await page.locator('#messages').innerHTML().catch(() => '<unavailable>');
+    console.log(`[wait:ERR] assistant bubble never became visible after ${Math.round((Date.now() - startedAt) / 1000)}s`);
+    console.log(`[wait:ERR] #messages child count: ${msgCount}`);
+    console.log(`[wait:ERR] #messages innerHTML (first 800 chars): ${html.slice(0, 800)}`);
+    throw err;
+  });
+
+  console.log(`[wait] assistant bubble appeared after ${Math.round((Date.now() - startedAt) / 1000)}s`);
+
   let loggedAt = Date.now();
   await expect.poll(
     async () => {
       const len = (await last.innerText().catch(() => '')).trim().length;
       const now = Date.now();
       if (now - loggedAt > 15_000) {
-        console.log(`[wait] assistant bubble length=${len} elapsed=${Math.round((now - loggedAt) / 1000)}s`);
+        console.log(`[wait] assistant bubble length=${len} elapsed=${Math.round((now - startedAt) / 1000)}s`);
         loggedAt = now;
       }
       return len;
     },
     { timeout: timeoutMs, intervals: [1000, 2000, 3000] },
   ).toBeGreaterThanOrEqual(minLen);
+
+  const finalLen = (await last.innerText().catch(() => '')).trim().length;
+  console.log(`[wait] response complete: length=${finalLen} total=${Math.round((Date.now() - startedAt) / 1000)}s`);
   // Settle: streaming class should clear (best-effort).
   await page.waitForTimeout(500);
 }
@@ -126,10 +178,17 @@ export async function ensureConfigured(request: APIRequestContext): Promise<void
   const owUrl = process.env.OPENWEBUI_DOCKER_URL ?? process.env.OPENWEBUI_BASE_URL ?? '';
   const owKey = process.env.OPENWEBUI_API_KEY  ?? '';
   const model = process.env.DEFAULT_MODEL       ?? process.env.OPENWEBUI_MODEL ?? '';
-  if (!owUrl || !owKey) return;
+  if (!owUrl || !owKey) {
+    console.log(`[config] ensureConfigured: missing base_url or api_key — skipping POST (url="${owUrl ? '(set)' : ''}", key="${owKey ? '(set)' : ''}")`);
+    return;
+  }
   const payload: Record<string, unknown> = { base_url: owUrl, api_key: owKey, onboarding_done: true };
   if (model) payload.default_model = model;
-  await request.post('/api/config', { data: payload }).catch(() => {});
+  console.log(`[config] posting /api/config: base_url=${owUrl} model=${model || '(none)'}`);
+  const r = await request.post('/api/config', { data: payload }).catch(() => null);
+  if (r) {
+    console.log(`[config] /api/config POST → ${r.status()}`);
+  }
 }
 
 /**
@@ -141,14 +200,26 @@ export async function pickModel(request: APIRequestContext): Promise<string> {
   const cfg = await request.get('/api/config');
   if (cfg.ok()) {
     const body = await cfg.json();
-    if (body.default_model) return body.default_model;
+    if (body.default_model) {
+      console.log(`[model] resolved from /api/config default_model: ${body.default_model}`);
+      return body.default_model;
+    }
+    console.log(`[model] /api/config has no default_model (onboarding_done=${body.onboarding_done})`);
+  } else {
+    console.log(`[model] /api/config returned ${cfg.status()}`);
   }
   const models = await request.get('/api/models');
   if (models.ok()) {
     const body = await models.json();
     if (Array.isArray(body.models) && body.models.length > 0) {
-      return body.models[0].id ?? '';
+      const id = body.models[0].id ?? '';
+      console.log(`[model] resolved from /api/models first entry: ${id} (${body.models.length} total)`);
+      return id;
     }
+    console.log(`[model] /api/models returned empty list`);
+  } else {
+    console.log(`[model] /api/models returned ${models.status()}`);
   }
+  console.log(`[model] no model found — test will be skipped`);
   return '';
 }
