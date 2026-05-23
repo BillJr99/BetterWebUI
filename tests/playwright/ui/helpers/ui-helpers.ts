@@ -80,11 +80,11 @@ export async function resetServerState(request: APIRequestContext): Promise<void
  * No-op if already configured.
  */
 export async function ensureConfigured(request: APIRequestContext): Promise<void> {
-  const owUrl = process.env.OPENWEBUI_BASE_URL ?? '';
+  const owUrl = process.env.OPENWEBUI_DOCKER_URL ?? process.env.OPENWEBUI_BASE_URL ?? '';
   const owKey = process.env.OPENWEBUI_API_KEY  ?? '';
   const model = process.env.DEFAULT_MODEL       ?? process.env.OPENWEBUI_MODEL ?? '';
   if (!owUrl || !owKey) return;
-  const payload: Record<string, string> = { base_url: owUrl, api_key: owKey };
+  const payload: Record<string, unknown> = { base_url: owUrl, api_key: owKey, onboarding_done: true };
   if (model) payload.default_model = model;
   await request.post('/api/config', { data: payload }).catch(() => {});
 }

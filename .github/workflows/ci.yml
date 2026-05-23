@@ -339,6 +339,28 @@ jobs:
             sleep 3
           done
 
+      - name: Wait for OpenWebUI to index tinyllama
+        run: |
+          # After Ollama pull, OpenWebUI needs a moment to refresh its model list.
+          # Poll up to 3 minutes; create a throwaway session first so the model
+          # endpoint is accessible.
+          SIGNUP=$(curl -s -X POST http://localhost:3000/api/v1/auths/signup \
+               -H 'Content-Type: application/json' \
+               -d '{"name":"Probe","email":"probe@bwui.test","password":"bwui-ci-pass2"}' \
+               || echo '{}')
+          TOKEN=$(echo "$SIGNUP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('token',''))" 2>/dev/null || echo '')
+          for i in $(seq 1 90); do
+            COUNT=$(curl -s -H "Authorization: Bearer $TOKEN" \
+                      http://localhost:3000/api/v1/models \
+                    | python3 -c "import sys,json; d=json.load(sys.stdin); print(len(d.get('data',d) if isinstance(d,dict) else d))" 2>/dev/null || echo 0)
+            if [[ "$COUNT" -gt 0 ]]; then
+              echo "OpenWebUI reports $COUNT model(s) — ready."
+              break
+            fi
+            echo "Waiting for tinyllama to appear in OpenWebUI model list ($i/90)..."
+            sleep 2
+          done
+
       - name: Create OpenWebUI admin + API key
         id: ow
         run: |
@@ -358,8 +380,15 @@ jobs:
       - name: Run unified test runner
         env:
           OPENWEBUI_BASE_URL: http://localhost:3000
+          # BetterWebUI runs inside docker; it cannot reach "localhost:3000" from
+          # inside its container. Use the docker-network service name instead.
+          # The compose file already adds extra_hosts:host.docker.internal for
+          # any host-gateway access needed.
+          OPENWEBUI_DOCKER_URL: http://openwebui:3000
           OPENWEBUI_API_KEY: ${{ steps.ow.outputs.key }}
           OPENWEBUI_MODEL: tinyllama:1.1b
+          # OLLAMA_MODEL is read by e2e/chat.spec.ts to target a specific model.
+          OLLAMA_MODEL: tinyllama:1.1b
           # Docker BetterWebUI is on port 8080; skip local service startup.
           BWUI_PORT: "8080"
         run: |

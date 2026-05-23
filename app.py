@@ -4256,6 +4256,7 @@ async def chat(req: ChatRequest, request: Request):
                 elapsed = usage.get("elapsed_ms", 0)
                 await send_event("assistant_text", {
                     "text": text,
+                    "delta": text,  # SSE-reader alias used by integration tests
                     "telemetry": {
                         "tokens_in": tokens_in,
                         "tokens_out": tokens_out,
@@ -4376,6 +4377,7 @@ async def chat(req: ChatRequest, request: Request):
             )
             save_conversation(cid, title, history, current_task_plan, workspace_id)
             await send_event("done", {
+                "_done": True,
                 "conversation_id": cid,
                 "messages": history,
                 "task_plan": current_task_plan,

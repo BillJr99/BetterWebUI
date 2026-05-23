@@ -306,20 +306,26 @@ else
 fi
 
 # Pre-configure BetterWebUI via /api/config so onboarding doesn't appear.
+# When BetterWebUI runs inside Docker, it cannot reach "localhost" to get to
+# OpenWebUI — use OPENWEBUI_DOCKER_URL if set (the docker-network address),
+# otherwise fall back to OPENWEBUI_BASE_URL.
 echo ""
 echo "=== Configuring BetterWebUI ==="
+BWUI_CONFIG_BASE_URL="${OPENWEBUI_DOCKER_URL:-${OPENWEBUI_BASE_URL:-}}"
 CONFIG_PAYLOAD=$(python3 -c "
 import json, os
+url = os.environ.get('BWUI_CONFIG_BASE_URL') or os.environ.get('OPENWEBUI_BASE_URL','')
 print(json.dumps({
-    'base_url': os.environ['OPENWEBUI_BASE_URL'],
-    'api_key':  os.environ['OPENWEBUI_API_KEY'],
+    'base_url': url,
+    'api_key':  os.environ.get('OPENWEBUI_API_KEY',''),
+    'onboarding_done': True,
     **({'default_model': os.environ['OPENWEBUI_MODEL']} if os.environ.get('OPENWEBUI_MODEL') else {}),
 }))
-")
+" BWUI_CONFIG_BASE_URL="$BWUI_CONFIG_BASE_URL")
 curl -sf -X POST "http://localhost:$BWUI_PORT/api/config" \
     -H "Content-Type: application/json" \
     -d "$CONFIG_PAYLOAD" >/dev/null
-info "✓ BetterWebUI configured"
+info "✓ BetterWebUI configured (base_url=$BWUI_CONFIG_BASE_URL)"
 
 # ── Stage 4: Python tests ────────────────────────────────────────────────────
 if [[ $SKIP_PYTHON -eq 0 ]]; then

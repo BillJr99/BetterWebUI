@@ -203,7 +203,10 @@ def register_routes(app: FastAPI) -> None:  # noqa: C901
         _require_enabled("osso")
         client = get_osso_client()
         try:
-            return await client.description(window_index, mode)
+            result = await client.description(window_index, mode)
+            if "mode" not in result:
+                result["mode"] = mode
+            return result
         except (httpx.ConnectError, httpx.TimeoutException, httpx.TransportError) as e:
             raise _unreachable("osso", e) from e
 

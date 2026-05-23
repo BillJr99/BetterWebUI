@@ -11,9 +11,11 @@
 import { request } from '@playwright/test';
 
 const BWUI_URL    = process.env.BETTERWEBUI_URL   ?? 'http://localhost:8765';
-const OW_URL      = process.env.OPENWEBUI_BASE_URL ?? '';
+// OPENWEBUI_DOCKER_URL is the URL BetterWebUI (possibly inside Docker) should
+// use to reach OpenWebUI. Falls back to OPENWEBUI_BASE_URL if not set.
+const OW_URL      = process.env.OPENWEBUI_DOCKER_URL ?? process.env.OPENWEBUI_BASE_URL ?? '';
 const OW_KEY      = process.env.OPENWEBUI_API_KEY  ?? '';
-const MODEL       = process.env.DEFAULT_MODEL      ?? '';
+const MODEL       = process.env.DEFAULT_MODEL      ?? process.env.OPENWEBUI_MODEL ?? '';
 
 async function waitForUrl(name: string, url: string, maxRetries = 45, intervalMs = 2000) {
   const ctx = await request.newContext();
@@ -40,7 +42,7 @@ export default async function globalSetup() {
   // Configure BetterWebUI if the shell script provided credentials.
   if (OW_URL && OW_KEY) {
     const ctx = await request.newContext({ baseURL: BWUI_URL });
-    const payload: Record<string, string> = { base_url: OW_URL, api_key: OW_KEY };
+    const payload: Record<string, unknown> = { base_url: OW_URL, api_key: OW_KEY, onboarding_done: true };
     if (MODEL) payload.default_model = MODEL;
     const r = await ctx.post('/api/config', { data: payload });
     await ctx.dispose();
