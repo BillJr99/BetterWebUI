@@ -16,14 +16,10 @@ test('create a workspace and see it in the list', async ({ page, request }) => {
   const beforeList = (await before.json()).workspaces ?? [];
 
   await page.locator('#new-workspace-btn').click();
-  // The new-workspace UI may be a modal or an inline form. Fill any visible
-  // "name" input and submit; tolerant to either shape.
-  const nameInput = page.locator('input[placeholder*="name" i], input[aria-label*="name" i]').first();
-  await nameInput.fill('Playwright Test Workspace');
-  const save = page.locator(
-    'button:has-text("Create"), button:has-text("Save"), button[type="submit"]:visible',
-  ).first();
-  await save.click();
+  // The workspace dialog uses #dlg-name (no placeholder / no aria-label) and a
+  // <button>Save</button>; selectors target IDs/text exactly as rendered.
+  await page.locator('#dlg-name').fill('Playwright Test Workspace');
+  await page.locator('.dialog-actions button.primary').click();
 
   await expect.poll(async () => {
     const r = await request.get('/api/workspaces');

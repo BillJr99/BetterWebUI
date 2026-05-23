@@ -22,6 +22,9 @@ test('create → list → delete', async ({ page, request }) => {
   const items = ((await list.json()).prompts ?? []) as any[];
   expect(items.some((p) => p.id === id)).toBe(true);
 
+  // switchTab() doesn't refresh #prompt-list — reload so the page re-fetches.
+  await page.reload();
+  await dismissOnboardingIfPresent(page);
   await openTab(page, 'prompts');
   await expect(page.locator('#prompt-list')).toContainText('PW SP CRUD');
 

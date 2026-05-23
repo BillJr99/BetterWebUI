@@ -42,7 +42,9 @@ test('export a workspace as bundle, then import it back', async ({ page, request
   });
   expect([200, 201].includes(imp.status())).toBeTruthy();
 
-  // Confirm it shows up in the UI list.
+  // switchTab() doesn't refresh #workspace-list — reload so the page re-fetches.
+  await page.reload();
+  await dismissOnboardingIfPresent(page);
   await openTab(page, 'workspaces');
   await expect(page.locator('#workspace-list')).toContainText('Roundtrip Source');
 
