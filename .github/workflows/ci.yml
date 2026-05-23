@@ -248,19 +248,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: recursive
+          # Skip submodules: the pinned AutoGUI SHA isn't always reachable
+          # on the public default branch, causing checkout to fail. We
+          # clone each sibling repo's main directly below — that's also the
+          # layout the compose file expects (../../<lowercase>).
+          submodules: false
 
-      - name: Set up sibling-repo layout for compose
+      - name: Clone sibling repos for compose
         # deploy/docker-compose.e2e.yml builds CLK/AutoGUI/OSSO from
         # ../../cognitiveloopkernel etc. — the sibling layout that
-        # deploy/bootstrap.sh creates locally. In CI we have them as
-        # submodules inside the repo (CamelCase), so symlink them into
-        # the lowercase sibling location the compose file expects.
+        # deploy/bootstrap.sh creates locally. Clone the public main of
+        # each repo into that layout.
         run: |
-          ln -sfn "$PWD/CognitiveLoopKernel" ../cognitiveloopkernel
-          ln -sfn "$PWD/AutoGUI"             ../autogui
-          ln -sfn "$PWD/OSScreenObserver"    ../osscreenobserver
-          ls -la ../cognitiveloopkernel ../autogui ../osscreenobserver
+          cd ..
+          git clone --depth 1 https://github.com/BillJr99/CognitiveLoopKernel cognitiveloopkernel
+          git clone --depth 1 https://github.com/BillJr99/AutoGUI             autogui
+          git clone --depth 1 https://github.com/BillJr99/OSScreenObserver    osscreenobserver
+          ls -la cognitiveloopkernel autogui osscreenobserver
 
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
