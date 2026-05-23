@@ -363,16 +363,8 @@ jobs:
                -H 'Content-Type: application/json' \
                -d '{"name":"CI","email":"ci@bwui.test","password":"bwui-ci-pass"}')
           echo "signup response: $SIGNUP"
-          TOKEN=$(echo "$SIGNUP" | python3 -c "
-import sys, json
-d = json.load(sys.stdin)
-t = d.get('token', '')
-if not t:
-    print('ERROR: no token in response: ' + str(d), file=sys.stderr)
-    sys.exit(1)
-print(t)
-")
-          [[ -z "$TOKEN" ]] && { echo "ERROR: failed to extract token from OpenWebUI signup" >&2; exit 1; }
+          TOKEN=$(echo "$SIGNUP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['token'])" 2>/dev/null || true)
+          [[ -z "$TOKEN" ]] && { echo "ERROR: no token in OpenWebUI signup response: $SIGNUP" >&2; exit 1; }
           # Try dedicated API key; fall back to JWT bearer token if unavailable.
           KEY=$(curl -s -X POST http://localhost:3000/api/v1/auths/api_key \
                -H "Authorization: Bearer $TOKEN" \
