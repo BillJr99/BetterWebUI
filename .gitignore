@@ -42,3 +42,6 @@ tests/playwright/node_modules/
 tests/playwright/ui-report/
 tests/playwright/playwright-report/
 tests/playwright/test-results/
+
+# OpenWebUI auto-generated secret key (created at startup; never commit)
+.webui_secret_key
