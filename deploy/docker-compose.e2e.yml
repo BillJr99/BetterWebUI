@@ -38,11 +38,15 @@ services:
     volumes:
       - openwebui-data:/app/backend/data
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:3000/health || exit 1"]
+      # OpenWebUI v0.9.5 doesn't expose /health — use /api/version, which
+      # only returns once app.state.startup_complete=True (so it doubles
+      # as a readiness check). start_period covers slow first-boot
+      # initialisation (alembic migrations, function-tool deps install).
+      test: ["CMD-SHELL", "curl -sf http://localhost:3000/api/version || exit 1"]
       interval: 15s
       timeout: 10s
       retries: 20
-      start_period: 30s
+      start_period: 60s
 
   # ── BetterWebUI ──────────────────────────────────────────────────────────────
   betterwebui:
