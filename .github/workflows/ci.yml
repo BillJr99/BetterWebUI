@@ -258,12 +258,27 @@ jobs:
         # deploy/docker-compose.e2e.yml builds CLK/AutoGUI/OSSO from
         # ../../cognitiveloopkernel etc. — the sibling layout that
         # deploy/bootstrap.sh creates locally. Clone the public main of
-        # each repo into that layout.
+        # each repo into that layout. If a sibling repo doesn't ship its
+        # own Dockerfile (currently true for osscreenobserver), write a
+        # minimal fallback that mirrors run-all-tests.sh's setup_venv()
+        # logic so the compose build still succeeds.
         run: |
           cd ..
           git clone --depth 1 https://github.com/BillJr99/CognitiveLoopKernel cognitiveloopkernel
           git clone --depth 1 https://github.com/BillJr99/AutoGUI             autogui
           git clone --depth 1 https://github.com/BillJr99/OSScreenObserver    osscreenobserver
+          for d in cognitiveloopkernel autogui osscreenobserver; do
+            if [[ ! -f "$d/Dockerfile" ]]; then
+              echo "Writing fallback Dockerfile for $d"
+              {
+                printf 'FROM python:3.11-slim\n'
+                printf 'WORKDIR /app\n'
+                printf 'COPY . .\n'
+                printf 'RUN if [ -f requirements.txt ]; then pip install --no-cache-dir -r requirements.txt; '
+                printf 'elif [ -f pyproject.toml ]; then pip install --no-cache-dir -e .; fi\n'
+              } > "$d/Dockerfile"
+            fi
+          done
           ls -la cognitiveloopkernel autogui osscreenobserver
 
       - name: Set up Python 3.11
