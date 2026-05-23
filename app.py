@@ -21,6 +21,7 @@ import uuid
 import zipfile
 import logging
 import logging.handlers
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, AsyncGenerator, Optional
 
@@ -37,6 +38,17 @@ import verification as _verification
 ROOT = Path(__file__).parent.resolve()
 DATA_DIR = ROOT / "data"
 SKILLS_DIR = ROOT / "skills"
+
+# When BWUI_TEST_MODE=1 the server trims its system prompt and caps model
+# output so the test suite can complete in reasonable CI time without a GPU.
+_TEST_MODE = os.environ.get("BWUI_TEST_MODE") == "1"
+_TEST_MAX_TOKENS = int(os.environ.get("BWUI_TEST_MAX_TOKENS", "30"))
+
+# Runtime-toggleable mock for UI tests (only active when _TEST_MODE=1).
+# Enabled via POST /api/test/mock-chat so the e2e tests (which use a real
+# model) can share the same container without being affected.
+_mock_chat_enabled: bool = False
+_mock_chat_text: str = "Mock response."
 UPLOADS_DIR = DATA_DIR / "uploads"
 CHECKPOINTS_DIR = DATA_DIR / "checkpoints"
 TASKS_DIR = DATA_DIR / "tasks"
@@ -1188,6 +1200,12 @@ def build_system_prompt(
     # Rendering rules
     parts.append(RENDERING_PROTOCOL)
 
+    # In test mode skip the tool-protocol block and all tool / service listings.
+    # The basic prompt + memories above are sufficient for outcome assertions;
+    # omitting ~1 k tokens of tool instructions cuts inference time by ~40 %.
+    if _TEST_MODE:
+        return "\n\n".join(parts)
+
     # 2. Available skills
     if workspace:
         active_skill_ids = workspace.get("active_skills") or []
@@ -1758,12 +1776,29 @@ async def call_openwebui_audio(text: str, voice: str, config: dict) -> dict:
 
 async def chat_complete(messages: list, model: str, config: dict, chat_id: str = "") -> tuple[str, dict]:
     """Returns (text, usage_dict)."""
+    if _TEST_MODE and _mock_chat_enabled:
+        last_user = next(
+            (m.get("content", "") for m in reversed(messages) if m.get("role") == "user"), ""
+        )
+        if isinstance(last_user, list):
+            last_user = " ".join(
+                p.get("text", "") for p in last_user if isinstance(p, dict) and p.get("type") == "text"
+            )
+        if "fenced markdown code block" in last_user or ("Reply with exactly" in last_user and "```" in last_user):
+            text = "```\nhello\n```"
+        elif "LaTeX" in last_user and ("$E" in last_user or "mc^2" in last_user):
+            text = "$E = mc^2$"
+        else:
+            text = _mock_chat_text
+        return text, {"prompt_tokens": 1, "completion_tokens": len(text.split()), "total_tokens": len(text.split()) + 1, "elapsed_ms": 10}
     base = normalize_base_url(config["base_url"])
     profile = active_profile(config)
     headers = {"Authorization": f"Bearer {config.get('api_key', '')}"}
     payload: dict = {"model": model, "messages": messages, "stream": False}
     if chat_id and profile.get("name") == "openwebui":
         payload["chat_id"] = chat_id
+    if _TEST_MODE:
+        payload["max_tokens"] = _TEST_MAX_TOKENS
     t0 = time.time()
     async with httpx.AsyncClient(timeout=300.0, follow_redirects=True) as client:
         resp = await client.post(f"{base}{profile['chat']}", json=payload, headers=headers)
@@ -2435,9 +2470,6 @@ async def fetch_models(config: dict) -> list[dict]:
 # FastAPI app
 # ---------------------------------------------------------------------------
 
-app = FastAPI(title="BetterWebUI")
-
-
 _transient_sweep_task: Optional[asyncio.Task] = None
 _scheduler_task: Optional[asyncio.Task] = None
 
@@ -2456,9 +2488,10 @@ async def _transient_sweep_loop() -> None:
         await asyncio.sleep(3600)
 
 
-@app.on_event("startup")
-async def _startup() -> None:
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     global _transient_sweep_task, _scheduler_task
+    # ── startup ────────────────────────────────────────────────────────────
     try:
         await mcp_manager.reconcile()
     except Exception as exc:
@@ -2478,10 +2511,8 @@ async def _startup() -> None:
         ))
     except Exception as exc:
         logging.getLogger("betterwebui.scheduler").warning("Scheduler failed to start: %s", exc)
-
-
-@app.on_event("shutdown")
-async def _shutdown() -> None:
+    yield
+    # ── shutdown ───────────────────────────────────────────────────────────
     if _transient_sweep_task is not None:
         _transient_sweep_task.cancel()
     if _scheduler_task is not None:
@@ -2491,6 +2522,9 @@ async def _shutdown() -> None:
             await client.stop()
         except Exception:
             pass
+
+
+app = FastAPI(title="BetterWebUI", lifespan=lifespan)
 
 
 @app.get("/")
@@ -2805,7 +2839,8 @@ async def clear_session_trust(request: Request):
 
 class FileResponseIn(BaseModel):
     request_id: str
-    files: list
+    files: Optional[list] = None
+    action: Optional[str] = None
 
 
 @app.post("/api/file-response")
@@ -3368,8 +3403,10 @@ async def project_file(request: Request, path: str, include_content: bool = Fals
 
 
 @app.get("/api/project/checkpoints")
-async def list_project_checkpoints(request: Request, filename: str):
+async def list_project_checkpoints(request: Request, filename: Optional[str] = None):
     _require_local_caller(request)
+    if not filename:
+        return {"checkpoints": []}
     cfg = load_config()
     workspace = resolve_active_workspace(cfg)
     wid = (workspace or {}).get("id", "default")
@@ -3933,7 +3970,10 @@ async def recent_conversations(request: Request, limit: int = 3):
 async def set_conversation_summary(request: Request, cid: str):
     """Store a one-line summary for a conversation (generated client-side or by the LLM)."""
     _require_local_caller(request)
-    body = await request.json()
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
     summary = str(body.get("summary", ""))[:300].strip()
     data = load_conversations()
     conv = data["conversations"].get(cid)
@@ -4256,6 +4296,7 @@ async def chat(req: ChatRequest, request: Request):
                 elapsed = usage.get("elapsed_ms", 0)
                 await send_event("assistant_text", {
                     "text": text,
+                    "delta": text,  # SSE-reader alias used by integration tests
                     "telemetry": {
                         "tokens_in": tokens_in,
                         "tokens_out": tokens_out,
@@ -4376,6 +4417,7 @@ async def chat(req: ChatRequest, request: Request):
             )
             save_conversation(cid, title, history, current_task_plan, workspace_id)
             await send_event("done", {
+                "_done": True,
                 "conversation_id": cid,
                 "messages": history,
                 "task_plan": current_task_plan,
@@ -4407,6 +4449,60 @@ async def chat(req: ChatRequest, request: Request):
 from services.routes import register_routes as _register_service_routes
 
 _register_service_routes(app)
+
+
+# --- Test-only reset endpoint ---
+# Gated behind BWUI_TEST_MODE=1 so it never appears in production. Used by the
+# Playwright UI suite to wipe persistent state between specs without restarting
+# the server.
+
+@app.post("/api/test/reset")
+async def test_reset():
+    if os.environ.get("BWUI_TEST_MODE") != "1":
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="Not Found")
+    wiped = []
+    for path in (CONVERSATIONS_PATH, WORKSPACES_PATH, PROMPTS_PATH,
+                 MCP_PATH, CLI_PATH):
+        if path.exists():
+            try:
+                path.unlink()
+                wiped.append(path.name)
+            except OSError:
+                pass
+    # Reset onboarding_done in config WITHOUT deleting config.json — deleting it
+    # would race with parallel tests' ensureConfigured() that just set up
+    # base_url + api_key, leaving them with a stripped config mid-test.
+    if CONFIG_PATH.exists():
+        try:
+            cfg = load_config()
+            if cfg.get("onboarding_done"):
+                cfg["onboarding_done"] = False
+                save_json(CONFIG_PATH, cfg)
+                wiped.append("onboarding_done")
+        except Exception:
+            pass
+    _session_trusted_commands.clear()
+    _command_explanation_cache.clear()
+    return {"ok": True, "wiped": wiped}
+
+
+@app.post("/api/test/mock-chat")
+async def test_mock_chat(request: Request):
+    """Toggle the chat mock on/off at runtime. Only available when BWUI_TEST_MODE=1.
+
+    Body: {"enabled": true, "response": "optional custom text"}
+    Enabling makes chat_complete() return the canned response instantly so UI
+    tests exercise rendering/flow without waiting for a real model.
+    """
+    global _mock_chat_enabled, _mock_chat_text
+    if os.environ.get("BWUI_TEST_MODE") != "1":
+        raise HTTPException(status_code=404, detail="Not Found")
+    body = await request.json()
+    _mock_chat_enabled = bool(body.get("enabled", True))
+    if "response" in body:
+        _mock_chat_text = str(body["response"])
+    return {"mock_chat": _mock_chat_enabled, "response": _mock_chat_text}
 
 
 # --- Health ---

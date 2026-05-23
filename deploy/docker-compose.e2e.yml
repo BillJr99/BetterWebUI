@@ -1,5 +1,3 @@
-version: "3.9"
-
 # End-to-end test stack: BetterWebUI + CLK + AutoGUI (dry-run) +
 # OSScreenObserver (mock) + Ollama + OpenWebUI.
 #
@@ -17,7 +15,9 @@ services:
     volumes:
       - ollama-data:/root/.ollama
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:11434/api/tags || exit 1"]
+      # ollama/ollama:latest doesn't ship curl/wget. Use the ollama CLI
+      # itself, which talks to the local API and exits 0 when reachable.
+      test: ["CMD", "ollama", "list"]
       interval: 10s
       timeout: 5s
       retries: 15
@@ -29,6 +29,9 @@ services:
     ports:
       - "3000:3000"
     environment:
+      # start.sh defaults PORT to 8080; override so the container app
+      # binds 3000, matching the port mapping and the healthcheck below.
+      PORT: "3000"
       OLLAMA_BASE_URL: http://ollama:11434
       WEBUI_SECRET_KEY: bwui-e2e-test-secret
       ENV: dev
@@ -38,11 +41,15 @@ services:
     volumes:
       - openwebui-data:/app/backend/data
     healthcheck:
+      # /health is registered at the app root and returns {"status": true}
+      # immediately once uvicorn binds (no startup_complete gate).
+      # start_period covers slow first-boot (alembic migrations + HF model
+      # download + plugin install).
       test: ["CMD-SHELL", "curl -sf http://localhost:3000/health || exit 1"]
       interval: 15s
       timeout: 10s
       retries: 20
-      start_period: 30s
+      start_period: 60s
 
   # ── BetterWebUI ──────────────────────────────────────────────────────────────
   betterwebui:
@@ -60,6 +67,10 @@ services:
       CLK_BASE_URL: http://clk:8001
       AUTOGUI_BASE_URL: http://autogui:8002
       OSSO_BASE_URL: http://osso:5001
+      # Trim system prompt and cap output so the test suite finishes fast
+      # on a CPU-only CI runner. Has no effect outside test runs.
+      BWUI_TEST_MODE: "1"
+      BWUI_TEST_MAX_TOKENS: "30"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
@@ -75,16 +86,26 @@ services:
   clk:
     build:
       context: ../../cognitiveloopkernel
-    command: ["python", "-m", "clk_harness.api"]
+    # CLK's Dockerfile uses kickoff.sh as ENTRYPOINT, which doesn't pass
+    # through CLI args (gives "unknown option: -m"). Clear the entrypoint
+    # and invoke python directly.
+    entrypoint: ["python"]
+    command: ["-m", "clk_harness.api"]
     ports:
       - "8001:8001"
     environment:
       CLK_WORKSPACES_DIR: /workspaces
       CLK_API_PORT: "8001"
+      # Default is 127.0.0.1 (loopback only); bind to all interfaces so
+      # sibling containers (BetterWebUI) can reach clk:8001.
+      CLK_API_HOST: "0.0.0.0"
     volumes:
       - clk-workspaces:/workspaces
     healthcheck:
-      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8001/api/healthz').raise_for_status()"]
+      # CLK's [api] extra ships fastapi+uvicorn+pydantic only — httpx
+      # is only in [dev]. Use stdlib urllib so the healthcheck doesn't
+      # depend on a package the image doesn't install.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/api/healthz').read()"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -105,9 +126,18 @@ services:
   osso:
     build:
       context: ../../osscreenobserver
-    command: ["python", "main.py", "--mock", "--mode", "inspect"]
+    # Default bind host in config.json.example is 127.0.0.1; override so the
+    # Flask server is reachable across the docker bridge (port mapping can't
+    # reach a container's loopback interface).
+    command: ["python", "main.py", "--mock", "--mode", "inspect", "--host", "0.0.0.0"]
     ports:
       - "5001:5001"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5001/api/healthz').read()"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
 
 volumes:
   ollama-data:

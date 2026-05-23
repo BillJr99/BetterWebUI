@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import importlib
 import json
+import subprocess
+import sys
 import urllib.error
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -540,3 +542,196 @@ class TestPickFromList:
                         result = wiz.pick_from_list(options, "title")
         m.assert_called_once()
         assert result == "b"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Subsystem fan-out (SUBSYSTEM_ENV_MAP, fanout_env)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestSubsystemEnvMap:
+    def test_map_covers_all_four_subsystems(self, wiz):
+        assert set(wiz.SUBSYSTEM_ENV_MAP.keys()) == {"betterwebui", "clk", "autogui", "osso"}
+
+    def test_fanout_includes_all_three_values(self, wiz):
+        out = wiz.fanout_env("http://ow.example", "sk-abc", "llama3:70b")
+        # canonical names appear (via the betterwebui entry)
+        assert out["OPENWEBUI_BASE_URL"] == "http://ow.example"
+        assert out["OPENWEBUI_API_KEY"]  == "sk-abc"
+        assert out["OPENWEBUI_MODEL"]    == "llama3:70b"
+        # CLK / OSSO use the CLK_OPENWEBUI_* names
+        assert out["CLK_OPENWEBUI_ENDPOINT"] == "http://ow.example"
+        assert out["CLK_OPENWEBUI_API_KEY"]  == "sk-abc"
+        assert out["CLK_OPENWEBUI_MODEL"]    == "llama3:70b"
+        # Default provider is openwebui (backward-compat)
+        assert out["CLK_PROVIDER"]  == "openwebui"
+        assert out["LLM_PROVIDER"]  == "openwebui"
+
+    def test_fanout_propagates_provider(self, wiz):
+        out = wiz.fanout_env("http://x", "k", "m", provider="ollama")
+        assert out["LLM_PROVIDER"] == "ollama"
+        assert out["CLK_PROVIDER"] == "ollama"
+
+    def test_fanout_handles_empty_model(self, wiz):
+        out = wiz.fanout_env("http://x", "k", "")
+        assert out["OPENWEBUI_MODEL"] == ""
+        assert out["CLK_OPENWEBUI_MODEL"] == ""
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Provider presets + picker
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestProviderPresets:
+    def test_presets_include_expected_providers(self, wiz):
+        assert set(wiz.PROVIDER_PRESETS.keys()) >= {
+            "openwebui", "ollama", "openai", "anthropic", "custom",
+        }
+
+    def test_ollama_does_not_require_key(self, wiz):
+        assert wiz.PROVIDER_PRESETS["ollama"]["key_required"] is False
+
+    def test_anthropic_skips_validation(self, wiz):
+        # Anthropic uses x-api-key, so our Bearer-based probe can't validate it.
+        assert wiz.PROVIDER_PRESETS["anthropic"]["validate"] is False
+
+    def test_pick_provider_returns_chosen_key(self, wiz):
+        with patch.object(wiz, "pick_from_list", side_effect=lambda opts, *a, **k: opts[1]):
+            chosen = wiz.pick_provider(current="openwebui")
+        # Index 1 in the preset order is "ollama" (per dict insertion order)
+        keys = list(wiz.PROVIDER_PRESETS.keys())
+        assert chosen == keys[1]
+
+    def test_pick_provider_falls_back_to_current_on_skip(self, wiz):
+        with patch.object(wiz, "pick_from_list", return_value=""):
+            chosen = wiz.pick_provider(current="ollama")
+        assert chosen == "ollama"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# --print-env (subprocess test — exercises the actual CLI surface)
+# ══════════════════════════════════════════════════════════════════════════════
+
+WIZARD = Path(__file__).resolve().parent.parent / "scripts" / "setup_wizard.py"
+
+
+class TestPrintEnv:
+    def test_emits_parseable_kv_lines(self, wiz, tmp_path):
+        env = tmp_path / ".env"
+        env.write_text(
+            "OPENWEBUI_BASE_URL=http://ow:3000\n"
+            "OPENWEBUI_API_KEY=sk-test\n"
+            "OPENWEBUI_MODEL=llama3:8b\n"
+        )
+        result = subprocess.run(
+            [sys.executable, str(WIZARD), "--print-env", "--env-file", str(env)],
+            capture_output=True, text=True, check=True,
+        )
+        # Round-trip via load_env to confirm output is well-formed.
+        out_file = tmp_path / "out.env"
+        out_file.write_text(result.stdout)
+        loaded = wiz.load_env(out_file)
+        assert loaded["OPENWEBUI_BASE_URL"]      == "http://ow:3000"
+        assert loaded["CLK_OPENWEBUI_ENDPOINT"]  == "http://ow:3000"
+        assert loaded["CLK_OPENWEBUI_API_KEY"]   == "sk-test"
+        assert loaded["CLK_OPENWEBUI_MODEL"]     == "llama3:8b"
+        assert loaded["CLK_PROVIDER"]            == "openwebui"
+
+    def test_exits_2_when_url_missing(self, tmp_path):
+        env = tmp_path / ".env"  # absent
+        import os
+        clean = {k: v for k, v in os.environ.items()
+                 if k not in ("OPENWEBUI_BASE_URL", "OPENWEBUI_API_KEY", "OPENWEBUI_MODEL")}
+        result = subprocess.run(
+            [sys.executable, str(WIZARD), "--print-env", "--env-file", str(env)],
+            capture_output=True, text=True, env=clean,
+        )
+        assert result.returncode == 2
+        assert "OPENWEBUI_BASE_URL" in result.stderr
+
+    def test_falls_back_to_process_env(self, tmp_path):
+        env = tmp_path / ".env"  # absent
+        result = subprocess.run(
+            [sys.executable, str(WIZARD), "--print-env", "--env-file", str(env)],
+            capture_output=True, text=True,
+            env={
+                "PATH": "/usr/bin:/bin",
+                "OPENWEBUI_BASE_URL": "http://from-env",
+                "OPENWEBUI_API_KEY":  "k",
+                "OPENWEBUI_MODEL":    "m",
+            },
+        )
+        assert result.returncode == 0, result.stderr
+        assert "OPENWEBUI_BASE_URL=http://from-env" in result.stdout
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# --non-interactive
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestNonInteractive:
+    def test_missing_url_fails_fast_with_no_prompts(self, tmp_path):
+        env = tmp_path / ".env"  # absent — should trigger missing-required path
+        import os
+        clean = {k: v for k, v in os.environ.items()
+                 if k not in ("OPENWEBUI_BASE_URL", "OPENWEBUI_API_KEY", "OPENWEBUI_MODEL")}
+        result = subprocess.run(
+            [sys.executable, str(WIZARD), "--non-interactive", "--env-file", str(env)],
+            capture_output=True, text=True, timeout=5, env=clean,
+        )
+        assert result.returncode == 2
+        assert "missing required" in result.stderr.lower()
+
+    def test_all_present_exits_0(self, tmp_path):
+        env = tmp_path / ".env"
+        env.write_text(
+            "OPENWEBUI_BASE_URL=http://x\n"
+            "OPENWEBUI_API_KEY=k\n"
+            "OPENWEBUI_MODEL=m\n"
+        )
+        result = subprocess.run(
+            [sys.executable, str(WIZARD), "--non-interactive", "--env-file", str(env)],
+            capture_output=True, text=True, timeout=5,
+        )
+        assert result.returncode == 0, result.stderr
+
+    def test_ollama_provider_does_not_require_api_key(self, tmp_path):
+        """Ollama mode passes --non-interactive with no API key set."""
+        env = tmp_path / ".env"
+        env.write_text(
+            "LLM_PROVIDER=ollama\n"
+            "OPENWEBUI_BASE_URL=http://localhost:11434\n"
+            "OPENWEBUI_MODEL=llama3:8b\n"
+        )
+        result = subprocess.run(
+            [sys.executable, str(WIZARD), "--non-interactive", "--env-file", str(env)],
+            capture_output=True, text=True, timeout=5,
+        )
+        assert result.returncode == 0, result.stderr
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# --env-file
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestEnvFileOverride:
+    def test_print_env_honors_override(self, wiz, tmp_path):
+        custom = tmp_path / "custom.env"
+        custom.write_text(
+            "OPENWEBUI_BASE_URL=http://custom\n"
+            "OPENWEBUI_API_KEY=k\n"
+            "OPENWEBUI_MODEL=m\n"
+        )
+        result = subprocess.run(
+            [sys.executable, str(WIZARD), "--print-env", "--env-file", str(custom)],
+            capture_output=True, text=True, check=True,
+        )
+        assert "OPENWEBUI_BASE_URL=http://custom" in result.stdout
+
+    def test_equals_form_accepted(self, tmp_path):
+        custom = tmp_path / "c.env"
+        custom.write_text("OPENWEBUI_BASE_URL=http://eq\nOPENWEBUI_API_KEY=k\nOPENWEBUI_MODEL=m\n")
+        result = subprocess.run(
+            [sys.executable, str(WIZARD), "--print-env", f"--env-file={custom}"],
+            capture_output=True, text=True, check=True,
+        )
+        assert "OPENWEBUI_BASE_URL=http://eq" in result.stdout

@@ -13,6 +13,7 @@ services:
       OSSO_BASE_URL: ${OSSO_BASE_URL:-http://host.docker.internal:5001}
       OPENWEBUI_BASE_URL: ${OPENWEBUI_BASE_URL:-http://host.docker.internal:3000}
       OPENWEBUI_API_KEY: ${OPENWEBUI_API_KEY:-}
+      OPENWEBUI_MODEL: ${OPENWEBUI_MODEL:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
@@ -31,6 +32,12 @@ services:
     environment:
       CLK_WORKSPACES_DIR: /workspaces
       CLK_API_PORT: "8001"
+      CLK_PROVIDER: openwebui
+      CLK_OPENWEBUI_ENDPOINT: ${OPENWEBUI_BASE_URL:-http://host.docker.internal:3000}
+      CLK_OPENWEBUI_API_KEY: ${OPENWEBUI_API_KEY:-}
+      CLK_OPENWEBUI_MODEL: ${OPENWEBUI_MODEL:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ${CLK_WORKSPACES_DIR:-./data/clk-workspaces}:/workspaces
     healthcheck:
@@ -53,6 +60,7 @@ services:
       AUTOGUI_API_PORT: "8002"
       OPENWEBUI_BASE_URL: ${OPENWEBUI_BASE_URL:-http://host.docker.internal:3000}
       OPENWEBUI_API_KEY: ${OPENWEBUI_API_KEY:-}
+      OPENWEBUI_MODEL: ${OPENWEBUI_MODEL:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
@@ -63,3 +71,10 @@ services:
     command: ["python", "main.py", "--mock", "--mode", "inspect"]
     ports:
       - "5001:5001"
+    environment:
+      CLK_PROVIDER: openwebui
+      CLK_OPENWEBUI_ENDPOINT: ${OPENWEBUI_BASE_URL:-http://host.docker.internal:3000}
+      CLK_OPENWEBUI_API_KEY: ${OPENWEBUI_API_KEY:-}
+      CLK_OPENWEBUI_MODEL: ${OPENWEBUI_MODEL:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

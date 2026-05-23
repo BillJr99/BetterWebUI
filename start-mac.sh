@@ -155,6 +155,7 @@ export OSSO_BASE_URL="${OSSO_BASE_URL:-http://localhost:$OSSO_PORT}"
 OW_URL="$OPENWEBUI_BASE_URL"
 OW_KEY="$OPENWEBUI_API_KEY"
 OW_MODEL="${OPENWEBUI_MODEL:-}"
+OW_PROVIDER="${LLM_PROVIDER:-openwebui}"
 
 # ── CognitiveLoopKernel ───────────────────────────────────────────────────────
 if is_up "http://localhost:$CLK_PORT/api/healthz"; then
@@ -166,6 +167,10 @@ else
         cd "$CLK_DIR"
         CLK_API_PORT=$CLK_PORT \
         CLK_WORKSPACES_DIR="${CLK_WORKSPACES_DIR:-./data/clk-workspaces}" \
+        CLK_PROVIDER="$OW_PROVIDER" \
+        CLK_OPENWEBUI_ENDPOINT="$OW_URL" \
+        CLK_OPENWEBUI_API_KEY="$OW_KEY" \
+        CLK_OPENWEBUI_MODEL="$OW_MODEL" \
         exec "$CLK_DIR/.venv/bin/python" -m clk_harness.api
     ) &
     STARTED_PIDS+=("$!")
@@ -182,6 +187,7 @@ else
         AUTOGUI_API_PORT=$AUTOGUI_PORT \
         OPENWEBUI_BASE_URL="$OW_URL" \
         OPENWEBUI_API_KEY="$OW_KEY" \
+        OPENWEBUI_MODEL="$OW_MODEL" \
         exec "$AUTOGUI_DIR/.venv/bin/python" api.py
     ) &
     STARTED_PIDS+=("$!")
@@ -195,7 +201,7 @@ else
     setup_venv "$OSSO_DIR"
     (
         cd "$OSSO_DIR"
-        CLK_PROVIDER=openwebui \
+        CLK_PROVIDER="$OW_PROVIDER" \
         CLK_OPENWEBUI_ENDPOINT="$OW_URL" \
         CLK_OPENWEBUI_API_KEY="$OW_KEY" \
         CLK_OPENWEBUI_MODEL="$OW_MODEL" \

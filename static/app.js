@@ -792,6 +792,9 @@ async function activateWorkspace(id) {
     method: "POST",
     json: { active_workspace_id: id || "" },
   });
+  // Optimistically update state so populateWorkspaceSelect() (called inside
+  // loadWorkspaces()) sees the new active ID before loadConfig() round-trips.
+  if (state.config) state.config.active_workspace_id = id || "";
   // Refresh workspaces before config so loadConfig's mode-select lookup
   // can find the new active workspace's stored mode.
   await loadWorkspaces();
@@ -3260,10 +3263,10 @@ function switchTab(tabName) {
   const panel = $(`#tab-${tabName}`);
   if (panel) panel.classList.add("active");
   // Lazy-load tab content the first time the user visits.
-  if (tabName === "files") renderBundleList();
-  if (tabName === "memory") renderMemoryList();
-  if (tabName === "scheduled") renderScheduledList();
-  if (tabName === "tools") renderCloudServices();
+  if (tabName === "files") renderBundleList().catch(() => {});
+  if (tabName === "memory") renderMemoryList().catch(() => {});
+  if (tabName === "scheduled") renderScheduledList().catch(() => {});
+  if (tabName === "tools") renderCloudServices().catch(() => {});
 }
 
 // ---------------------------------------------------------------------------
@@ -3896,7 +3899,7 @@ async function init() {
   populateWorkspaceSelect();
   newChat();
   // Memory bell + scheduled notification poll
-  try { updateMemoryBell(); } catch (_) {}
+  updateMemoryBell().catch(() => {});
   setInterval(() => { try { pollScheduledNotifications(); } catch (_) {} }, 30000);
   pollScheduledNotifications();
   // Request notification permission once, non-blocking.

@@ -850,7 +850,7 @@ class TestDeleteFileTool:
             events.append((name, data))
 
         config = app_module.load_config()
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             app_module.execute_tool(call, config, send_event, mode=mode)
         )
         return result, events

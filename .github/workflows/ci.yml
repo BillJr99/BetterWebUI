@@ -231,3 +231,197 @@ jobs:
 
       - name: Build Docker image
         run: docker build -t betterwebui:ci .
+
+  # ---------------------------------------------------------------------------
+  # Full e2e + UI suite via the unified runner. Heavy: spins up the docker
+  # stack with Ollama + tinyllama + OpenWebUI, runs every test class.
+  # ---------------------------------------------------------------------------
+  e2e-ui:
+    name: End-to-end + UI (full stack)
+    runs-on: ubuntu-latest
+    # Run on PR and on main pushes; skip on docs-only changes (best-effort).
+    if: >
+      github.event_name == 'pull_request' ||
+      github.ref == 'refs/heads/main'
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Skip submodules: the pinned AutoGUI SHA isn't always reachable
+          # on the public default branch, causing checkout to fail. We
+          # clone each sibling repo's main directly below — that's also the
+          # layout the compose file expects (../../<lowercase>).
+          submodules: false
+
+      - name: Clone sibling repos for compose
+        # deploy/docker-compose.e2e.yml builds CLK/AutoGUI/OSSO from
+        # ../../cognitiveloopkernel etc. — the sibling layout that
+        # deploy/bootstrap.sh creates locally. Clone the public main of
+        # each repo into that layout. If a sibling repo doesn't ship its
+        # own Dockerfile (currently true for osscreenobserver), write a
+        # minimal fallback that mirrors run-all-tests.sh's setup_venv()
+        # logic so the compose build still succeeds.
+        run: |
+          cd ..
+          git clone --depth 1 https://github.com/BillJr99/CognitiveLoopKernel cognitiveloopkernel
+          git clone --depth 1 https://github.com/BillJr99/AutoGUI             autogui
+          git clone --depth 1 https://github.com/BillJr99/OSScreenObserver    osscreenobserver
+          for d in cognitiveloopkernel autogui osscreenobserver; do
+            if [[ ! -f "$d/Dockerfile" ]]; then
+              echo "Writing fallback Dockerfile for $d"
+              {
+                printf 'FROM python:3.11-slim\n'
+                printf 'WORKDIR /app\n'
+                printf 'COPY . .\n'
+                printf 'RUN if [ -f requirements.txt ]; then pip install --no-cache-dir -r requirements.txt; '
+                printf 'elif [ -f pyproject.toml ]; then pip install --no-cache-dir -e .; fi\n'
+              } > "$d/Dockerfile"
+            fi
+          done
+          ls -la cognitiveloopkernel autogui osscreenobserver
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install app + test dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pytest pytest-asyncio python-frontmatter
+
+      - name: Verify sibling Dockerfile contexts
+        run: |
+          for d in cognitiveloopkernel autogui osscreenobserver; do
+            echo "=== ../$d ==="
+            ls -la "../$d" | head -20
+            if [[ -f "../$d/Dockerfile" ]]; then
+              echo "  Dockerfile present"
+            else
+              echo "  WARNING: no Dockerfile in ../$d"
+            fi
+          done
+
+      - name: Start the docker e2e stack (Ollama + OpenWebUI)
+        env:
+          OLLAMA_MODEL: tinyllama:1.1b
+        run: |
+          set -x
+          docker compose -f deploy/docker-compose.e2e.yml up -d --build --wait \
+            || (echo "=== docker compose ps ===" && docker compose -f deploy/docker-compose.e2e.yml ps -a \
+                && echo "=== last 200 lines from each service log ===" \
+                && for s in ollama openwebui betterwebui clk autogui osso; do
+                     echo "--- $s ---"
+                     docker compose -f deploy/docker-compose.e2e.yml logs --tail=200 "$s" 2>&1 || true
+                   done \
+                && exit 1)
+          # Pull models via the Ollama API.
+          # qwen3:0.6b — fast model used by non-tool-call tests (DEFAULT_MODEL).
+          # tinyllama:1.1b — kept available for tool-calling tests (MODEL_SUPPORTS_TOOLS).
+          for i in $(seq 1 60); do
+            if curl -sf http://localhost:11434/api/tags >/dev/null; then break; fi
+            sleep 2
+          done
+          curl -X POST http://localhost:11434/api/pull \
+               -H 'Content-Type: application/json' \
+               -d '{"model":"qwen3:0.6b","stream":false}' \
+               --max-time 600 -sf
+          curl -X POST http://localhost:11434/api/pull \
+               -H 'Content-Type: application/json' \
+               -d '{"model":"tinyllama:1.1b","stream":false}' \
+               --max-time 600 -sf
+
+      - name: Wait for OpenWebUI
+        run: |
+          for i in $(seq 1 60); do
+            if curl -sf http://localhost:3000/health >/dev/null; then break; fi
+            sleep 3
+          done
+
+      - name: Wait for tinyllama in Ollama
+        run: |
+          # Poll until both models appear (tinyllama + qwen3). We need at least
+          # 2 to know the slower pull finished. Avoids creating OpenWebUI users
+          # early (first signup becomes admin; we need that slot for CI user).
+          for i in $(seq 1 90); do
+            COUNT=$(curl -s http://localhost:11434/api/tags \
+                    | python3 -c "import sys,json; d=json.load(sys.stdin); print(len(d.get('models',[])))" 2>/dev/null || echo 0)
+            if [[ "$COUNT" -ge 2 ]]; then
+              echo "Ollama reports $COUNT model(s) — qwen3:0.6b + tinyllama ready."
+              break
+            fi
+            echo "Waiting for models in Ollama ($COUNT/2 ready, attempt $i/90)..."
+            sleep 2
+          done
+
+      - name: Create OpenWebUI admin + API key
+        id: ow
+        run: |
+          # Signup creates the admin account; the response includes the JWT directly.
+          SIGNUP=$(curl -s -X POST http://localhost:3000/api/v1/auths/signup \
+               -H 'Content-Type: application/json' \
+               -d '{"name":"CI","email":"ci@bwui.test","password":"bwui-ci-pass"}')
+          echo "signup response: $SIGNUP"
+          TOKEN=$(echo "$SIGNUP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['token'])" 2>/dev/null || true)
+          [[ -z "$TOKEN" ]] && { echo "ERROR: no token in OpenWebUI signup response: $SIGNUP" >&2; exit 1; }
+          # Try dedicated API key; fall back to JWT bearer token if unavailable.
+          KEY=$(curl -s -X POST http://localhost:3000/api/v1/auths/api_key \
+               -H "Authorization: Bearer $TOKEN" \
+               | python3 -c "import sys,json; print(json.load(sys.stdin).get('api_key',''))" 2>/dev/null || echo "")
+          [ -z "$KEY" ] && KEY="$TOKEN"
+          echo "key=$KEY" >> $GITHUB_OUTPUT
+
+      - name: Run unified test runner
+        env:
+          OPENWEBUI_BASE_URL: http://localhost:3000
+          # BetterWebUI runs inside docker; it cannot reach "localhost:3000" from
+          # inside its container. Use the docker-network service name instead.
+          # The compose file already adds extra_hosts:host.docker.internal for
+          # any host-gateway access needed.
+          OPENWEBUI_DOCKER_URL: http://openwebui:3000
+          OPENWEBUI_API_KEY: ${{ steps.ow.outputs.key }}
+          # DEFAULT_MODEL: fast model for all UI tests that just need a response.
+          # qwen3:0.6b is ~400 MB vs tinyllama's 638 MB, and responds faster on CPU.
+          DEFAULT_MODEL: qwen3:0.6b
+          # OPENWEBUI_MODEL: fallback used by e2e/chat.spec.ts and tool-call tests.
+          OPENWEBUI_MODEL: tinyllama:1.1b
+          # OLLAMA_MODEL is read by e2e/chat.spec.ts to target a specific model.
+          OLLAMA_MODEL: tinyllama:1.1b
+          # Mock the LLM for UI tests so chat turns complete in ~100ms.
+          # The e2e suite (local.config.ts) does NOT read this flag — it uses the
+          # real model so we keep end-to-end coverage of the actual LLM path.
+          BWUI_MOCK_CHAT: "1"
+          # Docker BetterWebUI is on port 8080; skip local service startup.
+          BWUI_PORT: "8080"
+        run: |
+          # Pre-seed deploy/.env so --no-wizard works.
+          {
+            echo "OPENWEBUI_BASE_URL=${OPENWEBUI_BASE_URL}"
+            echo "OPENWEBUI_API_KEY=${OPENWEBUI_API_KEY}"
+            echo "OPENWEBUI_MODEL=${OPENWEBUI_MODEL}"
+          } > deploy/.env
+          chmod +x scripts/run-all-tests.sh
+          # --skip-services: CLK/AutoGUI/OSSO/BetterWebUI already running in docker;
+          # skip local clone/venv/start and run tests against the docker stack.
+          # --docker-compose tears down the stack on exit.
+          ./scripts/run-all-tests.sh --no-wizard --keep-going --skip-services \
+              --docker-compose deploy/docker-compose.e2e.yml
+
+      - name: Upload Playwright UI report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-ui-report
+          path: tests/playwright/ui-report
+          retention-days: 7
+
+      - name: Stop docker stack (safety net)
+        if: always()
+        run: docker compose -f deploy/docker-compose.e2e.yml down -v || true

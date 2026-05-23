@@ -36,3 +36,15 @@ logs/
 
 # Local workspace folder (Docker volume mount point; gitignore so user files aren't committed)
 workspace/
+
+# Playwright test artifacts (installed/generated locally)
+tests/playwright/node_modules/
+tests/playwright/ui-report/
+tests/playwright/playwright-report/
+tests/playwright/test-results/
+
+# OpenWebUI auto-generated secret key (created at startup; never commit)
+.webui_secret_key
+
+# Runtime env file written by the wizard / CI (contains API keys)
+deploy/.env

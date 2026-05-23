@@ -2,23 +2,32 @@
 """
 BetterWebUI interactive setup wizard.
 
-Reads deploy/.env, validates all required settings against a live
-OpenWebUI instance, prompts for anything missing or broken, then writes
-results back.  Uses a curses-based scrollable menu for model selection
-on Unix/macOS; falls back to a numbered list on Windows or non-TTY
-environments.
+Reads deploy/.env, validates all required settings against a live LLM
+endpoint, prompts for anything missing or broken, then writes the
+results back.  Friendly menus drive every choice:
+
+  • Provider menu — pick OpenWebUI / Ollama / OpenAI / Anthropic / Custom
+  • Base URL prompt — pre-filled from the provider preset
+  • API key prompt — skipped automatically for local Ollama
+  • Model menu — curses scrollable + filter on Unix/macOS,
+    numbered list on Windows or non-TTY environments
 
 Usage:
-    python3 scripts/setup_wizard.py               # validate; prompt only if needed
-    python3 scripts/setup_wizard.py --reconfigure # always re-prompt everything
+    python3 scripts/setup_wizard.py                     # validate; prompt only if needed
+    python3 scripts/setup_wizard.py --reconfigure       # always re-prompt everything
+    python3 scripts/setup_wizard.py --non-interactive   # validate-only; exit 2 if missing
+    python3 scripts/setup_wizard.py --print-env         # write subsystem fan-out to stdout
+    python3 scripts/setup_wizard.py --env-file PATH     # override deploy/.env location
 
 Exit codes:
     0  – configuration saved successfully (or was already valid)
     1  – user aborted
+    2  – --non-interactive: required values missing
 """
 
 import curses
 import json
+import os
 import pathlib
 import sys
 import urllib.error
@@ -29,6 +38,95 @@ ENV_PATH = ROOT / "deploy" / ".env"
 
 _IS_TTY = sys.stdout.isatty() and sys.stdin.isatty()
 _IS_WIN = sys.platform == "win32"
+
+
+# ── Subsystem env-var contract ────────────────────────────────────────────────
+# The wizard writes the three canonical keys (OPENWEBUI_BASE_URL / _API_KEY /
+# _MODEL) to deploy/.env. At launch, each subsystem needs the same three values
+# under whatever variable names it already reads.  This table is the single
+# source of truth for the fan-out — start.sh and friends consume it via
+# --print-env so there's no duplication on disk.
+SUBSYSTEM_ENV_MAP = {
+    "betterwebui": {
+        "LLM_PROVIDER":       "{provider}",
+        "OPENWEBUI_BASE_URL": "{url}",
+        "OPENWEBUI_API_KEY":  "{key}",
+        "OPENWEBUI_MODEL":    "{model}",
+    },
+    "clk": {
+        "CLK_PROVIDER":           "{provider}",
+        "CLK_OPENWEBUI_ENDPOINT": "{url}",
+        "CLK_OPENWEBUI_API_KEY":  "{key}",
+        "CLK_OPENWEBUI_MODEL":    "{model}",
+    },
+    "autogui": {
+        "LLM_PROVIDER":       "{provider}",
+        "OPENWEBUI_BASE_URL": "{url}",
+        "OPENWEBUI_API_KEY":  "{key}",
+        "OPENWEBUI_MODEL":    "{model}",
+    },
+    "osso": {
+        "CLK_PROVIDER":           "{provider}",
+        "CLK_OPENWEBUI_ENDPOINT": "{url}",
+        "CLK_OPENWEBUI_API_KEY":  "{key}",
+        "CLK_OPENWEBUI_MODEL":    "{model}",
+    },
+}
+
+
+# ── LLM provider presets ──────────────────────────────────────────────────────
+# Picked from the friendly menu at the start of the wizard. Each preset seeds
+# a default base URL and indicates whether an API key is required. The chosen
+# key is persisted as LLM_PROVIDER in deploy/.env and fanned out as
+# CLK_PROVIDER to the submodules.
+PROVIDER_PRESETS = {
+    "openwebui": {
+        "label":        "OpenWebUI",
+        "description":  "OpenWebUI frontend (recommended — wraps Ollama / OpenAI / Anthropic / etc.)",
+        "default_url":  "http://localhost:3000",
+        "key_required": True,
+        "validate":     True,
+    },
+    "ollama": {
+        "label":        "Ollama (direct, local)",
+        "description":  "Local Ollama runtime — no API key needed",
+        "default_url":  "http://localhost:11434",
+        "key_required": False,
+        "validate":     True,
+    },
+    "openai": {
+        "label":        "OpenAI",
+        "description":  "api.openai.com",
+        "default_url":  "https://api.openai.com/v1",
+        "key_required": True,
+        "validate":     True,
+    },
+    "anthropic": {
+        "label":        "Anthropic",
+        "description":  "api.anthropic.com (Claude — uses x-api-key, validation skipped)",
+        "default_url":  "https://api.anthropic.com/v1",
+        "key_required": True,
+        "validate":     False,
+    },
+    "custom": {
+        "label":        "Custom (OpenAI-compatible)",
+        "description":  "Any other endpoint that exposes /v1/models",
+        "default_url":  "",
+        "key_required": True,
+        "validate":     True,
+    },
+}
+
+
+def fanout_env(url: str, key: str, model: str, provider: str = "openwebui") -> dict:
+    """Apply SUBSYSTEM_ENV_MAP to produce the union of all subsystem env vars."""
+    out: dict = {}
+    for vars_for_subsystem in SUBSYSTEM_ENV_MAP.values():
+        for var_name, template in vars_for_subsystem.items():
+            out[var_name] = template.format(
+                url=url, key=key, model=model, provider=provider,
+            )
+    return out
 
 
 # ── ANSI colour helpers ────────────────────────────────────────────────────────
@@ -145,7 +243,7 @@ def _read_config_json() -> dict:
         return {}
 
 
-def _write_config_json(url: str, key: str, model: str) -> None:
+def _write_config_json(url: str, key: str, model: str, provider: str = "") -> None:
     """Persist url/key/model into data/config.json so the web UI skips its own setup prompt."""
     p = ROOT / "data" / "config.json"
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -155,6 +253,8 @@ def _write_config_json(url: str, key: str, model: str) -> None:
         cfg["api_key"] = key
     if model:
         cfg["default_model"] = model
+    if provider:
+        cfg["llm_provider"] = provider
     p.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
 
 
@@ -334,6 +434,26 @@ def pick_from_list(options: list, title: str, current: str = "") -> str:
     return _numbered_menu(options, title, current)
 
 
+def pick_provider(current: str = "openwebui") -> str:
+    """
+    Show a friendly menu of LLM providers and return the chosen key
+    (or ``current`` if the user skips).
+    """
+    keys   = list(PROVIDER_PRESETS.keys())
+    labels = [
+        f"{PROVIDER_PRESETS[k]['label']}  —  {PROVIDER_PRESETS[k]['description']}"
+        for k in keys
+    ]
+    current_label = next(
+        (lab for k, lab in zip(keys, labels) if k == current),
+        labels[0],
+    )
+    chosen_label = pick_from_list(labels, "Choose your LLM provider", current=current_label)
+    if not chosen_label or chosen_label not in labels:
+        return current
+    return keys[labels.index(chosen_label)]
+
+
 # ── Section / status helpers ───────────────────────────────────────────────────
 
 def section(title: str) -> None:
@@ -361,28 +481,64 @@ def banner() -> None:
 
 def _prompt_openwebui(env: dict, force: bool) -> tuple:
     """
-    Validate / prompt for OpenWebUI URL, API key, and default model.
-    Returns (url, key, model, models_list, changed: bool).
+    Validate / prompt for LLM provider, base URL, API key, and default model.
+    Returns (provider, url, key, model, models_list, changed: bool).
     """
-    url   = env.get("OPENWEBUI_BASE_URL", "")
-    key   = env.get("OPENWEBUI_API_KEY", "")
-    model = env.get("OPENWEBUI_MODEL", "")
+    provider = env.get("LLM_PROVIDER", "")
+    url      = env.get("OPENWEBUI_BASE_URL", "")
+    key      = env.get("OPENWEBUI_API_KEY", "")
+    model    = env.get("OPENWEBUI_MODEL", "")
 
     # Fall back to data/config.json for initial defaults
     if not url or not key:
         cfg = _read_config_json()
-        url   = url   or cfg.get("base_url", "")
-        key   = key   or cfg.get("api_key", "")
-        model = model or cfg.get("default_model", "")
+        url      = url      or cfg.get("base_url", "")
+        key      = key      or cfg.get("api_key", "")
+        model    = model    or cfg.get("default_model", "")
+        provider = provider or cfg.get("llm_provider", "")
 
-    section("OpenWebUI Connection")
+    section("LLM Connection")
+
+    changed = False
+
+    # ── Provider menu ──
+    # Show the friendly provider picker on first-run (no URL saved), on
+    # --reconfigure, or when LLM_PROVIDER is set to an unknown value.
+    # An existing .env without LLM_PROVIDER is silently treated as "openwebui"
+    # for backward compatibility — the user is not nagged.
+    is_first_run = not url and not key
+    bad_provider = bool(provider) and provider not in PROVIDER_PRESETS
+    needs_provider_menu = force or (not provider and is_first_run) or bad_provider
+    if not provider:
+        provider = "openwebui"
+    if needs_provider_menu:
+        print()
+        chosen = pick_provider(current=provider)
+        if chosen and chosen != provider:
+            changed = True
+        provider = chosen or provider
+
+    preset = PROVIDER_PRESETS[provider]
+    print(f"  Provider: {cyan(preset['label'])}")
+
+    # Seed URL default from the preset if we have nothing saved.
+    if not url and preset["default_url"]:
+        url = preset["default_url"]
 
     conn_ok = False
     models: list = []
     model_ok = True
-    changed = False
 
-    if url and key and not force:
+    if not preset["validate"]:
+        # Provider's validation endpoint uses a non-Bearer auth scheme (e.g.
+        # Anthropic). Trust the user; just ensure URL + key are present.
+        conn_ok = bool(url) and (bool(key) or not preset["key_required"])
+        conn_err = "" if conn_ok else (
+            "Not configured." if not url else "Missing API key."
+        )
+        if conn_ok:
+            print(f"  {green('✓')} Endpoint accepted (validation skipped for {preset['label']})")
+    elif url and (key or not preset["key_required"]) and not force:
         print(f"  Checking {cyan(url)} …", end=" ", flush=True)
         conn_ok, conn_err = validate_connection(url, key)
         if conn_ok:
@@ -390,7 +546,7 @@ def _prompt_openwebui(env: dict, force: bool) -> tuple:
             models = fetch_models(url, key)
             model_ok = (not model) or (model in models)
             if not model_ok:
-                print(f"  {red('✗')}  Model {yellow(model)} not found in this OpenWebUI instance.")
+                print(f"  {red('✗')}  Model {yellow(model)} not found at this endpoint.")
         else:
             print(red("✗"))
             print(f"  {red(conn_err)}")
@@ -415,12 +571,12 @@ def _prompt_openwebui(env: dict, force: bool) -> tuple:
     needs_prompt = force or not conn_ok or not model_ok
 
     if not needs_prompt:
-        status("OpenWebUI", True, url)
+        status(preset["label"], True, url)
         if model:
             status(f"Model  {yellow(model)}", True)
         else:
             print(f"  {dim('(no default model set)')}")
-        return url, key, model, models, False
+        return provider, url, key, model, models, changed
 
     # ── Prompt for URL ──
     # Only re-prompt URL if forced, URL is missing, or connection failed for a
@@ -430,9 +586,16 @@ def _prompt_openwebui(env: dict, force: bool) -> tuple:
     url_unreachable = not conn_ok and "Cannot reach" in conn_err
     if force or not url or url_unreachable:
         print()
+        default_url = url or preset["default_url"] or "http://localhost:3000"
+        url_label = f"{preset['label']} base URL"
         while True:
-            new_url = prompt_text("OpenWebUI URL", default=url or "http://localhost:3000")
+            new_url = prompt_text(url_label, default=default_url)
             new_url = new_url.rstrip("/")
+            if not preset["validate"]:
+                url = new_url
+                changed = True
+                print(f"  {green('✓')} Endpoint set to {cyan(new_url)}")
+                break
             print(f"  {dim('Connecting…')}", end="\r", flush=True)
             conn_ok, conn_err = validate_connection(new_url, key)
             if conn_ok:
@@ -456,13 +619,25 @@ def _prompt_openwebui(env: dict, force: bool) -> tuple:
                 break
 
     # ── Prompt for API key ──
-    if force or not key:
+    if not preset["key_required"]:
+        if key:
+            print(f"  {dim('(API key not required for ' + preset['label'] + ' — clearing)')}")
+            key = ""
+            changed = True
+        conn_ok = bool(url)
+    elif force or not key:
         while True:
-            new_key = prompt_text("API key", default=key, secret=True)
+            new_key = prompt_text(f"{preset['label']} API key", default=key, secret=True)
             if not new_key:
                 print(f"  {yellow('⚠')}  No API key set — some endpoints may reject requests.")
                 key = new_key
                 changed = True
+                break
+            if not preset["validate"]:
+                # Provider can't be probed (e.g. Anthropic uses x-api-key); trust the user.
+                key = new_key
+                changed = True
+                print(f"  {green('✓')} API key saved (validation skipped)")
                 break
             print(f"  {dim('Verifying…')}", end="\r", flush=True)
             conn_ok, conn_err = validate_connection(url, new_key)
@@ -479,8 +654,8 @@ def _prompt_openwebui(env: dict, force: bool) -> tuple:
                 changed = True
                 break
 
-    # Fetch models if we haven't yet
-    if conn_ok and not models:
+    # Fetch models if we haven't yet (skip for providers we can't validate)
+    if conn_ok and not models and preset["validate"]:
         models = fetch_models(url, key)
 
     # ── Model selection ──
@@ -511,7 +686,7 @@ def _prompt_openwebui(env: dict, force: bool) -> tuple:
                 model = manual
                 changed = True
 
-    return url, key, model, models, changed
+    return provider, url, key, model, models, changed
 
 
 def _prompt_ports_paths(env: dict, force: bool) -> tuple:
@@ -566,19 +741,110 @@ def _prompt_ports_paths(env: dict, force: bool) -> tuple:
     return updated, changed
 
 
+# ── CLI flag parsing ──────────────────────────────────────────────────────────
+
+def _flag_value(name: str) -> str | None:
+    """Return value after `--name VAL` or `--name=VAL`, or None."""
+    for i, arg in enumerate(sys.argv[1:], start=1):
+        if arg == name and i + 1 < len(sys.argv):
+            return sys.argv[i + 1]
+        if arg.startswith(name + "="):
+            return arg.split("=", 1)[1]
+    return None
+
+
+def _resolve_env_path() -> pathlib.Path:
+    """Honor --env-file override; otherwise fall back to the module default."""
+    override = _flag_value("--env-file")
+    if override:
+        return pathlib.Path(override).expanduser().resolve()
+    return ENV_PATH
+
+
+def _print_env_mode(env_path: pathlib.Path) -> int:
+    """
+    Emit `KEY=value` lines for the subsystem fan-out, then exit.
+
+    Reads the canonical OPENWEBUI_* values from the .env file (or from
+    process env if absent), applies SUBSYSTEM_ENV_MAP, and writes the union
+    to stdout. Errors go to stderr so `eval $(...)` is safe.
+    """
+    env = load_env(env_path)
+    url      = env.get("OPENWEBUI_BASE_URL", os.environ.get("OPENWEBUI_BASE_URL", ""))
+    key      = env.get("OPENWEBUI_API_KEY",  os.environ.get("OPENWEBUI_API_KEY", ""))
+    model    = env.get("OPENWEBUI_MODEL",    os.environ.get("OPENWEBUI_MODEL", ""))
+    provider = env.get("LLM_PROVIDER",       os.environ.get("LLM_PROVIDER", "openwebui"))
+
+    if not url:
+        print("setup_wizard: OPENWEBUI_BASE_URL is not set", file=sys.stderr)
+        return 2
+
+    # fanout_env() includes the canonical OPENWEBUI_* keys via the "betterwebui"
+    # subsystem entry, so we don't need to echo them separately.
+    for k, v in fanout_env(url, key, model, provider).items():
+        print(f"{k}={v}")
+
+    return 0
+
+
+def _missing_required(env_path: pathlib.Path) -> list:
+    """
+    Return required keys that are absent or empty in env_path + process env.
+
+    The API key is only required when the chosen provider (LLM_PROVIDER) needs
+    one — Ollama in local mode does not. LLM_PROVIDER itself is optional and
+    defaults to ``openwebui`` for backward compatibility.
+    """
+    env = load_env(env_path)
+    provider = (
+        env.get("LLM_PROVIDER")
+        or os.environ.get("LLM_PROVIDER")
+        or "openwebui"
+    )
+    preset = PROVIDER_PRESETS.get(provider, PROVIDER_PRESETS["openwebui"])
+    required = ["OPENWEBUI_BASE_URL", "OPENWEBUI_MODEL"]
+    if preset["key_required"]:
+        required.append("OPENWEBUI_API_KEY")
+    return [k for k in required if not env.get(k) and not os.environ.get(k)]
+
+
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 def main() -> int:
+    if "--help" in sys.argv or "-h" in sys.argv:
+        print(__doc__)
+        return 0
+
+    env_path = _resolve_env_path()
+
+    # --print-env runs without prompts and exits — used by launchers + tests.
+    if "--print-env" in sys.argv:
+        return _print_env_mode(env_path)
+
+    non_interactive = "--non-interactive" in sys.argv
     force = "--reconfigure" in sys.argv or "--force" in sys.argv
+
+    if non_interactive:
+        missing = _missing_required(env_path)
+        if missing:
+            print(
+                f"setup_wizard: missing required keys in {env_path}: "
+                f"{', '.join(missing)}",
+                file=sys.stderr,
+            )
+            return 2
+        # All required values present — nothing to do.
+        return 0
 
     banner()
 
-    env = load_env(ENV_PATH)
+    env = load_env(env_path)
     to_save: dict = {}
     any_changed = False
 
     try:
-        url, key, model, _, ow_changed = _prompt_openwebui(env, force)
+        provider, url, key, model, _, ow_changed = _prompt_openwebui(env, force)
+        to_save["LLM_PROVIDER"]       = provider
         to_save["OPENWEBUI_BASE_URL"] = url
         to_save["OPENWEBUI_API_KEY"]  = key
         to_save["OPENWEBUI_MODEL"]    = model
@@ -592,16 +858,21 @@ def main() -> int:
         print(f"\n\n  {yellow('Setup cancelled.')}  No changes were written.\n")
         return 1
 
-    if any_changed or not ENV_PATH.exists():
+    if any_changed or not env_path.exists():
         section("Saving")
-        save_env(ENV_PATH, to_save)
-        print(f"  {green('✓')} Written to {cyan(str(ENV_PATH.relative_to(ROOT)))}")
+        save_env(env_path, to_save)
+        try:
+            shown = str(env_path.relative_to(ROOT))
+        except ValueError:
+            shown = str(env_path)
+        print(f"  {green('✓')} Written to {cyan(shown)}")
     else:
         section("Configuration")
         print(f"  {green('✓')} All settings are valid — nothing to update.")
 
-    if url and key:
-        _write_config_json(url, key, model)
+    preset = PROVIDER_PRESETS.get(provider, PROVIDER_PRESETS["openwebui"])
+    if url and (key or not preset["key_required"]):
+        _write_config_json(url, key, model, provider)
         print(f"  {green('✓')} Pre-populated {cyan('data/config.json')} — web UI will not re-ask for URL/key.")
 
     print()

@@ -6,6 +6,9 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app.py .
+COPY verification.py .
+COPY scheduler.py .
+COPY services/ services/
 COPY static/ static/
 COPY skills/ skills/
 

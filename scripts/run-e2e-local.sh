@@ -68,21 +68,29 @@ fi
 NODE_MAJOR=$(node -e 'process.stdout.write(process.versions.node.split(".")[0])')
 [[ "$NODE_MAJOR" -ge 18 ]] || err "Node.js 18+ required (found $(node --version))"
 
-# ── Prompt for OpenWebUI config ───────────────────────────────────────────────
+# ── Prompt for OpenWebUI config via the shared setup wizard ──────────────────
 echo ""
 echo "=== BetterWebUI End-to-End Test Runner (local) ==="
 echo ""
 echo "You need a running OpenWebUI instance with at least one model loaded."
 echo ""
 
-read -rp "OpenWebUI base URL [http://localhost:3000]: " OPENWEBUI_URL
-OPENWEBUI_URL="${OPENWEBUI_URL:-http://localhost:3000}"
+# Run the wizard (writes deploy/.env) unless caller has pre-supplied everything
+# via environment variables and passes --no-wizard.
+if [[ "${1:-}" != "--no-wizard" ]]; then
+    python3 "$SCRIPT_DIR/setup_wizard.py" \
+        --env-file "$REPO_ROOT/deploy/.env" || err "Setup wizard cancelled"
+fi
 
-read -rsp "OpenWebUI API key: " OPENWEBUI_API_KEY
-echo ""
+# Load the values back via --print-env so we have URL/key/model in this shell.
+# eval is safe: setup_wizard.py emits only KEY=value lines, no shell metachars.
+eval "$(python3 "$SCRIPT_DIR/setup_wizard.py" \
+            --print-env --env-file "$REPO_ROOT/deploy/.env")" \
+    || err "Could not load OpenWebUI configuration from deploy/.env"
 
-read -rp "Model name for chat tests (leave blank to auto-select first available): " DEFAULT_MODEL
-DEFAULT_MODEL="${DEFAULT_MODEL:-}"
+OPENWEBUI_URL="$OPENWEBUI_BASE_URL"
+DEFAULT_MODEL="${OPENWEBUI_MODEL:-}"
+LLM_PROVIDER="${LLM_PROVIDER:-openwebui}"
 
 echo ""
 
@@ -144,6 +152,10 @@ echo "=== Starting services ==="
     cd "$CLK_DIR"
     CLK_API_PORT=$CLK_PORT \
     CLK_WORKSPACES_DIR="${TMPDIR:-/tmp}/bwui-e2e-clk-workspaces" \
+    CLK_PROVIDER="$LLM_PROVIDER" \
+    CLK_OPENWEBUI_ENDPOINT="$OPENWEBUI_URL" \
+    CLK_OPENWEBUI_API_KEY="$OPENWEBUI_API_KEY" \
+    CLK_OPENWEBUI_MODEL="$DEFAULT_MODEL" \
     "$CLK_DIR/.venv/bin/python" -m clk_harness.api \
         >"${TMPDIR:-/tmp}/bwui-e2e-clk.log" 2>&1
 ) &
@@ -156,6 +168,7 @@ PIDS+=($!)
     AUTOGUI_API_PORT=$AUTOGUI_PORT \
     OPENWEBUI_BASE_URL="$OPENWEBUI_URL" \
     OPENWEBUI_API_KEY="$OPENWEBUI_API_KEY" \
+    OPENWEBUI_MODEL="$DEFAULT_MODEL" \
     "$AUTOGUI_DIR/.venv/bin/python" api.py \
         >"${TMPDIR:-/tmp}/bwui-e2e-autogui.log" 2>&1
 ) &

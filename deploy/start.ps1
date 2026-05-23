@@ -6,6 +6,23 @@ $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $RepoRoot = Split-Path -Parent $ScriptDir
 
+# Validate / prompt for OpenWebUI configuration before docker compose
+$pythonCmd = Get-Command python -ErrorAction SilentlyContinue
+if (-not $pythonCmd) { $pythonCmd = Get-Command python3 -ErrorAction SilentlyContinue }
+if ($pythonCmd) {
+    $envFile = Join-Path $ScriptDir ".env"
+    $wizard  = Join-Path $RepoRoot "scripts\setup_wizard.py"
+    & $pythonCmd.Source $wizard --non-interactive --env-file $envFile 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "OpenWebUI configuration incomplete -- launching wizard..."
+        & $pythonCmd.Source $wizard --env-file $envFile
+        if ($LASTEXITCODE -ne 0) {
+            Write-Error "Setup wizard cancelled -- aborting."
+            exit 1
+        }
+    }
+}
+
 # Build Docker images
 Write-Host "[1/4] Building Docker images..."
 docker compose -f "$ScriptDir\docker-compose.integration.yml" build
