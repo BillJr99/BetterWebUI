@@ -15,7 +15,9 @@ services:
     volumes:
       - ollama-data:/root/.ollama
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:11434/api/tags || exit 1"]
+      # ollama/ollama:latest doesn't ship curl/wget. Use the ollama CLI
+      # itself, which talks to the local API and exits 0 when reachable.
+      test: ["CMD", "ollama", "list"]
       interval: 10s
       timeout: 5s
       retries: 15
@@ -73,7 +75,11 @@ services:
   clk:
     build:
       context: ../../cognitiveloopkernel
-    command: ["python", "-m", "clk_harness.api"]
+    # CLK's Dockerfile uses kickoff.sh as ENTRYPOINT, which doesn't pass
+    # through CLI args (gives "unknown option: -m"). Clear the entrypoint
+    # and invoke python directly.
+    entrypoint: ["python"]
+    command: ["-m", "clk_harness.api"]
     ports:
       - "8001:8001"
     environment:
