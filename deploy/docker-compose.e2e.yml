@@ -122,9 +122,18 @@ services:
   osso:
     build:
       context: ../../osscreenobserver
-    command: ["python", "main.py", "--mock", "--mode", "inspect"]
+    # Default bind host in config.json.example is 127.0.0.1; override so the
+    # Flask server is reachable across the docker bridge (port mapping can't
+    # reach a container's loopback interface).
+    command: ["python", "main.py", "--mock", "--mode", "inspect", "--host", "0.0.0.0"]
     ports:
       - "5001:5001"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5001/api/healthz').read()"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
 
 volumes:
   ollama-data:
