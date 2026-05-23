@@ -4463,13 +4463,25 @@ async def test_reset():
         raise HTTPException(status_code=404, detail="Not Found")
     wiped = []
     for path in (CONVERSATIONS_PATH, WORKSPACES_PATH, PROMPTS_PATH,
-                 MCP_PATH, CLI_PATH, CONFIG_PATH):
+                 MCP_PATH, CLI_PATH):
         if path.exists():
             try:
                 path.unlink()
                 wiped.append(path.name)
             except OSError:
                 pass
+    # Reset onboarding_done in config WITHOUT deleting config.json — deleting it
+    # would race with parallel tests' ensureConfigured() that just set up
+    # base_url + api_key, leaving them with a stripped config mid-test.
+    if CONFIG_PATH.exists():
+        try:
+            cfg = load_config()
+            if cfg.get("onboarding_done"):
+                cfg["onboarding_done"] = False
+                save_json(CONFIG_PATH, cfg)
+                wiped.append("onboarding_done")
+        except Exception:
+            pass
     _session_trusted_commands.clear()
     _command_explanation_cache.clear()
     return {"ok": True, "wiped": wiped}

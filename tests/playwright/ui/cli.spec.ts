@@ -18,6 +18,9 @@ test('register a CLI tool via API; UI list shows it', async ({ page, request }) 
     data: { id: ID, name: 'PW Echo', template: 'echo {args}', description: 'Echo for PW UI test' },
   });
   expect(r.ok()).toBeTruthy();
+  // Reload so the JS fetches the updated CLI tool list before we switch tabs.
+  await page.reload();
+  await dismissOnboardingIfPresent(page);
   await openTab(page, 'tools');
   await expect(page.locator('#cli-tool-list')).toContainText('PW Echo');
 });
@@ -26,7 +29,8 @@ test('registry returns curated CLI shortcuts', async ({ request }) => {
   const r = await request.get('/api/cli/registry');
   expect(r.ok()).toBeTruthy();
   const body = await r.json();
-  const items = Array.isArray(body) ? body : body.tools ?? body.items ?? [];
+  // Could be an array directly or wrapped under "tools", "items", or "registry".
+  const items = Array.isArray(body) ? body : body.tools ?? body.items ?? body.registry ?? [];
   expect(items.length).toBeGreaterThan(0);
 });
 

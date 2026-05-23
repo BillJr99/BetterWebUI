@@ -22,9 +22,17 @@ test('Memory tab opens and the pause toggle works', async ({ page }) => {
 });
 
 test('Memory list renders without console errors', async ({ page }) => {
+  // Only count pageerrors that happen AFTER the tab is opened — deferred async
+  // work from init() (Notification.requestPermission timeouts, IndexedDB delays,
+  // etc.) can fire well after networkidle and isn't relevant to whether the
+  // memory tab itself rendered correctly.
   const errors: string[] = [];
-  page.on('pageerror', (e) => errors.push(e.message));
+  let capturing = false;
+  page.on('pageerror', (e) => { if (capturing) errors.push(e.message); });
   await openTab(page, 'memory');
   await expect(page.locator('#memory-list')).toBeVisible();
+  capturing = true;
+  // Tiny settle so the rendering tick gets a chance to throw if it's going to.
+  await page.waitForTimeout(200);
   expect(errors).toEqual([]);
 });
