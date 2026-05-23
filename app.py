@@ -4409,6 +4409,30 @@ from services.routes import register_routes as _register_service_routes
 _register_service_routes(app)
 
 
+# --- Test-only reset endpoint ---
+# Gated behind BWUI_TEST_MODE=1 so it never appears in production. Used by the
+# Playwright UI suite to wipe persistent state between specs without restarting
+# the server.
+
+@app.post("/api/test/reset")
+async def test_reset():
+    if os.environ.get("BWUI_TEST_MODE") != "1":
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="Not Found")
+    wiped = []
+    for path in (CONVERSATIONS_PATH, WORKSPACES_PATH, PROMPTS_PATH,
+                 MCP_PATH, CLI_PATH):
+        if path.exists():
+            try:
+                path.unlink()
+                wiped.append(path.name)
+            except OSError:
+                pass
+    _session_trusted_commands.clear()
+    _command_explanation_cache.clear()
+    return {"ok": True, "wiped": wiped}
+
+
 # --- Health ---
 
 @app.get("/api/health")

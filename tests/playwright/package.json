@@ -8,7 +8,9 @@
     "test:e2e": "playwright test --config e2e.config.ts",
     "test:e2e:headed": "playwright test --config e2e.config.ts --headed",
     "test:local": "playwright test --config local.config.ts",
-    "test:local:headed": "playwright test --config local.config.ts --headed"
+    "test:local:headed": "playwright test --config local.config.ts --headed",
+    "test:ui": "playwright test --config ui.config.ts",
+    "test:ui:headed": "playwright test --config ui.config.ts --headed"
   },
   "devDependencies": {
     "@playwright/test": "^1.44.0",

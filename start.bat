@@ -116,7 +116,7 @@ if %ERRORLEVEL%==0 (
 ) else (
     echo Starting CognitiveLoopKernel...
     call :setup_venv "CognitiveLoopKernel"
-    START "BetterWebUI-CLK" /MIN cmd /c "cd /d "%~dp0CognitiveLoopKernel" && set CLK_API_PORT=%CLK_PORT% && set CLK_WORKSPACES_DIR=%CLK_WORKSPACES_DIR% && .venv\Scripts\python.exe -m clk_harness.api"
+    START "BetterWebUI-CLK" /MIN cmd /c "cd /d "%~dp0CognitiveLoopKernel" && set CLK_API_PORT=%CLK_PORT% && set CLK_WORKSPACES_DIR=%CLK_WORKSPACES_DIR% && set CLK_PROVIDER=openwebui && set CLK_OPENWEBUI_ENDPOINT=%OW_URL% && set CLK_OPENWEBUI_API_KEY=%OW_KEY% && set CLK_OPENWEBUI_MODEL=%OW_MODEL% && .venv\Scripts\python.exe -m clk_harness.api"
     set CLK_STARTED=1
 )
 
@@ -127,7 +127,7 @@ if %ERRORLEVEL%==0 (
 ) else (
     echo Starting AutoGUI...
     call :setup_venv "AutoGUI"
-    START "BetterWebUI-AutoGUI" /MIN cmd /c "cd /d "%~dp0AutoGUI" && set AUTOGUI_API_PORT=%AUTOGUI_PORT% && set OPENWEBUI_BASE_URL=%OW_URL% && set OPENWEBUI_API_KEY=%OW_KEY% && .venv\Scripts\python.exe api.py"
+    START "BetterWebUI-AutoGUI" /MIN cmd /c "cd /d "%~dp0AutoGUI" && set AUTOGUI_API_PORT=%AUTOGUI_PORT% && set OPENWEBUI_BASE_URL=%OW_URL% && set OPENWEBUI_API_KEY=%OW_KEY% && set OPENWEBUI_MODEL=%OW_MODEL% && .venv\Scripts\python.exe api.py"
     set AUTOGUI_STARTED=1
 )
 

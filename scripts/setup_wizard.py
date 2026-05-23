@@ -9,16 +9,21 @@ on Unix/macOS; falls back to a numbered list on Windows or non-TTY
 environments.
 
 Usage:
-    python3 scripts/setup_wizard.py               # validate; prompt only if needed
-    python3 scripts/setup_wizard.py --reconfigure # always re-prompt everything
+    python3 scripts/setup_wizard.py                     # validate; prompt only if needed
+    python3 scripts/setup_wizard.py --reconfigure       # always re-prompt everything
+    python3 scripts/setup_wizard.py --non-interactive   # validate-only; exit 2 if missing
+    python3 scripts/setup_wizard.py --print-env         # write subsystem fan-out to stdout
+    python3 scripts/setup_wizard.py --env-file PATH     # override deploy/.env location
 
 Exit codes:
     0  – configuration saved successfully (or was already valid)
     1  – user aborted
+    2  – --non-interactive: required values missing
 """
 
 import curses
 import json
+import os
 import pathlib
 import sys
 import urllib.error
@@ -29,6 +34,47 @@ ENV_PATH = ROOT / "deploy" / ".env"
 
 _IS_TTY = sys.stdout.isatty() and sys.stdin.isatty()
 _IS_WIN = sys.platform == "win32"
+
+
+# ── Subsystem env-var contract ────────────────────────────────────────────────
+# The wizard writes the three canonical keys (OPENWEBUI_BASE_URL / _API_KEY /
+# _MODEL) to deploy/.env. At launch, each subsystem needs the same three values
+# under whatever variable names it already reads.  This table is the single
+# source of truth for the fan-out — start.sh and friends consume it via
+# --print-env so there's no duplication on disk.
+SUBSYSTEM_ENV_MAP = {
+    "betterwebui": {
+        "OPENWEBUI_BASE_URL": "{url}",
+        "OPENWEBUI_API_KEY":  "{key}",
+        "OPENWEBUI_MODEL":    "{model}",
+    },
+    "clk": {
+        "CLK_PROVIDER":           "openwebui",
+        "CLK_OPENWEBUI_ENDPOINT": "{url}",
+        "CLK_OPENWEBUI_API_KEY":  "{key}",
+        "CLK_OPENWEBUI_MODEL":    "{model}",
+    },
+    "autogui": {
+        "OPENWEBUI_BASE_URL": "{url}",
+        "OPENWEBUI_API_KEY":  "{key}",
+        "OPENWEBUI_MODEL":    "{model}",
+    },
+    "osso": {
+        "CLK_PROVIDER":           "openwebui",
+        "CLK_OPENWEBUI_ENDPOINT": "{url}",
+        "CLK_OPENWEBUI_API_KEY":  "{key}",
+        "CLK_OPENWEBUI_MODEL":    "{model}",
+    },
+}
+
+
+def fanout_env(url: str, key: str, model: str) -> dict:
+    """Apply SUBSYSTEM_ENV_MAP to produce the union of all subsystem env vars."""
+    out: dict = {}
+    for vars_for_subsystem in SUBSYSTEM_ENV_MAP.values():
+        for var_name, template in vars_for_subsystem.items():
+            out[var_name] = template.format(url=url, key=key, model=model)
+    return out
 
 
 # ── ANSI colour helpers ────────────────────────────────────────────────────────
@@ -566,14 +612,92 @@ def _prompt_ports_paths(env: dict, force: bool) -> tuple:
     return updated, changed
 
 
+# ── CLI flag parsing ──────────────────────────────────────────────────────────
+
+def _flag_value(name: str) -> str | None:
+    """Return value after `--name VAL` or `--name=VAL`, or None."""
+    for i, arg in enumerate(sys.argv[1:], start=1):
+        if arg == name and i + 1 < len(sys.argv):
+            return sys.argv[i + 1]
+        if arg.startswith(name + "="):
+            return arg.split("=", 1)[1]
+    return None
+
+
+def _resolve_env_path() -> pathlib.Path:
+    """Honor --env-file override; otherwise fall back to the module default."""
+    override = _flag_value("--env-file")
+    if override:
+        return pathlib.Path(override).expanduser().resolve()
+    return ENV_PATH
+
+
+def _print_env_mode(env_path: pathlib.Path) -> int:
+    """
+    Emit `KEY=value` lines for the subsystem fan-out, then exit.
+
+    Reads the canonical OPENWEBUI_* values from the .env file (or from
+    process env if absent), applies SUBSYSTEM_ENV_MAP, and writes the union
+    to stdout. Errors go to stderr so `eval $(...)` is safe.
+    """
+    env = load_env(env_path)
+    url   = env.get("OPENWEBUI_BASE_URL",  os.environ.get("OPENWEBUI_BASE_URL", ""))
+    key   = env.get("OPENWEBUI_API_KEY",   os.environ.get("OPENWEBUI_API_KEY", ""))
+    model = env.get("OPENWEBUI_MODEL",     os.environ.get("OPENWEBUI_MODEL", ""))
+
+    if not url:
+        print("setup_wizard: OPENWEBUI_BASE_URL is not set", file=sys.stderr)
+        return 2
+
+    # fanout_env() includes the canonical OPENWEBUI_* keys via the "betterwebui"
+    # subsystem entry, so we don't need to echo them separately.
+    for k, v in fanout_env(url, key, model).items():
+        print(f"{k}={v}")
+
+    return 0
+
+
+def _missing_required(env_path: pathlib.Path) -> list:
+    """Return required keys that are absent or empty in env_path + process env."""
+    env = load_env(env_path)
+    missing = []
+    for k in ("OPENWEBUI_BASE_URL", "OPENWEBUI_API_KEY", "OPENWEBUI_MODEL"):
+        if not env.get(k) and not os.environ.get(k):
+            missing.append(k)
+    return missing
+
+
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 def main() -> int:
+    if "--help" in sys.argv or "-h" in sys.argv:
+        print(__doc__)
+        return 0
+
+    env_path = _resolve_env_path()
+
+    # --print-env runs without prompts and exits — used by launchers + tests.
+    if "--print-env" in sys.argv:
+        return _print_env_mode(env_path)
+
+    non_interactive = "--non-interactive" in sys.argv
     force = "--reconfigure" in sys.argv or "--force" in sys.argv
+
+    if non_interactive:
+        missing = _missing_required(env_path)
+        if missing:
+            print(
+                f"setup_wizard: missing required keys in {env_path}: "
+                f"{', '.join(missing)}",
+                file=sys.stderr,
+            )
+            return 2
+        # All required values present — nothing to do.
+        return 0
 
     banner()
 
-    env = load_env(ENV_PATH)
+    env = load_env(env_path)
     to_save: dict = {}
     any_changed = False
 
@@ -592,10 +716,14 @@ def main() -> int:
         print(f"\n\n  {yellow('Setup cancelled.')}  No changes were written.\n")
         return 1
 
-    if any_changed or not ENV_PATH.exists():
+    if any_changed or not env_path.exists():
         section("Saving")
-        save_env(ENV_PATH, to_save)
-        print(f"  {green('✓')} Written to {cyan(str(ENV_PATH.relative_to(ROOT)))}")
+        save_env(env_path, to_save)
+        try:
+            shown = str(env_path.relative_to(ROOT))
+        except ValueError:
+            shown = str(env_path)
+        print(f"  {green('✓')} Written to {cyan(shown)}")
     else:
         section("Configuration")
         print(f"  {green('✓')} All settings are valid — nothing to update.")

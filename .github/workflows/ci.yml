@@ -231,3 +231,102 @@ jobs:
 
       - name: Build Docker image
         run: docker build -t betterwebui:ci .
+
+  # ---------------------------------------------------------------------------
+  # Full e2e + UI suite via the unified runner. Heavy: spins up the docker
+  # stack with Ollama + tinyllama + OpenWebUI, runs every test class.
+  # ---------------------------------------------------------------------------
+  e2e-ui:
+    name: End-to-end + UI (full stack)
+    runs-on: ubuntu-latest
+    # Run on PR and on main pushes; skip on docs-only changes (best-effort).
+    if: >
+      github.event_name == 'pull_request' ||
+      github.ref == 'refs/heads/main'
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install app + test dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pytest pytest-asyncio python-frontmatter
+
+      - name: Start the docker e2e stack (Ollama + OpenWebUI)
+        env:
+          OLLAMA_MODEL: tinyllama:1.1b
+        run: |
+          docker compose -f deploy/docker-compose.e2e.yml up -d --build --wait
+          # Pull the model via the Ollama API; tinyllama is small.
+          for i in $(seq 1 60); do
+            if curl -sf http://localhost:11434/api/tags >/dev/null; then break; fi
+            sleep 2
+          done
+          curl -X POST http://localhost:11434/api/pull \
+               -H 'Content-Type: application/json' \
+               -d '{"model":"tinyllama:1.1b","stream":false}' \
+               --max-time 600 -sf
+
+      - name: Wait for OpenWebUI
+        run: |
+          for i in $(seq 1 60); do
+            if curl -sf http://localhost:3000/health >/dev/null; then break; fi
+            sleep 3
+          done
+
+      - name: Create OpenWebUI admin + API key
+        id: ow
+        run: |
+          # First signup wins admin in dev mode.
+          curl -sf -X POST http://localhost:3000/api/v1/auths/signup \
+               -H 'Content-Type: application/json' \
+               -d '{"name":"CI","email":"ci@bwui.test","password":"bwui-ci-pass"}' || true
+          TOKEN=$(curl -sf -X POST http://localhost:3000/api/v1/auths/signin \
+               -H 'Content-Type: application/json' \
+               -d '{"email":"ci@bwui.test","password":"bwui-ci-pass"}' \
+               | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])")
+          KEY=$(curl -sf -X POST http://localhost:3000/api/v1/auths/api_key \
+               -H "Authorization: Bearer $TOKEN" \
+               | python3 -c "import sys,json; print(json.load(sys.stdin)['api_key'])")
+          echo "key=$KEY" >> $GITHUB_OUTPUT
+
+      - name: Run unified test runner
+        env:
+          OPENWEBUI_BASE_URL: http://localhost:3000
+          OPENWEBUI_API_KEY: ${{ steps.ow.outputs.key }}
+          OPENWEBUI_MODEL: tinyllama:1.1b
+        run: |
+          # Pre-seed deploy/.env so --no-wizard works.
+          cat > deploy/.env <<EOF
+          OPENWEBUI_BASE_URL=$OPENWEBUI_BASE_URL
+          OPENWEBUI_API_KEY=$OPENWEBUI_API_KEY
+          OPENWEBUI_MODEL=$OPENWEBUI_MODEL
+          EOF
+          chmod +x scripts/run-all-tests.sh
+          ./scripts/run-all-tests.sh --no-wizard --keep-going
+
+      - name: Upload Playwright UI report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-ui-report
+          path: tests/playwright/ui-report
+          retention-days: 7
+
+      - name: Stop docker stack
+        if: always()
+        run: docker compose -f deploy/docker-compose.e2e.yml down -v

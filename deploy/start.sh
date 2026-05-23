@@ -4,6 +4,21 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+# ── Validate / prompt for OpenWebUI configuration before docker compose ───────
+# Non-interactive validation: exit 2 if anything is missing → run the
+# interactive wizard. Skips if python3 isn't available (e.g. on minimal CI).
+if command -v python3 >/dev/null 2>&1; then
+    if ! python3 "$REPO_ROOT/scripts/setup_wizard.py" \
+            --non-interactive --env-file "$SCRIPT_DIR/.env" 2>/dev/null; then
+        echo "OpenWebUI configuration incomplete — launching wizard..."
+        python3 "$REPO_ROOT/scripts/setup_wizard.py" \
+            --env-file "$SCRIPT_DIR/.env" || {
+            echo "Setup wizard cancelled — aborting." >&2
+            exit 1
+        }
+    fi
+fi
+
 # Build Docker images
 echo "[1/4] Building Docker images..."
 docker compose -f "$SCRIPT_DIR/docker-compose.integration.yml" build
