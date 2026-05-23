@@ -250,6 +250,18 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Set up sibling-repo layout for compose
+        # deploy/docker-compose.e2e.yml builds CLK/AutoGUI/OSSO from
+        # ../../cognitiveloopkernel etc. — the sibling layout that
+        # deploy/bootstrap.sh creates locally. In CI we have them as
+        # submodules inside the repo (CamelCase), so symlink them into
+        # the lowercase sibling location the compose file expects.
+        run: |
+          ln -sfn "$PWD/CognitiveLoopKernel" ../cognitiveloopkernel
+          ln -sfn "$PWD/AutoGUI"             ../autogui
+          ln -sfn "$PWD/OSScreenObserver"    ../osscreenobserver
+          ls -la ../cognitiveloopkernel ../autogui ../osscreenobserver
+
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:

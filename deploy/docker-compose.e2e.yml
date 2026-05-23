@@ -1,5 +1,3 @@
-version: "3.9"
-
 # End-to-end test stack: BetterWebUI + CLK + AutoGUI (dry-run) +
 # OSScreenObserver (mock) + Ollama + OpenWebUI.
 #
