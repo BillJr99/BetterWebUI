@@ -26,6 +26,9 @@ test('register a custom MCP server; UI list shows it', async ({ page, request })
     },
   });
   expect(r.ok()).toBeTruthy();
+  // Reload so the JS fetches the updated server list before we switch tabs.
+  await page.reload();
+  await dismissOnboardingIfPresent(page);
   await openTab(page, 'tools');
   await expect(page.locator('#mcp-server-list')).toContainText(NAME);
 });
@@ -34,8 +37,8 @@ test('registry endpoint returns a non-empty curated list', async ({ request }) =
   const r = await request.get('/api/mcp/registry');
   expect(r.ok()).toBeTruthy();
   const body = await r.json();
-  // Could be an array directly or wrapped — accept either.
-  const items = Array.isArray(body) ? body : body.servers ?? body.items ?? [];
+  // Could be an array directly or wrapped under "servers", "items", or "registry".
+  const items = Array.isArray(body) ? body : body.servers ?? body.items ?? body.registry ?? [];
   expect(items.length).toBeGreaterThan(0);
 });
 

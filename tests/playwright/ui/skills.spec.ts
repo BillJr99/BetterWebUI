@@ -27,6 +27,9 @@ test('create a skill via API; UI list shows it', async ({ page, request }) => {
     },
   });
   expect(create.ok()).toBeTruthy();
+  // Reload so the JS fetches the updated skill list before we switch tabs.
+  await page.reload();
+  await dismissOnboardingIfPresent(page);
   await openTab(page, 'skills');
   await expect(page.locator('#skill-list')).toContainText('Playwright Test Skill');
   // Clean up.
@@ -37,6 +40,9 @@ test('delete a skill via UI removes it from the list', async ({ page, request })
   await request.post('/api/skills', {
     data: { id: SKILL_ID, name: 'PW Delete', description: 'to be deleted', content: '...' },
   });
+  // Reload so the JS fetches the updated skill list before we switch tabs.
+  await page.reload();
+  await dismissOnboardingIfPresent(page);
   await openTab(page, 'skills');
   await expect(page.locator('#skill-list')).toContainText('PW Delete');
 

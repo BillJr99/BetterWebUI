@@ -19,7 +19,9 @@ test.describe('onboarding overlay', () => {
     const probe = await request.post('/api/test/reset').catch(() => null);
     if (!probe || probe.status() === 404) test.skip(true, 'BWUI_TEST_MODE not enabled on server');
 
-    const owUrl = process.env.OPENWEBUI_BASE_URL ?? '';
+    // Use the Docker-internal URL if available — the BetterWebUI server validates
+    // the URL server-side, so it must be reachable from inside the container.
+    const owUrl = process.env.OPENWEBUI_DOCKER_URL ?? process.env.OPENWEBUI_BASE_URL ?? '';
     const owKey = process.env.OPENWEBUI_API_KEY  ?? '';
     test.skip(!owUrl || !owKey, 'OPENWEBUI_BASE_URL / OPENWEBUI_API_KEY not set');
 

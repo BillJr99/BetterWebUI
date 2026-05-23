@@ -73,10 +73,10 @@ test('/api/oauth/status/github responds', async ({ request }) => {
 
 test('/api/memory/extract responds to a sample message', async ({ request }) => {
   const r = await request.post('/api/memory/extract', {
-    data: { conversation_id: 'nonexistent', message: 'I prefer tabs over spaces.' },
+    data: { user_message: 'I prefer tabs over spaces.', assistant_message: 'Noted.' },
   });
-  // 200 with a result; 404 if the conversation id is required to exist.
-  expect([200, 400, 404, 503].includes(r.status())).toBeTruthy();
+  // 200 with candidates; 503 if no model/key configured; 403 if IP not allowed.
+  expect([200, 400, 403, 404, 503].includes(r.status())).toBeTruthy();
 });
 
 test('/api/uploads/transient round-trips', async ({ request }) => {

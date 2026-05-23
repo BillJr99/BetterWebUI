@@ -17,6 +17,9 @@ test('create a system prompt via API; UI list shows it', async ({ page, request 
   expect(r.ok()).toBeTruthy();
   const { id } = await r.json();
 
+  // Reload so the JS fetches the updated prompt list before we switch tabs.
+  await page.reload();
+  await dismissOnboardingIfPresent(page);
   await openTab(page, 'prompts');
   await expect(page.locator('#prompt-list')).toContainText('PW Prompt');
 

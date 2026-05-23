@@ -2839,7 +2839,8 @@ async def clear_session_trust(request: Request):
 
 class FileResponseIn(BaseModel):
     request_id: str
-    files: list
+    files: Optional[list] = None
+    action: Optional[str] = None
 
 
 @app.post("/api/file-response")
@@ -3402,8 +3403,10 @@ async def project_file(request: Request, path: str, include_content: bool = Fals
 
 
 @app.get("/api/project/checkpoints")
-async def list_project_checkpoints(request: Request, filename: str):
+async def list_project_checkpoints(request: Request, filename: Optional[str] = None):
     _require_local_caller(request)
+    if not filename:
+        return {"checkpoints": []}
     cfg = load_config()
     workspace = resolve_active_workspace(cfg)
     wid = (workspace or {}).get("id", "default")
@@ -3967,7 +3970,10 @@ async def recent_conversations(request: Request, limit: int = 3):
 async def set_conversation_summary(request: Request, cid: str):
     """Store a one-line summary for a conversation (generated client-side or by the LLM)."""
     _require_local_caller(request)
-    body = await request.json()
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
     summary = str(body.get("summary", ""))[:300].strip()
     data = load_conversations()
     conv = data["conversations"].get(cid)
@@ -4457,7 +4463,7 @@ async def test_reset():
         raise HTTPException(status_code=404, detail="Not Found")
     wiped = []
     for path in (CONVERSATIONS_PATH, WORKSPACES_PATH, PROMPTS_PATH,
-                 MCP_PATH, CLI_PATH):
+                 MCP_PATH, CLI_PATH, CONFIG_PATH):
         if path.exists():
             try:
                 path.unlink()

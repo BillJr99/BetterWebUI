@@ -50,15 +50,18 @@ test('tag endpoint accepts a tags array', async ({ page, request }) => {
 test('summary endpoint responds', async ({ page, request }) => {
   const cid = await createConversation(page, request);
   test.skip(!cid, 'could not create a conversation');
-  const r = await request.post(`/api/conversations/${cid}/summary`);
-  // 200 success; 202 async; 503 if no model configured.
-  expect([200, 202, 503].includes(r.status())).toBeTruthy();
+  // The endpoint stores a provided summary string; send one so the body parse succeeds.
+  const r = await request.post(`/api/conversations/${cid}/summary`, {
+    data: { summary: 'test summary' },
+  });
+  expect([200, 204, 404].includes(r.status())).toBeTruthy();
 });
 
 test('fork endpoint creates a new conversation id', async ({ page, request }) => {
   const cid = await createConversation(page, request);
   test.skip(!cid, 'could not create a conversation');
-  const r = await request.post(`/api/conversations/${cid}/fork`);
+  // Send empty JSON body so FastAPI can parse the ForkIn model (all fields optional).
+  const r = await request.post(`/api/conversations/${cid}/fork`, { data: {} });
   expect([200, 201].includes(r.status())).toBeTruthy();
   if (r.ok()) {
     const body = await r.json();

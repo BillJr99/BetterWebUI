@@ -20,6 +20,7 @@ test('/api/project/tree responds (200 or 404 if no workspace configured)', async
 });
 
 test('/api/project/checkpoints responds', async ({ request }) => {
+  // filename is optional; omitting it returns an empty list (200).
   const r = await request.get('/api/project/checkpoints');
   expect([200, 404].includes(r.status())).toBeTruthy();
 });
