@@ -17,6 +17,9 @@
 #   ./scripts/run-all-tests.sh --reconfigure     # force re-prompt
 #   ./scripts/run-all-tests.sh --skip-ui         # skip browser UI tests
 #   ./scripts/run-all-tests.sh --keep-going      # don't fail-fast
+#   ./scripts/run-all-tests.sh --skip-services   # skip clone/venv/start; use already-running
+#                                                # services (e.g. docker stack). Set BWUI_PORT
+#                                                # to the BetterWebUI port (default 8765).
 #   ./scripts/run-all-tests.sh --docker          # bring up + tear down deploy/docker-compose.e2e.yml
 #   ./scripts/run-all-tests.sh --docker-compose deploy/docker-compose.e2e.yml
 #                                                # tear down a specific test compose file on exit
@@ -35,10 +38,12 @@ CLK_DIR="$PARENT_DIR/cognitiveloopkernel"
 AUTOGUI_DIR="$PARENT_DIR/autogui"
 OSSO_DIR="$PARENT_DIR/osscreenobserver"
 
-BWUI_PORT=8765
-CLK_PORT=8001
-AUTOGUI_PORT=8002
-OSSO_PORT=5001
+# Allow port overrides from environment (useful when services are already running
+# in docker on non-default ports, e.g. BWUI_PORT=8080 for docker-compose stacks).
+BWUI_PORT="${BWUI_PORT:-8765}"
+CLK_PORT="${CLK_PORT:-8001}"
+AUTOGUI_PORT="${AUTOGUI_PORT:-8002}"
+OSSO_PORT="${OSSO_PORT:-5001}"
 
 # ── Flag parsing ──────────────────────────────────────────────────────────────
 NO_WIZARD=0
@@ -47,6 +52,7 @@ SKIP_PYTHON=0
 SKIP_PLAYWRIGHT=0
 SKIP_UI=0
 SKIP_SMOKE=0
+SKIP_SERVICES=0
 KEEP_GOING=0
 DOCKER_UP=0
 DOCKER_COMPOSE_FILE="${BWUI_TEST_COMPOSE_FILE:-}"
@@ -60,6 +66,7 @@ while [[ $# -gt 0 ]]; do
         --skip-playwright)SKIP_PLAYWRIGHT=1; shift ;;
         --skip-ui)        SKIP_UI=1; shift ;;
         --skip-smoke)     SKIP_SMOKE=1; shift ;;
+        --skip-services)  SKIP_SERVICES=1; shift ;;
         --keep-going)     KEEP_GOING=1; shift ;;
         --docker)
             DOCKER_UP=1
@@ -192,7 +199,7 @@ DEFAULT_MODEL="${OPENWEBUI_MODEL:-}"
 # Provider is fanned out by the wizard; default to "openwebui" if absent.
 LLM_PROVIDER="${LLM_PROVIDER:-openwebui}"
 
-# ── Stage 1: ensure submodule directories exist ──────────────────────────────
+# ── Stages 1–3: clone, venv, start services (skipped when --skip-services) ────
 clone_or_update() {
     local name="$1" url="$2" dir="$3"
     if [[ -d "$dir/.git" ]]; then
@@ -206,91 +213,97 @@ clone_or_update() {
     fi
 }
 
-echo ""
-echo "=== Ensuring submodule repos exist ==="
-clone_or_update "cognitiveloopkernel" \
-    "https://github.com/billjr99/cognitiveloopkernel.git" "$CLK_DIR"
-clone_or_update "autogui" \
-    "https://github.com/billjr99/autogui.git" "$AUTOGUI_DIR"
-clone_or_update "osscreenobserver" \
-    "https://github.com/billjr99/osscreenobserver.git" "$OSSO_DIR"
+if [[ $SKIP_SERVICES -eq 0 ]]; then
+    echo ""
+    echo "=== Ensuring submodule repos exist ==="
+    clone_or_update "cognitiveloopkernel" \
+        "https://github.com/billjr99/cognitiveloopkernel.git" "$CLK_DIR"
+    clone_or_update "autogui" \
+        "https://github.com/billjr99/autogui.git" "$AUTOGUI_DIR"
+    clone_or_update "osscreenobserver" \
+        "https://github.com/billjr99/osscreenobserver.git" "$OSSO_DIR"
 
-# ── Stage 2: install Python deps ─────────────────────────────────────────────
-echo ""
-echo "=== Installing Python dependencies ==="
-info "BetterWebUI..."
-setup_venv "$REPO_ROOT"
-"$REPO_ROOT/.venv/bin/pip" install -q pytest pytest-asyncio python-frontmatter
-info "CognitiveLoopKernel..."
-setup_venv "$CLK_DIR"
-info "AutoGUI..."
-setup_venv "$AUTOGUI_DIR"
-info "OSScreenObserver..."
-setup_venv "$OSSO_DIR"
+    echo ""
+    echo "=== Installing Python dependencies ==="
+    info "BetterWebUI..."
+    setup_venv "$REPO_ROOT"
+    "$REPO_ROOT/.venv/bin/pip" install -q pytest pytest-asyncio python-frontmatter
+    info "CognitiveLoopKernel..."
+    setup_venv "$CLK_DIR"
+    info "AutoGUI..."
+    setup_venv "$AUTOGUI_DIR"
+    info "OSScreenObserver..."
+    setup_venv "$OSSO_DIR"
 
-# ── Stage 3: start services with BWUI_TEST_MODE=1 ────────────────────────────
-echo ""
-echo "=== Starting services ==="
+    echo ""
+    echo "=== Starting services ==="
 
-# CognitiveLoopKernel
-(
-    cd "$CLK_DIR"
-    CLK_API_PORT=$CLK_PORT \
-    CLK_WORKSPACES_DIR="${TMPDIR:-/tmp}/bwui-runall-clk-workspaces" \
-    CLK_PROVIDER="$LLM_PROVIDER" \
-    CLK_OPENWEBUI_ENDPOINT="$OPENWEBUI_URL" \
-    CLK_OPENWEBUI_API_KEY="$OPENWEBUI_API_KEY" \
-    CLK_OPENWEBUI_MODEL="$DEFAULT_MODEL" \
-    "$CLK_DIR/.venv/bin/python" -m clk_harness.api \
-        >"${TMPDIR:-/tmp}/bwui-runall-clk.log" 2>&1
-) &
-PIDS+=($!)
+    # CognitiveLoopKernel
+    (
+        cd "$CLK_DIR"
+        CLK_API_PORT=$CLK_PORT \
+        CLK_WORKSPACES_DIR="${TMPDIR:-/tmp}/bwui-runall-clk-workspaces" \
+        CLK_PROVIDER="$LLM_PROVIDER" \
+        CLK_OPENWEBUI_ENDPOINT="$OPENWEBUI_URL" \
+        CLK_OPENWEBUI_API_KEY="$OPENWEBUI_API_KEY" \
+        CLK_OPENWEBUI_MODEL="$DEFAULT_MODEL" \
+        "$CLK_DIR/.venv/bin/python" -m clk_harness.api \
+            >"${TMPDIR:-/tmp}/bwui-runall-clk.log" 2>&1
+    ) &
+    PIDS+=($!)
 
-# AutoGUI (dry-run)
-(
-    cd "$AUTOGUI_DIR"
-    AUTOGUI_DRY_RUN=true \
-    AUTOGUI_API_PORT=$AUTOGUI_PORT \
-    OPENWEBUI_BASE_URL="$OPENWEBUI_URL" \
-    OPENWEBUI_API_KEY="$OPENWEBUI_API_KEY" \
-    OPENWEBUI_MODEL="$DEFAULT_MODEL" \
-    "$AUTOGUI_DIR/.venv/bin/python" api.py \
-        >"${TMPDIR:-/tmp}/bwui-runall-autogui.log" 2>&1
-) &
-PIDS+=($!)
+    # AutoGUI (dry-run)
+    (
+        cd "$AUTOGUI_DIR"
+        AUTOGUI_DRY_RUN=true \
+        AUTOGUI_API_PORT=$AUTOGUI_PORT \
+        OPENWEBUI_BASE_URL="$OPENWEBUI_URL" \
+        OPENWEBUI_API_KEY="$OPENWEBUI_API_KEY" \
+        OPENWEBUI_MODEL="$DEFAULT_MODEL" \
+        "$AUTOGUI_DIR/.venv/bin/python" api.py \
+            >"${TMPDIR:-/tmp}/bwui-runall-autogui.log" 2>&1
+    ) &
+    PIDS+=($!)
 
-# OSScreenObserver (mock)
-(
-    cd "$OSSO_DIR"
-    "$OSSO_DIR/.venv/bin/python" main.py --mock --mode inspect \
-        >"${TMPDIR:-/tmp}/bwui-runall-osso.log" 2>&1
-) &
-PIDS+=($!)
+    # OSScreenObserver (mock)
+    (
+        cd "$OSSO_DIR"
+        "$OSSO_DIR/.venv/bin/python" main.py --mock --mode inspect \
+            >"${TMPDIR:-/tmp}/bwui-runall-osso.log" 2>&1
+    ) &
+    PIDS+=($!)
 
-# BetterWebUI — test mode on so /api/test/reset is available
-(
-    cd "$REPO_ROOT"
-    PORT=$BWUI_PORT \
-    BWUI_TEST_MODE=1 \
-    BWUI_DATA_DIR="${TMPDIR:-/tmp}/bwui-runall-data" \
-    CLK_BASE_URL="http://localhost:$CLK_PORT" \
-    AUTOGUI_BASE_URL="http://localhost:$AUTOGUI_PORT" \
-    OSSO_BASE_URL="http://localhost:$OSSO_PORT" \
-    "$REPO_ROOT/.venv/bin/python" app.py \
-        >"${TMPDIR:-/tmp}/bwui-runall-bwui.log" 2>&1
-) &
-PIDS+=($!)
+    # BetterWebUI — test mode on so /api/test/reset is available
+    (
+        cd "$REPO_ROOT"
+        PORT=$BWUI_PORT \
+        BWUI_TEST_MODE=1 \
+        BWUI_DATA_DIR="${TMPDIR:-/tmp}/bwui-runall-data" \
+        CLK_BASE_URL="http://localhost:$CLK_PORT" \
+        AUTOGUI_BASE_URL="http://localhost:$AUTOGUI_PORT" \
+        OSSO_BASE_URL="http://localhost:$OSSO_PORT" \
+        "$REPO_ROOT/.venv/bin/python" app.py \
+            >"${TMPDIR:-/tmp}/bwui-runall-bwui.log" 2>&1
+    ) &
+    PIDS+=($!)
 
-echo ""
-echo "=== Waiting for services ==="
-wait_for "CognitiveLoopKernel" "http://localhost:$CLK_PORT/api/healthz" 60 \
-    || err "CLK never came up — see ${TMPDIR:-/tmp}/bwui-runall-clk.log"
-wait_for "AutoGUI"             "http://localhost:$AUTOGUI_PORT/api/healthz" 60 \
-    || err "AutoGUI never came up — see ${TMPDIR:-/tmp}/bwui-runall-autogui.log"
-wait_for "OSScreenObserver"    "http://localhost:$OSSO_PORT/api/healthz" 60 \
-    || err "OSSO never came up — see ${TMPDIR:-/tmp}/bwui-runall-osso.log"
-wait_for "BetterWebUI"         "http://localhost:$BWUI_PORT/api/health" 90 \
-    || err "BetterWebUI never came up — see ${TMPDIR:-/tmp}/bwui-runall-bwui.log"
+    echo ""
+    echo "=== Waiting for services ==="
+    wait_for "CognitiveLoopKernel" "http://localhost:$CLK_PORT/api/healthz" 60 \
+        || err "CLK never came up — see ${TMPDIR:-/tmp}/bwui-runall-clk.log"
+    wait_for "AutoGUI"             "http://localhost:$AUTOGUI_PORT/api/healthz" 60 \
+        || err "AutoGUI never came up — see ${TMPDIR:-/tmp}/bwui-runall-autogui.log"
+    wait_for "OSScreenObserver"    "http://localhost:$OSSO_PORT/api/healthz" 60 \
+        || err "OSSO never came up — see ${TMPDIR:-/tmp}/bwui-runall-osso.log"
+    wait_for "BetterWebUI"         "http://localhost:$BWUI_PORT/api/health" 90 \
+        || err "BetterWebUI never came up — see ${TMPDIR:-/tmp}/bwui-runall-bwui.log"
+else
+    echo ""
+    echo "=== Skipping service startup (--skip-services) — using already-running services ==="
+    echo "  BetterWebUI expected at http://localhost:$BWUI_PORT"
+    wait_for "BetterWebUI" "http://localhost:$BWUI_PORT/api/health" 30 \
+        || err "BetterWebUI not reachable at localhost:$BWUI_PORT — is the docker stack running?"
+fi
 
 # Pre-configure BetterWebUI via /api/config so onboarding doesn't appear.
 echo ""
@@ -310,8 +323,12 @@ info "✓ BetterWebUI configured"
 
 # ── Stage 4: Python tests ────────────────────────────────────────────────────
 if [[ $SKIP_PYTHON -eq 0 ]]; then
+    # Prefer the local venv's pytest; fall back to system pytest (e.g. in CI
+    # where --skip-services bypasses venv creation but pip already ran).
+    PYTEST_CMD="$REPO_ROOT/.venv/bin/pytest"
+    [[ -x "$PYTEST_CMD" ]] || PYTEST_CMD="python3 -m pytest"
     run_stage "[1/4] Python tests (pytest)" \
-        "$REPO_ROOT/.venv/bin/pytest" tests/ --ignore=tests/playwright -q
+        $PYTEST_CMD tests/ --ignore=tests/playwright -q
 fi
 
 # ── Stage 5: Playwright deps (one-shot) ──────────────────────────────────────

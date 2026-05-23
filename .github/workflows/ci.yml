@@ -360,17 +360,20 @@ jobs:
           OPENWEBUI_BASE_URL: http://localhost:3000
           OPENWEBUI_API_KEY: ${{ steps.ow.outputs.key }}
           OPENWEBUI_MODEL: tinyllama:1.1b
+          # Docker BetterWebUI is on port 8080; skip local service startup.
+          BWUI_PORT: "8080"
         run: |
           # Pre-seed deploy/.env so --no-wizard works.
-          cat > deploy/.env <<EOF
-          OPENWEBUI_BASE_URL=$OPENWEBUI_BASE_URL
-          OPENWEBUI_API_KEY=$OPENWEBUI_API_KEY
-          OPENWEBUI_MODEL=$OPENWEBUI_MODEL
-          EOF
+          {
+            echo "OPENWEBUI_BASE_URL=${OPENWEBUI_BASE_URL}"
+            echo "OPENWEBUI_API_KEY=${OPENWEBUI_API_KEY}"
+            echo "OPENWEBUI_MODEL=${OPENWEBUI_MODEL}"
+          } > deploy/.env
           chmod +x scripts/run-all-tests.sh
-          # --docker-compose lets the runner tear down the e2e stack on exit
-          # (success, failure, or signal).
-          ./scripts/run-all-tests.sh --no-wizard --keep-going \
+          # --skip-services: CLK/AutoGUI/OSSO/BetterWebUI already running in docker;
+          # skip local clone/venv/start and run tests against the docker stack.
+          # --docker-compose tears down the stack on exit.
+          ./scripts/run-all-tests.sh --no-wizard --keep-going --skip-services \
               --docker-compose deploy/docker-compose.e2e.yml
 
       - name: Upload Playwright UI report on failure

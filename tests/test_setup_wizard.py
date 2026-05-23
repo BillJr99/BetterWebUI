@@ -638,9 +638,12 @@ class TestPrintEnv:
 
     def test_exits_2_when_url_missing(self, tmp_path):
         env = tmp_path / ".env"  # absent
+        import os
+        clean = {k: v for k, v in os.environ.items()
+                 if k not in ("OPENWEBUI_BASE_URL", "OPENWEBUI_API_KEY", "OPENWEBUI_MODEL")}
         result = subprocess.run(
             [sys.executable, str(WIZARD), "--print-env", "--env-file", str(env)],
-            capture_output=True, text=True,
+            capture_output=True, text=True, env=clean,
         )
         assert result.returncode == 2
         assert "OPENWEBUI_BASE_URL" in result.stderr
@@ -668,9 +671,12 @@ class TestPrintEnv:
 class TestNonInteractive:
     def test_missing_url_fails_fast_with_no_prompts(self, tmp_path):
         env = tmp_path / ".env"  # absent — should trigger missing-required path
+        import os
+        clean = {k: v for k, v in os.environ.items()
+                 if k not in ("OPENWEBUI_BASE_URL", "OPENWEBUI_API_KEY", "OPENWEBUI_MODEL")}
         result = subprocess.run(
             [sys.executable, str(WIZARD), "--non-interactive", "--env-file", str(env)],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True, text=True, timeout=5, env=clean,
         )
         assert result.returncode == 2
         assert "missing required" in result.stderr.lower()

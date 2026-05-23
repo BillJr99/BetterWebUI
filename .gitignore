@@ -45,3 +45,6 @@ tests/playwright/test-results/
 
 # OpenWebUI auto-generated secret key (created at startup; never commit)
 .webui_secret_key
+
+# Runtime env file written by the wizard / CI (contains API keys)
+deploy/.env
