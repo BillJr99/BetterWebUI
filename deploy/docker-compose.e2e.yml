@@ -29,6 +29,9 @@ services:
     ports:
       - "3000:3000"
     environment:
+      # start.sh defaults PORT to 8080; override so the container app
+      # binds 3000, matching the port mapping and the healthcheck below.
+      PORT: "3000"
       OLLAMA_BASE_URL: http://ollama:11434
       WEBUI_SECRET_KEY: bwui-e2e-test-secret
       ENV: dev
@@ -38,11 +41,11 @@ services:
     volumes:
       - openwebui-data:/app/backend/data
     healthcheck:
-      # OpenWebUI v0.9.5 doesn't expose /health — use /api/version, which
-      # only returns once app.state.startup_complete=True (so it doubles
-      # as a readiness check). start_period covers slow first-boot
-      # initialisation (alembic migrations, function-tool deps install).
-      test: ["CMD-SHELL", "curl -sf http://localhost:3000/api/version || exit 1"]
+      # /health is registered at the app root and returns {"status": true}
+      # immediately once uvicorn binds (no startup_complete gate).
+      # start_period covers slow first-boot (alembic migrations + HF model
+      # download + plugin install).
+      test: ["CMD-SHELL", "curl -sf http://localhost:3000/health || exit 1"]
       interval: 15s
       timeout: 10s
       retries: 20
