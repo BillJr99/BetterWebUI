@@ -317,7 +317,10 @@ jobs:
           OPENWEBUI_MODEL=$OPENWEBUI_MODEL
           EOF
           chmod +x scripts/run-all-tests.sh
-          ./scripts/run-all-tests.sh --no-wizard --keep-going
+          # --docker-compose lets the runner tear down the e2e stack on exit
+          # (success, failure, or signal).
+          ./scripts/run-all-tests.sh --no-wizard --keep-going \
+              --docker-compose deploy/docker-compose.e2e.yml
 
       - name: Upload Playwright UI report on failure
         if: failure()
@@ -327,6 +330,6 @@ jobs:
           path: tests/playwright/ui-report
           retention-days: 7
 
-      - name: Stop docker stack
+      - name: Stop docker stack (safety net)
         if: always()
-        run: docker compose -f deploy/docker-compose.e2e.yml down -v
+        run: docker compose -f deploy/docker-compose.e2e.yml down -v || true

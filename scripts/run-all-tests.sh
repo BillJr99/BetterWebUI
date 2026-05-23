@@ -17,6 +17,10 @@
 #   ./scripts/run-all-tests.sh --reconfigure     # force re-prompt
 #   ./scripts/run-all-tests.sh --skip-ui         # skip browser UI tests
 #   ./scripts/run-all-tests.sh --keep-going      # don't fail-fast
+#   ./scripts/run-all-tests.sh --docker          # bring up + tear down deploy/docker-compose.e2e.yml
+#   ./scripts/run-all-tests.sh --docker-compose deploy/docker-compose.e2e.yml
+#                                                # tear down a specific test compose file on exit
+#                                                # (also via BWUI_TEST_COMPOSE_FILE env var)
 #   ./scripts/run-all-tests.sh -- --grep settings  # passes "--grep settings" to playwright
 
 set -uo pipefail
@@ -44,6 +48,8 @@ SKIP_PLAYWRIGHT=0
 SKIP_UI=0
 SKIP_SMOKE=0
 KEEP_GOING=0
+DOCKER_UP=0
+DOCKER_COMPOSE_FILE="${BWUI_TEST_COMPOSE_FILE:-}"
 PLAYWRIGHT_EXTRA=()
 
 while [[ $# -gt 0 ]]; do
@@ -55,9 +61,18 @@ while [[ $# -gt 0 ]]; do
         --skip-ui)        SKIP_UI=1; shift ;;
         --skip-smoke)     SKIP_SMOKE=1; shift ;;
         --keep-going)     KEEP_GOING=1; shift ;;
+        --docker)
+            DOCKER_UP=1
+            DOCKER_COMPOSE_FILE="$REPO_ROOT/deploy/docker-compose.e2e.yml"
+            shift
+            ;;
+        --docker-compose)
+            DOCKER_COMPOSE_FILE="$2"
+            shift 2
+            ;;
         --) shift; PLAYWRIGHT_EXTRA=("$@"); break ;;
         -h|--help)
-            sed -n '2,22p' "$0"
+            sed -n '2,25p' "$0"
             exit 0
             ;;
         *) echo "Unknown flag: $1" >&2; exit 1 ;;
@@ -77,6 +92,14 @@ cleanup() {
         kill "$pid" 2>/dev/null || true
     done
     wait 2>/dev/null || true
+
+    if [[ -n "$DOCKER_COMPOSE_FILE" ]]; then
+        if [[ -f "$DOCKER_COMPOSE_FILE" ]] && command -v docker >/dev/null 2>&1; then
+            echo "=== Tearing down docker stack ($DOCKER_COMPOSE_FILE) ==="
+            docker compose -f "$DOCKER_COMPOSE_FILE" down -v --remove-orphans \
+                2>/dev/null || true
+        fi
+    fi
 }
 trap cleanup EXIT INT TERM
 
@@ -128,6 +151,17 @@ run_stage() {
 for cmd in python3 git node npm curl; do
     command -v "$cmd" >/dev/null 2>&1 || err "$cmd is required but not found in PATH"
 done
+
+# ── Optional: bring up the docker-based testing stack (Ollama + OpenWebUI) ────
+if [[ $DOCKER_UP -eq 1 ]]; then
+    command -v docker >/dev/null 2>&1 \
+        || err "--docker requires the docker CLI in PATH"
+    [[ -f "$DOCKER_COMPOSE_FILE" ]] \
+        || err "Compose file not found: $DOCKER_COMPOSE_FILE"
+    echo "=== Bringing up docker stack ($DOCKER_COMPOSE_FILE) ==="
+    docker compose -f "$DOCKER_COMPOSE_FILE" up -d --build --wait \
+        || err "docker compose up failed"
+fi
 
 # ── Stage 0: configuration via the shared wizard ──────────────────────────────
 echo "=== BetterWebUI Unified Test Runner ==="
