@@ -13,11 +13,9 @@ import { defineConfig, devices } from '@playwright/test';
 
 export default defineConfig({
   testDir: './ui',
-  // 16 min per test: chat-basic does up to 2 model round-trips per case
-  // (new-chat test) and chat-multimodal sends a base64 image that bloats
-  // tinyllama's context to ~5 min/turn on a 2-core CI runner. 960 s = 2×
-  // the per-turn response budget, leaving room for setup + a second turn.
-  timeout: 960_000,
+  // When BWUI_MOCK_CHAT=1 chat turns complete in ~100ms; 120 s is generous.
+  // Without mock (real model on CI), keep the old 960 s budget for slow turns.
+  timeout: process.env.BWUI_MOCK_CHAT === '1' ? 120_000 : 960_000,
   expect: { timeout: 30_000 },
   retries: 0,             // No retries: slow tests already use generous timeouts;
                           // retries double CI time without adding diagnostic value.

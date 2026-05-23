@@ -368,6 +368,7 @@ if [[ $SKIP_UI -eq 0 ]]; then
         OPENWEBUI_BASE_URL='$OPENWEBUI_URL' \
         OPENWEBUI_API_KEY='$OPENWEBUI_API_KEY' \
         DEFAULT_MODEL='$DEFAULT_MODEL' \
+        BWUI_MOCK_CHAT=1 \
         npx playwright test --config ui.config.ts ${PLAYWRIGHT_EXTRA[*]:-}
     "
 fi

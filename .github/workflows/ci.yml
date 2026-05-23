@@ -394,6 +394,10 @@ jobs:
           OPENWEBUI_MODEL: tinyllama:1.1b
           # OLLAMA_MODEL is read by e2e/chat.spec.ts to target a specific model.
           OLLAMA_MODEL: tinyllama:1.1b
+          # Mock the LLM for UI tests so chat turns complete in ~100ms.
+          # The e2e suite (local.config.ts) does NOT read this flag — it uses the
+          # real model so we keep end-to-end coverage of the actual LLM path.
+          BWUI_MOCK_CHAT: "1"
           # Docker BetterWebUI is on port 8080; skip local service startup.
           BWUI_PORT: "8080"
         run: |

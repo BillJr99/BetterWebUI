@@ -43,6 +43,12 @@ SKILLS_DIR = ROOT / "skills"
 # output so the test suite can complete in reasonable CI time without a GPU.
 _TEST_MODE = os.environ.get("BWUI_TEST_MODE") == "1"
 _TEST_MAX_TOKENS = int(os.environ.get("BWUI_TEST_MAX_TOKENS", "30"))
+
+# Runtime-toggleable mock for UI tests (only active when _TEST_MODE=1).
+# Enabled via POST /api/test/mock-chat so the e2e tests (which use a real
+# model) can share the same container without being affected.
+_mock_chat_enabled: bool = False
+_mock_chat_text: str = "Mock response."
 UPLOADS_DIR = DATA_DIR / "uploads"
 CHECKPOINTS_DIR = DATA_DIR / "checkpoints"
 TASKS_DIR = DATA_DIR / "tasks"
@@ -1770,6 +1776,21 @@ async def call_openwebui_audio(text: str, voice: str, config: dict) -> dict:
 
 async def chat_complete(messages: list, model: str, config: dict, chat_id: str = "") -> tuple[str, dict]:
     """Returns (text, usage_dict)."""
+    if _TEST_MODE and _mock_chat_enabled:
+        last_user = next(
+            (m.get("content", "") for m in reversed(messages) if m.get("role") == "user"), ""
+        )
+        if isinstance(last_user, list):
+            last_user = " ".join(
+                p.get("text", "") for p in last_user if isinstance(p, dict) and p.get("type") == "text"
+            )
+        if "fenced markdown code block" in last_user or ("Reply with exactly" in last_user and "```" in last_user):
+            text = "```\nhello\n```"
+        elif "LaTeX" in last_user and ("$E" in last_user or "mc^2" in last_user):
+            text = "$E = mc^2$"
+        else:
+            text = _mock_chat_text
+        return text, {"prompt_tokens": 1, "completion_tokens": len(text.split()), "total_tokens": len(text.split()) + 1, "elapsed_ms": 10}
     base = normalize_base_url(config["base_url"])
     profile = active_profile(config)
     headers = {"Authorization": f"Bearer {config.get('api_key', '')}"}
@@ -4446,6 +4467,24 @@ async def test_reset():
     _session_trusted_commands.clear()
     _command_explanation_cache.clear()
     return {"ok": True, "wiped": wiped}
+
+
+@app.post("/api/test/mock-chat")
+async def test_mock_chat(request: Request):
+    """Toggle the chat mock on/off at runtime. Only available when BWUI_TEST_MODE=1.
+
+    Body: {"enabled": true, "response": "optional custom text"}
+    Enabling makes chat_complete() return the canned response instantly so UI
+    tests exercise rendering/flow without waiting for a real model.
+    """
+    global _mock_chat_enabled, _mock_chat_text
+    if os.environ.get("BWUI_TEST_MODE") != "1":
+        raise HTTPException(status_code=404, detail="Not Found")
+    body = await request.json()
+    _mock_chat_enabled = bool(body.get("enabled", True))
+    if "response" in body:
+        _mock_chat_text = str(body["response"])
+    return {"mock_chat": _mock_chat_enabled, "response": _mock_chat_text}
 
 
 # --- Health ---
