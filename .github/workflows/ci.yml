@@ -342,17 +342,17 @@ jobs:
       - name: Create OpenWebUI admin + API key
         id: ow
         run: |
-          # First signup wins admin in dev mode.
-          curl -sf -X POST http://localhost:3000/api/v1/auths/signup \
+          # Signup creates the admin account; the response includes the JWT directly.
+          SIGNUP=$(curl -s -X POST http://localhost:3000/api/v1/auths/signup \
                -H 'Content-Type: application/json' \
-               -d '{"name":"CI","email":"ci@bwui.test","password":"bwui-ci-pass"}' || true
-          TOKEN=$(curl -sf -X POST http://localhost:3000/api/v1/auths/signin \
-               -H 'Content-Type: application/json' \
-               -d '{"email":"ci@bwui.test","password":"bwui-ci-pass"}' \
-               | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])")
-          KEY=$(curl -sf -X POST http://localhost:3000/api/v1/auths/api_key \
+               -d '{"name":"CI","email":"ci@bwui.test","password":"bwui-ci-pass"}')
+          echo "signup role: $(echo "$SIGNUP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('role','?'))" 2>/dev/null)"
+          TOKEN=$(echo "$SIGNUP" | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])")
+          # Try dedicated API key; fall back to JWT bearer token if unavailable.
+          KEY=$(curl -s -X POST http://localhost:3000/api/v1/auths/api_key \
                -H "Authorization: Bearer $TOKEN" \
-               | python3 -c "import sys,json; print(json.load(sys.stdin)['api_key'])")
+               | python3 -c "import sys,json; print(json.load(sys.stdin).get('api_key',''))" 2>/dev/null || echo "")
+          [ -z "$KEY" ] && KEY="$TOKEN"
           echo "key=$KEY" >> $GITHUB_OUTPUT
 
       - name: Run unified test runner
