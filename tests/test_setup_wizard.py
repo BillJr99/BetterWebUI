@@ -562,12 +562,49 @@ class TestSubsystemEnvMap:
         assert out["CLK_OPENWEBUI_ENDPOINT"] == "http://ow.example"
         assert out["CLK_OPENWEBUI_API_KEY"]  == "sk-abc"
         assert out["CLK_OPENWEBUI_MODEL"]    == "llama3:70b"
-        assert out["CLK_PROVIDER"] == "openwebui"
+        # Default provider is openwebui (backward-compat)
+        assert out["CLK_PROVIDER"]  == "openwebui"
+        assert out["LLM_PROVIDER"]  == "openwebui"
+
+    def test_fanout_propagates_provider(self, wiz):
+        out = wiz.fanout_env("http://x", "k", "m", provider="ollama")
+        assert out["LLM_PROVIDER"] == "ollama"
+        assert out["CLK_PROVIDER"] == "ollama"
 
     def test_fanout_handles_empty_model(self, wiz):
         out = wiz.fanout_env("http://x", "k", "")
         assert out["OPENWEBUI_MODEL"] == ""
         assert out["CLK_OPENWEBUI_MODEL"] == ""
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Provider presets + picker
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestProviderPresets:
+    def test_presets_include_expected_providers(self, wiz):
+        assert set(wiz.PROVIDER_PRESETS.keys()) >= {
+            "openwebui", "ollama", "openai", "anthropic", "custom",
+        }
+
+    def test_ollama_does_not_require_key(self, wiz):
+        assert wiz.PROVIDER_PRESETS["ollama"]["key_required"] is False
+
+    def test_anthropic_skips_validation(self, wiz):
+        # Anthropic uses x-api-key, so our Bearer-based probe can't validate it.
+        assert wiz.PROVIDER_PRESETS["anthropic"]["validate"] is False
+
+    def test_pick_provider_returns_chosen_key(self, wiz):
+        with patch.object(wiz, "pick_from_list", side_effect=lambda opts, *a, **k: opts[1]):
+            chosen = wiz.pick_provider(current="openwebui")
+        # Index 1 in the preset order is "ollama" (per dict insertion order)
+        keys = list(wiz.PROVIDER_PRESETS.keys())
+        assert chosen == keys[1]
+
+    def test_pick_provider_falls_back_to_current_on_skip(self, wiz):
+        with patch.object(wiz, "pick_from_list", return_value=""):
+            chosen = wiz.pick_provider(current="ollama")
+        assert chosen == "ollama"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -644,6 +681,20 @@ class TestNonInteractive:
             "OPENWEBUI_BASE_URL=http://x\n"
             "OPENWEBUI_API_KEY=k\n"
             "OPENWEBUI_MODEL=m\n"
+        )
+        result = subprocess.run(
+            [sys.executable, str(WIZARD), "--non-interactive", "--env-file", str(env)],
+            capture_output=True, text=True, timeout=5,
+        )
+        assert result.returncode == 0, result.stderr
+
+    def test_ollama_provider_does_not_require_api_key(self, tmp_path):
+        """Ollama mode passes --non-interactive with no API key set."""
+        env = tmp_path / ".env"
+        env.write_text(
+            "LLM_PROVIDER=ollama\n"
+            "OPENWEBUI_BASE_URL=http://localhost:11434\n"
+            "OPENWEBUI_MODEL=llama3:8b\n"
         )
         result = subprocess.run(
             [sys.executable, str(WIZARD), "--non-interactive", "--env-file", str(env)],

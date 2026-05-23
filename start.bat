@@ -108,6 +108,8 @@ REM ── Convenience aliases for service-launch blocks ───────�
 set OW_URL=%OPENWEBUI_BASE_URL%
 set OW_KEY=%OPENWEBUI_API_KEY%
 set OW_MODEL=%OPENWEBUI_MODEL%
+if "%LLM_PROVIDER%"=="" set LLM_PROVIDER=openwebui
+set OW_PROVIDER=%LLM_PROVIDER%
 
 REM ── CognitiveLoopKernel ───────────────────────────────────────────────────────
 call :is_up http://localhost:%CLK_PORT%/api/healthz
@@ -116,7 +118,7 @@ if %ERRORLEVEL%==0 (
 ) else (
     echo Starting CognitiveLoopKernel...
     call :setup_venv "CognitiveLoopKernel"
-    START "BetterWebUI-CLK" /MIN cmd /c "cd /d "%~dp0CognitiveLoopKernel" && set CLK_API_PORT=%CLK_PORT% && set CLK_WORKSPACES_DIR=%CLK_WORKSPACES_DIR% && set CLK_PROVIDER=openwebui && set CLK_OPENWEBUI_ENDPOINT=%OW_URL% && set CLK_OPENWEBUI_API_KEY=%OW_KEY% && set CLK_OPENWEBUI_MODEL=%OW_MODEL% && .venv\Scripts\python.exe -m clk_harness.api"
+    START "BetterWebUI-CLK" /MIN cmd /c "cd /d "%~dp0CognitiveLoopKernel" && set CLK_API_PORT=%CLK_PORT% && set CLK_WORKSPACES_DIR=%CLK_WORKSPACES_DIR% && set CLK_PROVIDER=%OW_PROVIDER% && set CLK_OPENWEBUI_ENDPOINT=%OW_URL% && set CLK_OPENWEBUI_API_KEY=%OW_KEY% && set CLK_OPENWEBUI_MODEL=%OW_MODEL% && .venv\Scripts\python.exe -m clk_harness.api"
     set CLK_STARTED=1
 )
 
@@ -138,7 +140,7 @@ if %ERRORLEVEL%==0 (
 ) else (
     echo Starting OSScreenObserver...
     call :setup_venv "OSScreenObserver"
-    START "BetterWebUI-OSSO" /MIN cmd /c "cd /d "%~dp0OSScreenObserver" && set CLK_PROVIDER=openwebui && set CLK_OPENWEBUI_ENDPOINT=%OW_URL% && set CLK_OPENWEBUI_API_KEY=%OW_KEY% && set CLK_OPENWEBUI_MODEL=%OW_MODEL% && .venv\Scripts\python.exe main.py"
+    START "BetterWebUI-OSSO" /MIN cmd /c "cd /d "%~dp0OSScreenObserver" && set CLK_PROVIDER=%OW_PROVIDER% && set CLK_OPENWEBUI_ENDPOINT=%OW_URL% && set CLK_OPENWEBUI_API_KEY=%OW_KEY% && set CLK_OPENWEBUI_MODEL=%OW_MODEL% && .venv\Scripts\python.exe main.py"
     set OSSO_STARTED=1
 )
 

@@ -90,6 +90,7 @@ eval "$(python3 "$SCRIPT_DIR/setup_wizard.py" \
 
 OPENWEBUI_URL="$OPENWEBUI_BASE_URL"
 DEFAULT_MODEL="${OPENWEBUI_MODEL:-}"
+LLM_PROVIDER="${LLM_PROVIDER:-openwebui}"
 
 echo ""
 
@@ -151,7 +152,7 @@ echo "=== Starting services ==="
     cd "$CLK_DIR"
     CLK_API_PORT=$CLK_PORT \
     CLK_WORKSPACES_DIR="${TMPDIR:-/tmp}/bwui-e2e-clk-workspaces" \
-    CLK_PROVIDER=openwebui \
+    CLK_PROVIDER="$LLM_PROVIDER" \
     CLK_OPENWEBUI_ENDPOINT="$OPENWEBUI_URL" \
     CLK_OPENWEBUI_API_KEY="$OPENWEBUI_API_KEY" \
     CLK_OPENWEBUI_MODEL="$DEFAULT_MODEL" \

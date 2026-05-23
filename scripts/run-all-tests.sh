@@ -189,6 +189,8 @@ fi
 # Aliases used by the launch blocks below.
 OPENWEBUI_URL="$OPENWEBUI_BASE_URL"
 DEFAULT_MODEL="${OPENWEBUI_MODEL:-}"
+# Provider is fanned out by the wizard; default to "openwebui" if absent.
+LLM_PROVIDER="${LLM_PROVIDER:-openwebui}"
 
 # ── Stage 1: ensure submodule directories exist ──────────────────────────────
 clone_or_update() {
@@ -235,7 +237,7 @@ echo "=== Starting services ==="
     cd "$CLK_DIR"
     CLK_API_PORT=$CLK_PORT \
     CLK_WORKSPACES_DIR="${TMPDIR:-/tmp}/bwui-runall-clk-workspaces" \
-    CLK_PROVIDER=openwebui \
+    CLK_PROVIDER="$LLM_PROVIDER" \
     CLK_OPENWEBUI_ENDPOINT="$OPENWEBUI_URL" \
     CLK_OPENWEBUI_API_KEY="$OPENWEBUI_API_KEY" \
     CLK_OPENWEBUI_MODEL="$DEFAULT_MODEL" \
