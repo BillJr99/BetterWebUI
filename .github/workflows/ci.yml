@@ -179,7 +179,10 @@ jobs:
       - name: Install linters
         # requirements.txt is installed so mypy sees the real (typed) fastapi /
         # httpx packages instead of treating them as Any via ignore_missing_imports.
-        run: pip install ruff==0.6.9 mypy==1.19.1 python-frontmatter -r requirements.txt
+        # types-* stubs are needed because the services./routers. overrides check
+        # untyped defs, which surfaces import-untyped for yaml (services/storage.py)
+        # and aiofiles (routers/uploads.py) unless their stubs are installed.
+        run: pip install ruff==0.6.9 mypy==1.19.1 python-frontmatter types-PyYAML types-aiofiles -r requirements.txt
 
       - name: ruff (style, imports, pyflakes)
         run: ruff check .
