@@ -1,0 +1,259 @@
+/* base.css — Design tokens (:root), accessibility themes, skip link, focus rings, typography, forms.
+   Split out of the former static/style.css (Phase 3); rules unchanged.
+   Load order matters: see the <link> sequence in index.html. */
+
+/* =============================================================================
+   BetterWebUI — parchment & ink
+
+   Palette inspired by aged paper, sepia ink, and burgundy bookbinding.
+   Typography: Lora (serif, headings & display), Inter (humanist sans, body),
+   JetBrains Mono (code).
+   ============================================================================= */
+
+:root {
+  /* Parchment surfaces */
+  --parchment:           #f3e9cf;
+  --parchment-soft:      #f7eed8;
+  --parchment-light:     #fdf6e0;
+  --parchment-pale:      #fffbed;
+  --parchment-edge:      #d8c89e;
+  --parchment-edge-soft: #e6d6ac;
+
+  /* Ink */
+  --ink:                 #2b1d10;
+  --ink-soft:            #5a4a35;
+  --ink-faint:           #8a7656;
+
+  /* Accents */
+  --accent:              #8a3324;
+  --accent-deep:         #6b2618;
+  --accent-pale:         #f0d8c8;
+  --sepia:               #8a5a2b;
+  --gold:                #b3893a;
+  --moss:                #4f6b3a;
+
+  /* Code surfaces */
+  --code-bg:             #2b1d10;
+  --code-bg-light:       #3a2918;
+  --code-text:           #f3e9cf;
+  --code-text-soft:      #c8b890;
+  --code-accent:         #d4a574;
+
+  /* Misc */
+  --warn-bg:             #f3dfa8;
+  --warn-border:         #c89c4d;
+  --shadow-sm:           0 1px 2px rgba(60, 40, 20, 0.06);
+  --shadow-md:           0 4px 14px rgba(60, 40, 20, 0.08);
+  --shadow-lg:           0 18px 40px rgba(60, 40, 20, 0.18);
+
+  --radius-sm:           4px;
+  --radius:              6px;
+  --radius-lg:           10px;
+
+  --font-serif:          "Lora", "Source Serif 4", Georgia, "Times New Roman", serif;
+  --font-sans:           "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-mono:           "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --font-dyslexic:       "OpenDyslexic", var(--font-sans);
+
+  /* Display settings (overridden by JS) */
+  --ui-font-size:        15px;
+  --ui-line-height:      1.55;
+}
+
+/* ---------- Accessibility themes ---------- */
+
+body.high-contrast {
+  --parchment:           #ffffff;
+  --parchment-soft:      #f0f0f0;
+  --parchment-light:     #ffffff;
+  --parchment-pale:      #f5f5f5;
+  --parchment-edge:      #888888;
+  --parchment-edge-soft: #aaaaaa;
+  --ink:                 #000000;
+  --ink-soft:            #111111;
+  --ink-faint:           #333333;
+  --accent:              #990000;
+  --accent-deep:         #660000;
+  --accent-pale:         #ffdddd;
+}
+
+body.dyslexic-font {
+  --font-sans:    var(--font-dyslexic);
+  --font-serif:   var(--font-dyslexic);
+}
+
+body.font-sm { --ui-font-size: 13px; }
+body.font-md { --ui-font-size: 15px; }
+body.font-lg { --ui-font-size: 17px; }
+body.font-xl { --ui-font-size: 20px; }
+
+body.lh-normal  { --ui-line-height: 1.55; }
+body.lh-relaxed { --ui-line-height: 1.75; }
+body.lh-loose   { --ui-line-height: 2.0; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+body.reduce-motion *, body.reduce-motion *::before, body.reduce-motion *::after {
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.01ms !important;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+}
+
+body {
+  font-family: var(--font-sans);
+  font-size: var(--ui-font-size);
+  line-height: var(--ui-line-height);
+  color: var(--ink);
+  background: var(--parchment);
+  background-image:
+    radial-gradient(ellipse at top left,    rgba(184, 137, 58, 0.10),  transparent 55%),
+    radial-gradient(ellipse at bottom right, rgba(138, 51, 36, 0.06),  transparent 60%);
+  background-attachment: fixed;
+  display: flex;
+  height: 100vh;
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+::selection { background: rgba(138, 51, 36, 0.20); color: var(--ink); }
+
+/* ---------- Skip link ---------- */
+
+.skip-link {
+  position: absolute;
+  top: -9999px;
+  left: 6px;
+  z-index: 9999;
+  padding: 8px 16px;
+  background: var(--accent);
+  color: var(--parchment-light);
+  border-radius: 0 0 var(--radius) var(--radius);
+  font-size: 14px;
+  font-weight: 600;
+  text-decoration: none;
+}
+.skip-link:focus {
+  top: 0;
+}
+
+/* ---------- Focus rings (visible for all interactive elements) ---------- */
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* ---------- Typography ---------- */
+
+h1, h2, h3 {
+  font-family: var(--font-serif);
+  font-weight: 600;
+  letter-spacing: -0.005em;
+  color: var(--ink);
+  margin: 0;
+}
+h1 { font-size: 22px; }
+h2 { font-size: 14px; text-transform: uppercase; letter-spacing: 0.13em;
+     font-weight: 600; color: var(--ink-soft);
+     border-bottom: 1px solid var(--parchment-edge);
+     padding-bottom: 6px; margin: 28px 0 12px 0; font-family: var(--font-sans); }
+h2:first-of-type { margin-top: 8px; }
+h3 { font-size: 16px; }
+
+em { font-family: var(--font-serif); font-style: italic; }
+
+small { color: var(--ink-faint); font-size: 12px; font-weight: 400; }
+
+/* ---------- Forms ---------- */
+
+button {
+  font: 500 14px/1 var(--font-sans);
+  border: 1px solid var(--parchment-edge);
+  background: var(--parchment-light);
+  color: var(--ink);
+  padding: 8px 14px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease, transform 0.05s ease;
+  letter-spacing: 0.005em;
+}
+button:hover {
+  background: var(--parchment-pale);
+  border-color: var(--ink-faint);
+}
+button:active { transform: translateY(1px); }
+button:disabled { opacity: 0.45; cursor: not-allowed; }
+button.primary {
+  background: var(--accent);
+  color: var(--parchment-light);
+  border-color: var(--accent);
+  box-shadow: var(--shadow-sm);
+}
+button.primary:hover { background: var(--accent-deep); border-color: var(--accent-deep); }
+
+input[type="text"],
+input[type="password"],
+input[type="search"],
+textarea,
+select {
+  width: 100%;
+  font: 400 15px/1.5 var(--font-sans);
+  padding: 9px 12px;
+  border: 1px solid var(--parchment-edge);
+  border-radius: var(--radius);
+  background: var(--parchment-light);
+  color: var(--ink);
+  outline: none;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
+}
+input:focus, textarea:focus, select:focus {
+  border-color: var(--accent);
+  background: var(--parchment-pale);
+  box-shadow: 0 0 0 3px rgba(138, 51, 36, 0.10);
+}
+textarea { resize: vertical; font-family: var(--font-sans); }
+select { cursor: pointer; appearance: none;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'><path fill='%235a4a35' d='M0 0l5 6 5-6z'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+  padding-right: 30px;
+}
+
+label {
+  display: block;
+  margin: 16px 0;
+  color: var(--ink-soft);
+  font-size: 13px;
+  font-weight: 500;
+}
+label > input,
+label > select,
+label > textarea {
+  margin-top: 6px;
+  font-size: 14px;
+  font-weight: 400;
+  color: var(--ink);
+}
+label.checkbox {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-weight: 500;
+}
+label.checkbox input { width: auto; margin: 0; }
+label small { font-weight: 400; }

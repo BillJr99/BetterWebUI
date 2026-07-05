@@ -23,7 +23,7 @@ import time
 import urllib.parse
 import uuid
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import httpx
 
@@ -37,7 +37,7 @@ OAUTH_REDIRECT_URI = f"http://localhost:{OAUTH_CALLBACK_PORT}{OAUTH_CALLBACK_PAT
 # Provider configs
 # ---------------------------------------------------------------------------
 
-_PROVIDER_META = {
+_PROVIDER_META: dict[str, dict[str, Any]] = {
     "google": {
         "auth_url": "https://accounts.google.com/o/oauth2/v2/auth",
         "token_url": "https://oauth2.googleapis.com/token",
@@ -253,9 +253,9 @@ async def _handle_callback_connection(
         if error or not code or not state:
             _send_http(writer, 400, _html_page("Connection failed", f"OAuth error: {error or 'missing code'}"))
             if state in _pending:
-                entry = _pending.pop(state)
-                if not entry["future"].done():
-                    entry["future"].set_exception(RuntimeError(f"OAuth error: {error}"))
+                failed = _pending.pop(state)
+                if not failed["future"].done():
+                    failed["future"].set_exception(RuntimeError(f"OAuth error: {error}"))
             return
 
         entry = _pending.get(state)

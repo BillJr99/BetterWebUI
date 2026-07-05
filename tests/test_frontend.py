@@ -14,8 +14,15 @@ from pathlib import Path
 
 STATIC = Path(__file__).resolve().parent.parent / "static"
 INDEX_HTML = (STATIC / "index.html").read_text(encoding="utf-8")
-STYLE_CSS = (STATIC / "style.css").read_text(encoding="utf-8")
-APP_JS = (STATIC / "app.js").read_text(encoding="utf-8")
+# style.css was split into ordered files under static/css/ (Phase 3); the
+# structural assertions below apply to the concatenation in cascade order.
+CSS_FILES = ["base.css", "layout.css", "chat.css", "components.css", "overlays.css"]
+STYLE_CSS = "\n".join((STATIC / "css" / f).read_text(encoding="utf-8") for f in CSS_FILES)
+# app.js was split into native ES modules under static/js/ (Phase 3); the
+# structural assertions below apply to the concatenated module graph.
+APP_JS_FILES = sorted((STATIC / "js").glob("*.js"))
+APP_JS = "\n".join(p.read_text(encoding="utf-8") for p in APP_JS_FILES)
+LIB_JS = (STATIC / "lib.js").read_text(encoding="utf-8")
 
 
 # ===========================================================================
@@ -120,10 +127,19 @@ class TestIndexHtml:
         assert "katex" in INDEX_HTML
 
     def test_app_js_linked(self):
-        assert "/static/app.js" in INDEX_HTML
+        # The ES-module entry point replaces the former single app.js.
+        assert '<script type="module" src="/static/js/main.js">' in INDEX_HTML
+
+    def test_lib_js_linked_before_app_js(self):
+        # lib.js defines pure helpers as globals that the module graph calls,
+        # so it must be loaded first (classic script, executes in order).
+        assert "/static/lib.js" in INDEX_HTML
+        assert INDEX_HTML.index("/static/lib.js") < INDEX_HTML.index("/static/js/main.js")
 
     def test_style_css_linked(self):
-        assert "/static/style.css" in INDEX_HTML
+        # The split stylesheets must be linked in cascade order.
+        positions = [INDEX_HTML.index(f"/static/css/{f}") for f in CSS_FILES]
+        assert positions == sorted(positions)
 
 
 # ===========================================================================
@@ -227,7 +243,9 @@ class TestAppJs:
         assert "async function api(" in APP_JS
 
     def test_has_escape_helper(self):
-        assert "function escape(" in APP_JS
+        # Pure helpers were extracted to static/lib.js (unit-tested via
+        # `node --test tests/js/`); app.js still calls them as globals.
+        assert "function escape(" in LIB_JS
 
     def test_has_render_markdown(self):
         assert "function renderMarkdownWithMath(" in APP_JS
@@ -338,3 +356,23 @@ class TestAppJs:
 
     def test_wire_events_has_mic(self):
         assert "mic-btn" in APP_JS
+
+
+# ===========================================================================
+# lib.js — extracted pure helpers
+# ===========================================================================
+
+class TestLibJs:
+    def test_has_pure_helpers(self):
+        for fn in ("escape", "humanLabelForTool", "friendlyError",
+                   "fillTemplate", "parseSSEBlock"):
+            assert f"function {fn}(" in LIB_JS, f"Missing helper: {fn}"
+
+    def test_has_commonjs_export_guard(self):
+        # Keeps lib.js require()-able from the node test runner.
+        assert "module.exports" in LIB_JS
+
+    def test_helpers_not_duplicated_in_app_js(self):
+        for fn in ("function escape(", "function humanLabelForTool(",
+                   "function friendlyError(", "function fillTemplate("):
+            assert fn not in APP_JS, f"Helper duplicated in app.js: {fn}"

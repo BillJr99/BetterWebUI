@@ -1,17 +1,19 @@
 import asyncio
-from .clients import get_clk_client, get_autogui_client, get_osso_client
+from typing import Any
+
 from . import state as svc_state
+from .clients import ServiceClient, get_autogui_client, get_clk_client, get_osso_client
 
 
 async def check_all_services() -> dict:
-    results = {}
+    results: dict[str, dict[str, Any]] = {}
     clients = {
         "clk": get_clk_client(),
         "autogui": get_autogui_client(),
         "osso": get_osso_client(),
     }
 
-    async def check(name, client):
+    async def check(name: str, client: ServiceClient) -> None:
         if not svc_state.is_enabled(name):
             results[name] = {"ok": True, "enabled": False}
             return

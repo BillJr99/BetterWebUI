@@ -78,13 +78,19 @@ jobs:
 
       - name: Verify static JS served
         run: |
-          STATUS=$(curl -so /dev/null -w "%{http_code}" http://127.0.0.1:8765/static/app.js)
-          [ "$STATUS" = "200" ] || (echo "Expected 200, got $STATUS" && exit 1)
+          for f in lib.js browser-store.js $(cd static/js && ls *.js | sed 's|^|js/|'); do
+            STATUS=$(curl -so /dev/null -w "%{http_code}" "http://127.0.0.1:8765/static/$f")
+            [ "$STATUS" = "200" ] || (echo "Expected 200 for $f, got $STATUS" && exit 1)
+            echo "OK /static/$f"
+          done
 
       - name: Verify static CSS served
         run: |
-          STATUS=$(curl -so /dev/null -w "%{http_code}" http://127.0.0.1:8765/static/style.css)
-          [ "$STATUS" = "200" ] || (echo "Expected 200, got $STATUS" && exit 1)
+          for f in style.css $(cd static/css && ls *.css | sed 's|^|css/|'); do
+            STATUS=$(curl -so /dev/null -w "%{http_code}" "http://127.0.0.1:8765/static/$f")
+            [ "$STATUS" = "200" ] || (echo "Expected 200 for $f, got $STATUS" && exit 1)
+            echo "OK /static/$f"
+          done
 
       - name: Config API responds
         run: curl -sf http://127.0.0.1:8765/api/config | python3 -m json.tool
@@ -171,29 +177,56 @@ jobs:
           cache: pip
 
       - name: Install linters
-        run: pip install pyflakes python-frontmatter
+        # requirements.txt is installed so mypy sees the real (typed) fastapi /
+        # httpx packages instead of treating them as Any via ignore_missing_imports.
+        # types-* stubs are needed because the services./routers. overrides check
+        # untyped defs, which surfaces import-untyped for yaml (services/storage.py)
+        # and aiofiles (routers/uploads.py) unless their stubs are installed.
+        run: pip install ruff==0.6.9 mypy==1.19.1 python-frontmatter types-PyYAML types-aiofiles -r requirements.txt
 
-      - name: pyflakes (syntax / undefined names)
-        run: python -m pyflakes app.py services/ tests/ scripts/setup_wizard.py
+      - name: ruff (style, imports, pyflakes)
+        run: ruff check .
+
+      - name: mypy (services/ and routers/ are fully typed; config in pyproject.toml)
+        run: mypy services/ routers/
 
       - name: Check HTML is valid UTF-8
         run: python3 -c "open('static/index.html', encoding='utf-8').read(); print('index.html OK')"
 
       - name: Check JS is valid UTF-8
-        run: python3 -c "open('static/app.js', encoding='utf-8').read(); print('app.js OK')"
+        run: |
+          python3 -c "open('static/lib.js', encoding='utf-8').read(); print('lib.js OK')"
+          python3 -c "open('static/browser-store.js', encoding='utf-8').read(); print('browser-store.js OK')"
+          python3 - <<'PYEOF'
+          from pathlib import Path
+          files = sorted(Path('static/js').glob('*.js'))
+          assert files, 'no modules found under static/js/'
+          for p in files:
+              p.read_text(encoding='utf-8')
+              print(f'{p} OK')
+          PYEOF
 
       - name: Check CSS is valid UTF-8
-        run: python3 -c "open('static/style.css', encoding='utf-8').read(); print('style.css OK')"
+        run: |
+          python3 - <<'PYEOF'
+          from pathlib import Path
+          files = [Path('static/style.css')] + sorted(Path('static/css').glob('*.css'))
+          assert len(files) >= 6, 'expected the split stylesheets under static/css/'
+          for p in files:
+              p.read_text(encoding='utf-8')
+              print(f'{p} OK')
+          PYEOF
 
       - name: Verify no Python syntax errors
         run: |
           python3 -m py_compile app.py && echo "app.py compiles OK"
-          python3 -m py_compile services/registry.py services/clients.py services/health.py services/routes.py && echo "services/ compiles OK"
+          python3 -m py_compile services/*.py && echo "services/ compiles OK"
+          python3 -m py_compile routers/*.py && echo "routers/ compiles OK"
           python3 -m py_compile scripts/setup_wizard.py && echo "scripts/setup_wizard.py compiles OK"
 
       - name: Check required files exist
         run: |
-          for f in app.py requirements.txt static/index.html static/app.js static/style.css deploy/start.sh deploy/start.bat; do
+          for f in app.py requirements.txt static/index.html static/js/main.js static/lib.js static/css/base.css static/css/layout.css static/css/chat.css static/css/components.css static/css/overlays.css deploy/start.sh deploy/start.bat; do
             [ -f "$f" ] || (echo "Missing: $f" && exit 1)
             echo "OK $f"
           done
@@ -218,6 +251,27 @@ jobs:
               sys.exit(1)
           print(f"All {len(list(Path('skills').glob('*.md')))} skill(s) valid.")
           EOF
+
+  # ---------------------------------------------------------------------------
+  # Frontend JS: eslint + node unit tests (zero-build; no node_modules needed)
+  # ---------------------------------------------------------------------------
+  js-quality:
+    name: JS lint + unit tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: eslint (flat config, self-contained — no plugins)
+        run: npx --yes eslint@10.1.0 static/ tests/js/ eslint.config.js
+
+      - name: JS unit tests (node --test)
+        run: node --test "tests/js/*.test.js"
 
   # ---------------------------------------------------------------------------
   # Docker build check

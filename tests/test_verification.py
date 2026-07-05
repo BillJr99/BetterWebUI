@@ -20,8 +20,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-import verification as v
-
+import verification as v  # noqa: E402 (import requires the sys.path setup above)
 
 # ---------------------------------------------------------------------------
 # Helpers

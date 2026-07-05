@@ -25,8 +25,7 @@ import io
 import json
 import zipfile
 
-from tests.conftest import make_skill, make_prompt, make_workspace, seed_conversation
-
+from tests.conftest import make_prompt, make_skill, make_workspace, seed_conversation
 
 # ===========================================================================
 # Config
@@ -235,6 +234,33 @@ class TestWorkspaces:
         r = client.post("/api/workspaces", json={"id": wid, "name": "New", "description": "updated"})
         assert r.status_code == 200
         assert client.get(f"/api/workspaces/{wid}").json()["name"] == "New"
+
+    def test_create_with_valid_client_supplied_id(self, client):
+        r = client.post("/api/workspaces", json={"id": "my_ws-01", "name": "Explicit ID"})
+        assert r.status_code == 200
+        assert r.json()["id"] == "my_ws-01"
+
+    def test_name_derived_slug_id_is_accepted(self, client):
+        # No id supplied → server slugs the name; result must be usable.
+        wid = client.post("/api/workspaces", json={"name": "Research Tasks"}).json()["id"]
+        assert wid == "research-tasks"
+        assert client.get(f"/api/workspaces/{wid}").status_code == 200
+
+    def test_reject_id_with_double_quote(self, client):
+        r = client.post("/api/workspaces", json={"id": 'ab"cd', "name": "Injection"})
+        assert r.status_code == 400
+
+    def test_reject_id_with_angle_brackets(self, client):
+        r = client.post("/api/workspaces", json={"id": "a<script>b", "name": "Injection"})
+        assert r.status_code == 400
+
+    def test_reject_id_with_space(self, client):
+        r = client.post("/api/workspaces", json={"id": "has space", "name": "Injection"})
+        assert r.status_code == 400
+
+    def test_reject_overlong_id(self, client):
+        r = client.post("/api/workspaces", json={"id": "a" * 65, "name": "Too Long"})
+        assert r.status_code == 400
 
     def test_delete_workspace(self, client):
         wid = make_workspace(client)["id"]
@@ -681,6 +707,33 @@ class TestApprove:
 
 
 # ===========================================================================
+# File-picker responses
+# ===========================================================================
+
+class TestFileResponse:
+    def test_unknown_request_id_returns_404(self, client):
+        r = client.post("/api/file-response", json={"request_id": "ghost", "files": []})
+        assert r.status_code == 404
+
+    def test_non_local_caller_rejected(self, client):
+        """A remote host must not be able to resolve in-flight file-picker
+        requests (mirrors the local-caller guard on /api/approve and
+        /api/session/trust). We simulate a non-local caller by making the
+        shared guard raise, then confirm the endpoint enforces it (403)
+        before touching file_responses."""
+        from unittest.mock import patch
+
+        from fastapi import HTTPException
+
+        def _deny(_request):
+            raise HTTPException(403, "This endpoint is limited to local callers.")
+
+        with patch("services.session._require_local_caller", side_effect=_deny):
+            r = client.post("/api/file-response", json={"request_id": "x", "files": []})
+        assert r.status_code == 403
+
+
+# ===========================================================================
 # Project file APIs
 # ===========================================================================
 
@@ -843,6 +896,7 @@ class TestDeleteFileTool:
 
     def _run_tool(self, call, mode="trusted"):
         import asyncio
+
         import app as app_module
         events = []
 
@@ -916,3 +970,83 @@ class TestDeleteFileTool:
         assert result.get("path") == "target.txt"
         import os
         assert not os.path.isabs(result.get("path", ""))
+
+
+# ===========================================================================
+# Structured error envelopes + request IDs
+# ===========================================================================
+
+class TestErrorEnvelopes:
+    """Every error response carries {"error": {code, message, hint,
+    request_id}} plus the legacy top-level "detail", and every response —
+    success or failure — echoes an X-Request-ID header."""
+
+    ENVELOPE_KEYS = {"code", "message", "hint", "request_id"}
+
+    def test_404_returns_envelope(self, client):
+        r = client.get("/api/skills/does-not-exist")
+        assert r.status_code == 404
+        body = r.json()
+        assert set(body["error"].keys()) == self.ENVELOPE_KEYS
+        assert body["error"]["code"] == "not_found"
+        assert body["error"]["message"]
+        # Legacy shape is preserved for older callers.
+        assert body["detail"] == body["error"]["message"]
+        assert r.headers["X-Request-ID"] == body["error"]["request_id"]
+
+    def test_unknown_route_404_returns_envelope(self, client):
+        r = client.get("/api/definitely/not/a/route")
+        assert r.status_code == 404
+        body = r.json()
+        assert body["error"]["code"] == "not_found"
+        assert "X-Request-ID" in r.headers
+
+    def test_validation_error_envelope(self, client):
+        # PromptIn requires "name" and "content".
+        r = client.post("/api/system-prompts", json={"bogus": True})
+        assert r.status_code == 422
+        body = r.json()
+        assert set(body["error"].keys()) == self.ENVELOPE_KEYS
+        assert body["error"]["code"] == "validation_error"
+        assert body["error"]["hint"]  # points at the first offending field
+        # FastAPI's standard list-of-errors detail is preserved.
+        assert isinstance(body["detail"], list) and body["detail"]
+        assert r.headers["X-Request-ID"] == body["error"]["request_id"]
+
+    def test_400_returns_envelope(self, client):
+        # /api/chat without configured base_url/api_key raises HTTPException(400).
+        r = client.post("/api/chat", json={"messages": [{"role": "user", "content": "hi"}]})
+        assert r.status_code == 400
+        body = r.json()
+        assert body["error"]["code"] == "bad_request"
+        assert body["error"]["message"] == body["detail"]
+
+    def test_success_response_carries_request_id_header(self, client):
+        r = client.get("/api/health")
+        assert r.status_code == 200
+        assert r.headers.get("X-Request-ID")
+
+    def test_client_supplied_request_id_is_echoed(self, client):
+        r = client.get("/api/health", headers={"X-Request-ID": "rid-from-client-123"})
+        assert r.headers["X-Request-ID"] == "rid-from-client-123"
+
+    def test_forced_internal_error_returns_envelope(self, isolated_dirs):
+        """A crash inside a route handler produces a 500 envelope (catch-all
+        Exception handler), not a bare traceback response."""
+        from unittest.mock import AsyncMock, patch
+
+        from fastapi.testclient import TestClient
+
+        import app as app_module
+
+        with patch.object(app_module.mcp_manager, "status", side_effect=RuntimeError("boom")):
+            with patch("app.mcp_manager.reconcile", new_callable=AsyncMock):
+                with TestClient(app_module.app, raise_server_exceptions=False) as c:
+                    r = c.get("/api/health")
+        assert r.status_code == 500
+        body = r.json()
+        assert set(body["error"].keys()) == self.ENVELOPE_KEYS
+        assert body["error"]["code"] == "internal_error"
+        assert "boom" in body["error"]["message"]
+        assert body["error"]["hint"]
+        assert r.headers["X-Request-ID"] == body["error"]["request_id"]

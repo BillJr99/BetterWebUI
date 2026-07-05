@@ -1,8 +1,10 @@
 import json
 import logging
+from collections.abc import AsyncIterator
 
 import httpx
-from .registry import get_services, ServiceEndpoint
+
+from .registry import ServiceEndpoint, get_services
 
 logger = logging.getLogger("betterwebui.services.clients")
 
@@ -37,7 +39,7 @@ class CLKClient(ServiceClient):
             r = await c.get(f"/api/research/{task_id}")
             return r.json()
 
-    async def stream_task(self, task_id: str):
+    async def stream_task(self, task_id: str) -> AsyncIterator[str]:
         """Async generator yielding raw SSE lines from CLK."""
         ep = get_services()["clk"]
         async with httpx.AsyncClient(base_url=ep.base_url, timeout=ep.timeout) as c:
@@ -80,7 +82,7 @@ class AutoGUIClient(ServiceClient):
             r = await c.get(f"/api/task/{task_id}")
             return r.json()
 
-    async def stream_task(self, task_id: str):
+    async def stream_task(self, task_id: str) -> AsyncIterator[str]:
         ep = get_services()["autogui"]
         async with httpx.AsyncClient(base_url=ep.base_url, timeout=ep.timeout) as c:
             async with c.stream("GET", f"/api/task/{task_id}/stream") as r:
@@ -138,7 +140,7 @@ class OSSOClient(ServiceClient):
             return r.json()
 
     async def description(self, window_index: int | None = None, mode: str = "accessibility") -> dict:
-        params = {"mode": mode}
+        params: dict[str, str | int] = {"mode": mode}
         if window_index is not None:
             params["window_index"] = window_index
         async with self._client() as c:
