@@ -520,6 +520,8 @@
       crossorigin="anonymous"
     ></script>
 
+    <!-- lib.js must load first: it defines pure helpers app.js calls. -->
+    <script src="/static/lib.js"></script>
     <script src="/static/browser-store.js"></script>
     <script src="/static/app.js"></script>
   </body>

@@ -52,72 +52,8 @@ async function api(path, opts = {}) {
   return res.json();
 }
 
-function escape(s) {
-  return String(s ?? "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
-}
-
-// Map technical errors to language a non-technical user can act on.
-// `raw` is the raw error (Error object or string); `context` is an
-// optional short description ("uploading a file", "loading models").
-// Map raw tool names to verbs a non-technical user understands.
-function humanLabelForTool(tool) {
-  const map = {
-    execute_shell: "Running a command",
-    cli_call: "Running a CLI shortcut",
-    write_file: "Writing a file",
-    delete_file: "Deleting a file",
-    read_file: "Reading a file",
-    generate_image: "Drawing an image",
-    generate_audio: "Generating speech",
-    web_search: "Searching the web",
-    mcp_call: "Calling a connected service",
-    autogui_task: "Controlling the desktop",
-    clk_research: "Researching",
-    screen_action: "Acting on the screen",
-    update_task_plan: "Updating the plan",
-    load_skill: "Loading a skill",
-  };
-  return map[tool] || tool;
-}
-
-function friendlyError(raw, context) {
-  const text = (raw && (raw.message || raw.body || raw.toString())) || "";
-  const status = raw && raw.status;
-  const ctx = context ? ` while ${context}` : "";
-  if (status === 401 || /unauthor/i.test(text)) {
-    return `Your API key isn't being accepted${ctx}. Open Settings → Connection to update it.`;
-  }
-  if (status === 403) {
-    return `You don't have permission for that${ctx}. Check Settings → Connection.`;
-  }
-  if (status === 404) {
-    return `Not found${ctx}. The item may have been deleted or moved.`;
-  }
-  if (status === 413 || /too large|payload/i.test(text)) {
-    return `That file is too large${ctx}. Try a smaller one.`;
-  }
-  if (status === 429 || /rate limit|too many/i.test(text)) {
-    return `The server is rate-limiting requests${ctx}. Wait a moment and try again.`;
-  }
-  if (/timeout|timed out|took too long/i.test(text)) {
-    return `The server took too long to respond${ctx}. Try again, or pick a smaller task.`;
-  }
-  if (/network|failed to fetch|ECONN|ENOTFOUND/i.test(text)) {
-    return `Couldn't reach the server${ctx}. Check your internet connection.`;
-  }
-  if (/invalid data|broken|undecodable/i.test(text)) {
-    return `The result came back broken${ctx}. Click "Try again" or rephrase.`;
-  }
-  if (status >= 500) {
-    return `The server hit an error${ctx}. Try again in a moment.`;
-  }
-  // Last resort: trim and de-jargon the raw text.
-  return text.replace(/^\d+:\s*/, "").slice(0, 200) || `Something went wrong${ctx}.`;
-}
+// escape(), humanLabelForTool(), friendlyError(), fillTemplate() and
+// parseSSEBlock() live in static/lib.js (pure helpers, unit-tested with node).
 
 // ---------------------------------------------------------------------------
 // Local-download helpers
@@ -915,7 +851,7 @@ function openWorkspaceDialog(workspace) {
     ],
   });
 
-  let pendingWorkspaceFiles = [...(w.files || [])];
+  const pendingWorkspaceFiles = [...(w.files || [])];
   const renderFiles = () => {
     $("#dlg-files").innerHTML = pendingWorkspaceFiles
       .map((f, i) => `<div class="file-row"><span>${escape(f.filename)}</span> <small>${escape(f.content_type || "")}</small> <button type="button" data-remove-file="${i}">×</button></div>`)
@@ -1169,10 +1105,6 @@ function openMcpFieldsDialog(reg) {
       },
     ],
   });
-}
-
-function fillTemplate(tpl, values) {
-  return String(tpl).replace(/\{(\w+)\}/g, (_, k) => values[k] ?? "");
 }
 
 function openMcpCustomDialog() {
@@ -2903,13 +2835,7 @@ async function consumeSSE(res, onEvent) {
     while ((idx = buf.indexOf("\n\n")) !== -1) {
       const block = buf.slice(0, idx);
       buf = buf.slice(idx + 2);
-      const lines = block.split("\n");
-      let eventName = "message";
-      let dataStr = "";
-      for (const ln of lines) {
-        if (ln.startsWith("event:")) eventName = ln.slice(6).trim();
-        else if (ln.startsWith("data:")) dataStr += ln.slice(5).trim();
-      }
+      const { event: eventName, data: dataStr } = parseSSEBlock(block);
       if (!dataStr) continue;
       try {
         await onEvent(eventName, JSON.parse(dataStr));
