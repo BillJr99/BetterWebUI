@@ -15,7 +15,10 @@ from pathlib import Path
 STATIC = Path(__file__).resolve().parent.parent / "static"
 INDEX_HTML = (STATIC / "index.html").read_text(encoding="utf-8")
 STYLE_CSS = (STATIC / "style.css").read_text(encoding="utf-8")
-APP_JS = (STATIC / "app.js").read_text(encoding="utf-8")
+# app.js was split into native ES modules under static/js/ (Phase 3); the
+# structural assertions below apply to the concatenated module graph.
+APP_JS_FILES = sorted((STATIC / "js").glob("*.js"))
+APP_JS = "\n".join(p.read_text(encoding="utf-8") for p in APP_JS_FILES)
 LIB_JS = (STATIC / "lib.js").read_text(encoding="utf-8")
 
 
@@ -121,13 +124,14 @@ class TestIndexHtml:
         assert "katex" in INDEX_HTML
 
     def test_app_js_linked(self):
-        assert "/static/app.js" in INDEX_HTML
+        # The ES-module entry point replaces the former single app.js.
+        assert '<script type="module" src="/static/js/main.js">' in INDEX_HTML
 
     def test_lib_js_linked_before_app_js(self):
-        # lib.js defines pure helpers as globals that app.js calls, so it
-        # must be loaded first.
+        # lib.js defines pure helpers as globals that the module graph calls,
+        # so it must be loaded first (classic script, executes in order).
         assert "/static/lib.js" in INDEX_HTML
-        assert INDEX_HTML.index("/static/lib.js") < INDEX_HTML.index("/static/app.js")
+        assert INDEX_HTML.index("/static/lib.js") < INDEX_HTML.index("/static/js/main.js")
 
     def test_style_css_linked(self):
         assert "/static/style.css" in INDEX_HTML

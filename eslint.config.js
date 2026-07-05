@@ -110,6 +110,9 @@ const errorRules = {
 
 module.exports = [
   {
+    // Classic scripts: lib.js (pure helpers, also require()-able from Node
+    // tests) and browser-store.js (defines the `bws` global). Loaded before
+    // the module graph so their globals are visible inside every module.
     files: ["static/*.js"],
     languageOptions: {
       ecmaVersion: 2022,
@@ -117,6 +120,21 @@ module.exports = [
       globals: { ...browserGlobals, ...appGlobals },
     },
     rules: errorRules,
+  },
+  {
+    // Native ES modules (zero-build). Split out of the former static/app.js.
+    files: ["static/js/**/*.js"],
+    languageOptions: {
+      ecmaVersion: 2022,
+      sourceType: "module",
+      globals: { ...browserGlobals, ...appGlobals },
+    },
+    rules: {
+      ...errorRules,
+      // Imported bindings are read-only live views; assigning to one is a
+      // runtime TypeError, so catch it statically.
+      "no-import-assign": "error",
+    },
   },
   {
     files: ["tests/js/**/*.js", "eslint.config.js"],

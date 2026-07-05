@@ -520,9 +520,11 @@
       crossorigin="anonymous"
     ></script>
 
-    <!-- lib.js must load first: it defines pure helpers app.js calls. -->
+    <!-- Classic scripts first: lib.js defines pure helper globals and
+         browser-store.js the `bws` global; the ES-module graph uses both. -->
     <script src="/static/lib.js"></script>
     <script src="/static/browser-store.js"></script>
-    <script src="/static/app.js"></script>
+    <!-- Zero-build native ES modules (split of the former app.js). -->
+    <script type="module" src="/static/js/main.js"></script>
   </body>
 </html>

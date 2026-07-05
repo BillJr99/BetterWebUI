@@ -78,8 +78,11 @@ jobs:
 
       - name: Verify static JS served
         run: |
-          STATUS=$(curl -so /dev/null -w "%{http_code}" http://127.0.0.1:8765/static/app.js)
-          [ "$STATUS" = "200" ] || (echo "Expected 200, got $STATUS" && exit 1)
+          for f in lib.js browser-store.js $(cd static/js && ls *.js | sed 's|^|js/|'); do
+            STATUS=$(curl -so /dev/null -w "%{http_code}" "http://127.0.0.1:8765/static/$f")
+            [ "$STATUS" = "200" ] || (echo "Expected 200 for $f, got $STATUS" && exit 1)
+            echo "OK /static/$f"
+          done
 
       - name: Verify static CSS served
         run: |
@@ -186,8 +189,16 @@ jobs:
 
       - name: Check JS is valid UTF-8
         run: |
-          python3 -c "open('static/app.js', encoding='utf-8').read(); print('app.js OK')"
           python3 -c "open('static/lib.js', encoding='utf-8').read(); print('lib.js OK')"
+          python3 -c "open('static/browser-store.js', encoding='utf-8').read(); print('browser-store.js OK')"
+          python3 - <<'PYEOF'
+          from pathlib import Path
+          files = sorted(Path('static/js').glob('*.js'))
+          assert files, 'no modules found under static/js/'
+          for p in files:
+              p.read_text(encoding='utf-8')
+              print(f'{p} OK')
+          PYEOF
 
       - name: Check CSS is valid UTF-8
         run: python3 -c "open('static/style.css', encoding='utf-8').read(); print('style.css OK')"
@@ -201,7 +212,7 @@ jobs:
 
       - name: Check required files exist
         run: |
-          for f in app.py requirements.txt static/index.html static/app.js static/lib.js static/style.css deploy/start.sh deploy/start.bat; do
+          for f in app.py requirements.txt static/index.html static/js/main.js static/lib.js static/style.css deploy/start.sh deploy/start.bat; do
             [ -f "$f" ] || (echo "Missing: $f" && exit 1)
             echo "OK $f"
           done
