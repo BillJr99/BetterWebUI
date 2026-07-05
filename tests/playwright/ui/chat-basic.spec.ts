@@ -62,16 +62,27 @@ test('conversation persists across page reload', async ({ page, request }) => {
 
   await page.reload();
   await dismissOnboardingIfPresent(page);
-  // Wait for the sidebar to populate, then explicitly select the most recent
-  // conversation (the server sorts newest-first).
-  await page.locator('#conversation-list li').first().waitFor({ state: 'visible', timeout: 30_000 });
+  // init() in main.js runs loadConversations() (which populates the sidebar)
+  // and THEN newChat(), which calls renderMessages() with an empty message
+  // list — wiping #messages. If we click a conversation after the list
+  // populates but before init finishes, init's newChat() fires afterwards and
+  // clears the messages we just rendered, detaching the assistant bubble
+  // mid-read (a one-shot innerText() then times out on the stale node — the
+  // exact flake this test used to hit). Wait for the network to go idle so
+  // init has fully settled — its last step, checkOnboarding(), issues a fetch —
+  // before we interact.
+  await page.waitForLoadState('networkidle').catch(() => {});
+  // Select the most recent real conversation. Skip the "No chats yet" hint,
+  // which is also an <li>, so a momentarily-empty list can't be clicked as if
+  // it were a conversation. The server sorts newest-first.
+  const firstConv = page.locator('#conversation-list li:not(.hint)').first();
+  await firstConv.waitFor({ state: 'visible', timeout: 30_000 });
   console.log('[reload] conversation list populated, clicking first item');
-  await page.locator('#conversation-list li').first().click();
-  // Wait for the persisted assistant message to render before reading it, so a
-  // slow load surfaces as a clear "element never appeared" rather than an
-  // opaque innerText timeout.
+  await firstConv.click();
+  // Assert the persisted assistant text with retrying expect() assertions that
+  // re-resolve the locator on each poll, so a transient re-render/detach during
+  // load can't fail the read the way a one-shot innerText() would.
   const assistant = page.locator('#messages .message.assistant .content').last();
-  await assistant.waitFor({ state: 'visible', timeout: 60_000 });
-  const after = await assistant.innerText();
-  expect(after.trim().length).toBeGreaterThan(0);
+  await expect(assistant).toBeVisible({ timeout: 60_000 });
+  await expect(assistant).not.toHaveText(/^\s*$/, { timeout: 30_000 });
 });
