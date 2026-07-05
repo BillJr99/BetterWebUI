@@ -8,6 +8,7 @@ per-turn telemetry, onboarding wizard, and accessibility features.
 
 import asyncio
 import base64
+import contextvars
 import hashlib
 import io
 import ipaddress
@@ -29,11 +30,15 @@ import aiofiles
 import httpx
 import yaml
 from fastapi import FastAPI, HTTPException, UploadFile, File, Request
-from fastapi.responses import FileResponse, StreamingResponse, Response
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 import verification as _verification
+from services.errors import code_for_status, error_envelope
 
 ROOT = Path(__file__).parent.resolve()
 DATA_DIR = ROOT / "data"
@@ -69,11 +74,26 @@ WORKSPACE_DIR = Path(os.environ.get("WORKSPACE_DIR", str(ROOT / "workspace")))
 for d in (DATA_DIR, SKILLS_DIR, UPLOADS_DIR, CHECKPOINTS_DIR, TASKS_DIR, WORKSPACE_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
+# Per-request correlation id. Set by the request-id middleware for the
+# duration of each HTTP request (tasks spawned inside a request inherit it),
+# echoed back in the X-Request-ID response header, embedded in error
+# envelopes, and stamped onto every log record via _RequestIdFilter.
+_request_id_ctx: contextvars.ContextVar[str] = contextvars.ContextVar("request_id", default="-")
+
+
+class _RequestIdFilter(logging.Filter):
+    """Stamp the current request id onto every log record."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.request_id = _request_id_ctx.get()
+        return True
+
+
 _LOG_DIR = ROOT / "logs"
 _LOG_DIR.mkdir(parents=True, exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    format="%(asctime)s [%(levelname)s] %(name)s [rid=%(request_id)s]: %(message)s",
     handlers=[
         logging.handlers.RotatingFileHandler(
             _LOG_DIR / "betterwebui.log",
@@ -84,6 +104,8 @@ logging.basicConfig(
         logging.StreamHandler(),
     ],
 )
+for _handler in logging.getLogger().handlers:
+    _handler.addFilter(_RequestIdFilter())
 logger = logging.getLogger("betterwebui")
 
 
@@ -795,8 +817,13 @@ class MCPManager:
                                 tok = _get_oauth_tok(provider, DATA_DIR)
                                 if tok and tok.get("access_token"):
                                     env[k] = str(v).replace(placeholder, tok["access_token"])
-            except Exception:
-                pass
+            except Exception as exc:
+                # Non-fatal: the server starts without the substituted token,
+                # but the user should be able to see why their OAuth-backed
+                # MCP server is misbehaving.
+                logging.getLogger("betterwebui.mcp").warning(
+                    "OAuth token substitution failed for MCP server '%s': %s", name, exc,
+                )
             client = MCPStdioClient(
                 name=name,
                 command=s.get("command", ""),
@@ -2001,8 +2028,10 @@ async def execute_tool(call: dict, config: dict, send_event, mode: str = "approv
                     result["mime"] = "image/png"
                     result["data_b64"] = base64.b64encode(_img_path.read_bytes()).decode("ascii")
                     _img_path.unlink()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    # Non-fatal: the shell result still goes back to the chat,
+                    # just without the inline plot attachment.
+                    logger.warning("Auto-capture of plot %s failed: %s", _img_path, exc)
                 break
         return result
 
@@ -2085,7 +2114,11 @@ async def execute_tool(call: dict, config: dict, send_event, mode: str = "approv
                     checkpoint_id = _checkpoint_file(
                         wid, filename, dest.read_bytes()
                     )
-            except Exception:
+            except Exception as exc:
+                # Non-fatal: the write proceeds, it just won't have an Undo
+                # checkpoint. Log so a user asking "where did Undo go?" has
+                # a trail.
+                logger.warning("Checkpoint of %s failed before write: %s", filename, exc)
                 checkpoint_id = None
 
         # Write to disk
@@ -2525,6 +2558,75 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="BetterWebUI", lifespan=lifespan)
+
+
+# ---------------------------------------------------------------------------
+# Request IDs + structured error envelopes
+#
+# Every request gets a correlation id (client-supplied X-Request-ID is
+# honored, otherwise a fresh uuid). It is echoed in the X-Request-ID response
+# header, tagged onto log records via _request_id_ctx, and embedded in every
+# error envelope so a user-visible failure can be matched to server logs.
+#
+# Error responses use the canonical envelope from services/errors.py:
+#     {"error": {"code", "message", "hint", "request_id"}}
+# The legacy top-level "detail" field is preserved for backward compatibility
+# (the frontend and older callers read it).
+# ---------------------------------------------------------------------------
+
+@app.middleware("http")
+async def _request_id_middleware(request: Request, call_next):
+    rid = request.headers.get("X-Request-ID") or uuid.uuid4().hex
+    request.state.request_id = rid
+    token = _request_id_ctx.set(rid)
+    try:
+        response = await call_next(request)
+    finally:
+        _request_id_ctx.reset(token)
+    response.headers["X-Request-ID"] = rid
+    return response
+
+
+def _request_id_of(request: Request) -> str:
+    rid = getattr(request.state, "request_id", None)
+    return rid or _request_id_ctx.get()
+
+
+@app.exception_handler(StarletteHTTPException)
+async def _http_exception_handler(request: Request, exc: StarletteHTTPException):
+    rid = _request_id_of(request)
+    detail = exc.detail
+    message = detail if isinstance(detail, str) else json.dumps(jsonable_encoder(detail))
+    body = error_envelope(code_for_status(exc.status_code), message, request_id=rid)
+    body["detail"] = jsonable_encoder(detail)
+    headers = {**(exc.headers or {}), "X-Request-ID": rid}
+    return JSONResponse(body, status_code=exc.status_code, headers=headers)
+
+
+@app.exception_handler(RequestValidationError)
+async def _validation_exception_handler(request: Request, exc: RequestValidationError):
+    rid = _request_id_of(request)
+    errors = jsonable_encoder(exc.errors())
+    first = errors[0] if errors else {}
+    loc = ".".join(str(p) for p in first.get("loc", []))
+    hint = f"Check '{loc}': {first.get('msg', '')}" if loc else None
+    body = error_envelope("validation_error", "Request validation failed.", hint=hint, request_id=rid)
+    body["detail"] = errors
+    return JSONResponse(body, status_code=422, headers={"X-Request-ID": rid})
+
+
+@app.exception_handler(Exception)
+async def _unhandled_exception_handler(request: Request, exc: Exception):
+    rid = _request_id_of(request)
+    logger.exception("Unhandled error on %s %s", request.method, request.url.path)
+    body = error_envelope(
+        "internal_error",
+        f"{type(exc).__name__}: {exc}",
+        hint="Try again; if this keeps happening check the server logs.",
+        request_id=rid,
+    )
+    body["detail"] = body["error"]["message"]
+    return JSONResponse(body, status_code=500, headers={"X-Request-ID": rid})
 
 
 @app.get("/")
@@ -4334,7 +4436,10 @@ async def chat(req: ChatRequest, request: Request):
                             return shot["image_b64"]
                         if isinstance(shot, dict) and shot.get("data_b64"):
                             return shot["data_b64"]
-                    except Exception:
+                    except Exception as exc:
+                        # Optional capability — verification proceeds without
+                        # a screenshot, but leave a trace for debugging.
+                        logger.debug("Verification screenshot unavailable: %s", exc)
                         return None
                     return None
 
@@ -4351,7 +4456,13 @@ async def chat(req: ChatRequest, request: Request):
                         chat_complete=chat_complete,
                         screenshot_provider=_screenshot_provider,
                     )
-                except Exception:
+                except Exception as exc:
+                    # Verification is best-effort: fall back to the unverified
+                    # result rather than failing the whole turn, but say so.
+                    logger.warning(
+                        "Verification of tool '%s' crashed (%s: %s); using unverified result.",
+                        call["tool"], type(exc).__name__, exc,
+                    )
                     result, vtrace = first_result, None
 
                 # Emit tool_result first so the UI's checkpoint cache is
@@ -4373,8 +4484,8 @@ async def chat(req: ChatRequest, request: Request):
                                 "tool": call["tool"],
                                 "trace": vtrace.to_dict(),
                             }) + "\n")
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logger.warning("Could not append verification audit log for %s: %s", cid, exc)
 
                 # Auto-engage consensus when the judge fails repeatedly on
                 # the same turn — surfaced via a notice, then we recompute.

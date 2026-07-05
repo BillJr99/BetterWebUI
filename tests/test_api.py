@@ -916,3 +916,81 @@ class TestDeleteFileTool:
         assert result.get("path") == "target.txt"
         import os
         assert not os.path.isabs(result.get("path", ""))
+
+
+# ===========================================================================
+# Structured error envelopes + request IDs
+# ===========================================================================
+
+class TestErrorEnvelopes:
+    """Every error response carries {"error": {code, message, hint,
+    request_id}} plus the legacy top-level "detail", and every response —
+    success or failure — echoes an X-Request-ID header."""
+
+    ENVELOPE_KEYS = {"code", "message", "hint", "request_id"}
+
+    def test_404_returns_envelope(self, client):
+        r = client.get("/api/skills/does-not-exist")
+        assert r.status_code == 404
+        body = r.json()
+        assert set(body["error"].keys()) == self.ENVELOPE_KEYS
+        assert body["error"]["code"] == "not_found"
+        assert body["error"]["message"]
+        # Legacy shape is preserved for older callers.
+        assert body["detail"] == body["error"]["message"]
+        assert r.headers["X-Request-ID"] == body["error"]["request_id"]
+
+    def test_unknown_route_404_returns_envelope(self, client):
+        r = client.get("/api/definitely/not/a/route")
+        assert r.status_code == 404
+        body = r.json()
+        assert body["error"]["code"] == "not_found"
+        assert "X-Request-ID" in r.headers
+
+    def test_validation_error_envelope(self, client):
+        # PromptIn requires "name" and "content".
+        r = client.post("/api/system-prompts", json={"bogus": True})
+        assert r.status_code == 422
+        body = r.json()
+        assert set(body["error"].keys()) == self.ENVELOPE_KEYS
+        assert body["error"]["code"] == "validation_error"
+        assert body["error"]["hint"]  # points at the first offending field
+        # FastAPI's standard list-of-errors detail is preserved.
+        assert isinstance(body["detail"], list) and body["detail"]
+        assert r.headers["X-Request-ID"] == body["error"]["request_id"]
+
+    def test_400_returns_envelope(self, client):
+        # /api/chat without configured base_url/api_key raises HTTPException(400).
+        r = client.post("/api/chat", json={"messages": [{"role": "user", "content": "hi"}]})
+        assert r.status_code == 400
+        body = r.json()
+        assert body["error"]["code"] == "bad_request"
+        assert body["error"]["message"] == body["detail"]
+
+    def test_success_response_carries_request_id_header(self, client):
+        r = client.get("/api/health")
+        assert r.status_code == 200
+        assert r.headers.get("X-Request-ID")
+
+    def test_client_supplied_request_id_is_echoed(self, client):
+        r = client.get("/api/health", headers={"X-Request-ID": "rid-from-client-123"})
+        assert r.headers["X-Request-ID"] == "rid-from-client-123"
+
+    def test_forced_internal_error_returns_envelope(self, isolated_dirs):
+        """A crash inside a route handler produces a 500 envelope (catch-all
+        Exception handler), not a bare traceback response."""
+        from unittest.mock import AsyncMock, patch
+        from fastapi.testclient import TestClient
+        import app as app_module
+
+        with patch.object(app_module.mcp_manager, "status", side_effect=RuntimeError("boom")):
+            with patch("app.mcp_manager.reconcile", new_callable=AsyncMock):
+                with TestClient(app_module.app, raise_server_exceptions=False) as c:
+                    r = c.get("/api/health")
+        assert r.status_code == 500
+        body = r.json()
+        assert set(body["error"].keys()) == self.ENVELOPE_KEYS
+        assert body["error"]["code"] == "internal_error"
+        assert "boom" in body["error"]["message"]
+        assert body["error"]["hint"]
+        assert r.headers["X-Request-ID"] == body["error"]["request_id"]
