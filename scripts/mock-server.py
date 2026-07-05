@@ -17,6 +17,7 @@ import asyncio
 import json
 import threading
 import time
+
 import uvicorn
 from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
@@ -227,7 +228,8 @@ if __name__ == "__main__":
         t.start()
 
     # Wait for all servers to come up
-    import urllib.request, urllib.error
+    import urllib.error
+    import urllib.request
     for name, url in [
         ("OpenWebUI",  "http://localhost:11000/health"),
         ("CLK",        "http://localhost:8001/api/healthz"),

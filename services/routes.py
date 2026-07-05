@@ -10,10 +10,10 @@ import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
-from .clients import get_clk_client, get_autogui_client, get_osso_client
+from . import state as svc_state
+from .clients import get_autogui_client, get_clk_client, get_osso_client
 from .health import check_all_services
 from .sse_proxy import proxy_sse
-from . import state as svc_state
 
 _VALID_SERVICE_NAMES = frozenset({"clk", "autogui", "osso"})
 
@@ -40,7 +40,7 @@ def register_routes(app: FastAPI) -> None:  # noqa: C901
     # ── Health ────────────────────────────────────────────────
 
     @app.get("/api/services/health")
-    async def services_health():
+    async def services_health() -> dict:
         results = await check_all_services()
         all_ok = all(v["ok"] for v in results.values())
         return {"ok": all_ok, "services": results}
@@ -48,20 +48,20 @@ def register_routes(app: FastAPI) -> None:  # noqa: C901
     # ── Enable / Disable ─────────────────────────────────────
 
     @app.get("/api/services/status")
-    async def services_status():
+    async def services_status() -> dict:
         """Return the enabled/disabled state for each service."""
         enabled_map = svc_state.get_all()
         return {"services": {name: {"enabled": enabled} for name, enabled in enabled_map.items()}}
 
     @app.post("/api/services/{name}/enable")
-    async def enable_service(name: str):
+    async def enable_service(name: str) -> dict:
         if name not in _VALID_SERVICE_NAMES:
             raise HTTPException(status_code=404, detail=f"Unknown service: {name}")
         svc_state.set_enabled(name, True)
         return {"ok": True, "service": name, "enabled": True}
 
     @app.post("/api/services/{name}/disable")
-    async def disable_service(name: str):
+    async def disable_service(name: str) -> dict:
         if name not in _VALID_SERVICE_NAMES:
             raise HTTPException(status_code=404, detail=f"Unknown service: {name}")
         svc_state.set_enabled(name, False)
@@ -70,7 +70,7 @@ def register_routes(app: FastAPI) -> None:  # noqa: C901
     # ── CognitiveLoopKernel ──────────────────────────────────────
 
     @app.get("/api/services/clk/workflows")
-    async def clk_list_workflows():
+    async def clk_list_workflows() -> dict:
         _require_enabled("clk")
         client = get_clk_client()
         try:
@@ -79,7 +79,7 @@ def register_routes(app: FastAPI) -> None:  # noqa: C901
             raise _unreachable("clk", e) from e
 
     @app.post("/api/services/clk/research")
-    async def clk_start_research(body: dict):
+    async def clk_start_research(body: dict) -> dict:
         _require_enabled("clk")
         client = get_clk_client()
         try:
@@ -93,7 +93,7 @@ def register_routes(app: FastAPI) -> None:  # noqa: C901
             raise _unreachable("clk", e) from e
 
     @app.get("/api/services/clk/research/{task_id}")
-    async def clk_get_task(task_id: str):
+    async def clk_get_task(task_id: str) -> dict:
         _require_enabled("clk")
         client = get_clk_client()
         try:
@@ -102,7 +102,7 @@ def register_routes(app: FastAPI) -> None:  # noqa: C901
             raise _unreachable("clk", e) from e
 
     @app.get("/api/services/clk/research/{task_id}/stream")
-    async def clk_stream_task(task_id: str, request: Request):
+    async def clk_stream_task(task_id: str, request: Request) -> StreamingResponse:
         _require_enabled("clk")
         client = get_clk_client()
         return StreamingResponse(
@@ -112,7 +112,7 @@ def register_routes(app: FastAPI) -> None:  # noqa: C901
         )
 
     @app.get("/api/services/clk/research/{task_id}/artifacts")
-    async def clk_list_artifacts(task_id: str):
+    async def clk_list_artifacts(task_id: str) -> dict:
         _require_enabled("clk")
         client = get_clk_client()
         try:
@@ -121,7 +121,7 @@ def register_routes(app: FastAPI) -> None:  # noqa: C901
             raise _unreachable("clk", e) from e
 
     @app.post("/api/services/clk/research/{task_id}/cancel")
-    async def clk_cancel_task(task_id: str):
+    async def clk_cancel_task(task_id: str) -> dict:
         _require_enabled("clk")
         client = get_clk_client()
         try:
@@ -132,7 +132,7 @@ def register_routes(app: FastAPI) -> None:  # noqa: C901
     # ── AutoGUI ───────────────────────────────────────────────
 
     @app.post("/api/services/autogui/task")
-    async def autogui_start_task(body: dict):
+    async def autogui_start_task(body: dict) -> dict:
         _require_enabled("autogui")
         client = get_autogui_client()
         try:
@@ -151,7 +151,7 @@ def register_routes(app: FastAPI) -> None:  # noqa: C901
             raise _unreachable("autogui", e) from e
 
     @app.get("/api/services/autogui/task/{task_id}")
-    async def autogui_get_task(task_id: str):
+    async def autogui_get_task(task_id: str) -> dict:
         _require_enabled("autogui")
         client = get_autogui_client()
         try:
@@ -160,7 +160,7 @@ def register_routes(app: FastAPI) -> None:  # noqa: C901
             raise _unreachable("autogui", e) from e
 
     @app.get("/api/services/autogui/task/{task_id}/stream")
-    async def autogui_stream_task(task_id: str, request: Request):
+    async def autogui_stream_task(task_id: str, request: Request) -> StreamingResponse:
         _require_enabled("autogui")
         client = get_autogui_client()
         return StreamingResponse(
@@ -170,7 +170,7 @@ def register_routes(app: FastAPI) -> None:  # noqa: C901
         )
 
     @app.post("/api/services/autogui/task/{task_id}/cancel")
-    async def autogui_cancel_task(task_id: str):
+    async def autogui_cancel_task(task_id: str) -> dict:
         _require_enabled("autogui")
         client = get_autogui_client()
         try:
@@ -179,7 +179,7 @@ def register_routes(app: FastAPI) -> None:  # noqa: C901
             raise _unreachable("autogui", e) from e
 
     @app.get("/api/services/autogui/tools")
-    async def autogui_list_tools():
+    async def autogui_list_tools() -> dict:
         _require_enabled("autogui")
         client = get_autogui_client()
         try:
@@ -190,7 +190,7 @@ def register_routes(app: FastAPI) -> None:  # noqa: C901
     # ── OSScreenObserver ───────────────────────────────────────
 
     @app.get("/api/services/osso/windows")
-    async def osso_windows():
+    async def osso_windows() -> dict:
         _require_enabled("osso")
         client = get_osso_client()
         try:
@@ -199,7 +199,7 @@ def register_routes(app: FastAPI) -> None:  # noqa: C901
             raise _unreachable("osso", e) from e
 
     @app.get("/api/services/osso/description")
-    async def osso_description(window_index: int | None = None, mode: str = "accessibility"):
+    async def osso_description(window_index: int | None = None, mode: str = "accessibility") -> dict:
         _require_enabled("osso")
         client = get_osso_client()
         try:
@@ -211,7 +211,7 @@ def register_routes(app: FastAPI) -> None:  # noqa: C901
             raise _unreachable("osso", e) from e
 
     @app.get("/api/services/osso/structure")
-    async def osso_structure(window_index: int | None = None):
+    async def osso_structure(window_index: int | None = None) -> dict:
         _require_enabled("osso")
         client = get_osso_client()
         try:
@@ -220,7 +220,7 @@ def register_routes(app: FastAPI) -> None:  # noqa: C901
             raise _unreachable("osso", e) from e
 
     @app.get("/api/services/osso/screenshot")
-    async def osso_screenshot(window_index: int | None = None):
+    async def osso_screenshot(window_index: int | None = None) -> dict:
         _require_enabled("osso")
         client = get_osso_client()
         try:
@@ -229,7 +229,7 @@ def register_routes(app: FastAPI) -> None:  # noqa: C901
             raise _unreachable("osso", e) from e
 
     @app.post("/api/services/osso/action")
-    async def osso_action(body: dict):
+    async def osso_action(body: dict) -> dict:
         _require_enabled("osso")
         client = get_osso_client()
         try:
@@ -238,7 +238,7 @@ def register_routes(app: FastAPI) -> None:  # noqa: C901
             raise _unreachable("osso", e) from e
 
     @app.get("/api/services/osso/capabilities")
-    async def osso_capabilities():
+    async def osso_capabilities() -> dict:
         _require_enabled("osso")
         client = get_osso_client()
         try:
@@ -249,7 +249,7 @@ def register_routes(app: FastAPI) -> None:  # noqa: C901
     # ── LLM Tool Specs ──────────────────────────────────────────────
 
     @app.get("/api/services/tools")
-    async def services_tool_specs():
+    async def services_tool_specs() -> dict:
         """Return OpenAI function-calling tool specs for all integrated services."""
         return {
             "tools": [

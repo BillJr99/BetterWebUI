@@ -5,6 +5,7 @@ Mocks httpx calls using unittest.mock.patch so tests run fully offline.
 from __future__ import annotations
 
 import asyncio
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -73,20 +74,26 @@ class TestRegistry:
 
     def test_env_override_clk(self, monkeypatch):
         monkeypatch.setenv("CLK_BASE_URL", "http://my-clk:9999")
-        import importlib, services.registry as reg
+        import importlib
+
+        import services.registry as reg
         importlib.reload(reg)
         svcs = reg.get_services()
         assert svcs["clk"].base_url == "http://my-clk:9999"
 
     def test_env_override_autogui(self, monkeypatch):
         monkeypatch.setenv("AUTOGUI_BASE_URL", "http://my-autogui:7777")
-        import importlib, services.registry as reg
+        import importlib
+
+        import services.registry as reg
         importlib.reload(reg)
         assert reg.get_services()["autogui"].base_url == "http://my-autogui:7777"
 
     def test_env_override_osso(self, monkeypatch):
         monkeypatch.setenv("OSSO_BASE_URL", "http://my-osso:6666")
-        import importlib, services.registry as reg
+        import importlib
+
+        import services.registry as reg
         importlib.reload(reg)
         assert reg.get_services()["osso"].base_url == "http://my-osso:6666"
 
@@ -97,8 +104,8 @@ class TestRegistry:
 
 class TestServiceClientHealth:
     def test_health_returns_json(self):
-        from services.registry import get_services
         from services.clients import ServiceClient
+        from services.registry import get_services
 
         ep = get_services()["clk"]
         client = ServiceClient(ep)
@@ -112,8 +119,8 @@ class TestServiceClientHealth:
         assert result == {"status": "ok"}
 
     def test_health_calls_health_path(self):
-        from services.registry import get_services
         from services.clients import ServiceClient
+        from services.registry import get_services
 
         ep = get_services()["clk"]
         client = ServiceClient(ep)
@@ -355,6 +362,7 @@ class TestHealthCheck:
         with patch("services.clients.ServiceClient.health", new=fake_health), \
              patch("services.state.is_enabled", return_value=True):
             import importlib
+
             import services.health as health_mod
             importlib.reload(health_mod)
             results = run(health_mod.check_all_services())
@@ -369,6 +377,7 @@ class TestHealthCheck:
         with patch("services.clients.ServiceClient.health", new=fake_health), \
              patch("services.state.is_enabled", return_value=True):
             import importlib
+
             import services.health as health_mod
             importlib.reload(health_mod)
             results = run(health_mod.check_all_services())
@@ -385,6 +394,7 @@ class TestHealthCheck:
         with patch("services.clients.ServiceClient.health", new=fake_health), \
              patch("services.state.is_enabled", return_value=True):
             import importlib
+
             import services.health as health_mod
             importlib.reload(health_mod)
             results = run(health_mod.check_all_services())
@@ -407,6 +417,7 @@ class TestServicesRoutes:
     def app_client(self):
         from fastapi import FastAPI
         from fastapi.testclient import TestClient
+
         from services.routes import register_routes
 
         app = FastAPI()
@@ -692,6 +703,7 @@ class TestServiceEnableDisable:
     def app_client(self):
         from fastapi import FastAPI
         from fastapi.testclient import TestClient
+
         from services.routes import register_routes
 
         app = FastAPI()
@@ -845,6 +857,7 @@ class TestHealthWithDisabledServices:
         with patch("services.state.is_enabled", side_effect=fake_is_enabled), \
              patch("services.clients.ServiceClient.health", new=fake_health):
             import importlib
+
             import services.health as hmod
             importlib.reload(hmod)
             results = run(hmod.check_all_services())
@@ -858,6 +871,7 @@ class TestHealthWithDisabledServices:
     def test_all_disabled_health_still_ok(self):
         with patch("services.state.is_enabled", return_value=False):
             import importlib
+
             import services.health as hmod
             importlib.reload(hmod)
             results = run(hmod.check_all_services())
@@ -874,6 +888,7 @@ class TestGracefulDegradation:
     def app_client(self):
         from fastapi import FastAPI
         from fastapi.testclient import TestClient
+
         from services.routes import register_routes
 
         app = FastAPI()
@@ -931,8 +946,6 @@ class TestGracefulDegradation:
 # ===========================================================================
 # SSE proxy — error events + keepalive
 # ===========================================================================
-
-import json
 
 
 class TestProxySSE:

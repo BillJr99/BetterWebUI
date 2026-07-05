@@ -171,10 +171,15 @@ jobs:
           cache: pip
 
       - name: Install linters
-        run: pip install pyflakes python-frontmatter
+        # requirements.txt is installed so mypy sees the real (typed) fastapi /
+        # httpx packages instead of treating them as Any via ignore_missing_imports.
+        run: pip install ruff==0.6.9 mypy==1.19.1 python-frontmatter -r requirements.txt
 
-      - name: pyflakes (syntax / undefined names)
-        run: python -m pyflakes app.py services/ tests/ scripts/setup_wizard.py
+      - name: ruff (style, imports, pyflakes)
+        run: ruff check .
+
+      - name: mypy (services/ is fully typed; config in pyproject.toml)
+        run: mypy services/
 
       - name: Check HTML is valid UTF-8
         run: python3 -c "open('static/index.html', encoding='utf-8').read(); print('index.html OK')"

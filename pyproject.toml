@@ -1,0 +1,54 @@
+# Tooling configuration for BetterWebUI quality gates.
+# NOTE: this file intentionally has no [project]/[build-system] tables — the app
+# is not packaged; this exists only to configure ruff and mypy.
+
+# ---------------------------------------------------------------------------
+# ruff — style, imports, pyflakes
+# ---------------------------------------------------------------------------
+[tool.ruff]
+line-length = 120
+target-version = "py310"  # matches the minimum Python in the CI matrix
+extend-exclude = [
+    # Sibling-service submodules — never lint these from this repo.
+    "AutoGUI",
+    "CognitiveLoopKernel",
+    "OSScreenObserver",
+    # Runtime state / user content directories.
+    "data",
+    "workspace",
+    "logs",
+    # Node-based Playwright suite (no Python).
+    "tests/playwright",
+]
+
+[tool.ruff.lint]
+select = [
+    "E",  # pycodestyle errors (includes E722 bare-except)
+    "F",  # pyflakes
+    "W",  # pycodestyle warnings
+    "I",  # isort import ordering
+]
+ignore = [
+    # E501 (line too long): the existing codebase deliberately favours long
+    # single lines (some run past 200 cols). Enforcing a wrap limit now would
+    # mean a mass reformat, so line length is not gated. line-length above is
+    # still used by ruff as a soft reference for other rules.
+    "E501",
+]
+
+# ---------------------------------------------------------------------------
+# mypy — lenient globally, strict for services/
+# ---------------------------------------------------------------------------
+[tool.mypy]
+# Lenient global baseline: third-party libs without stubs are not our problem.
+ignore_missing_imports = true
+# The CI gate runs `mypy services/` (see .github/workflows/ci.yml); app.py is
+# legacy-typed and is not gated yet.
+
+[[tool.mypy.overrides]]
+# services/ is fully typed: every function must have complete annotations and
+# bodies are checked even in older un-annotated helpers.
+module = "services.*"
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true

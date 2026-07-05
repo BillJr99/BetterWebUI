@@ -25,7 +25,7 @@ import json
 import logging
 import re
 import time
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field
 from typing import Any, Awaitable, Callable, Optional
 
 log = logging.getLogger("betterwebui.verification")

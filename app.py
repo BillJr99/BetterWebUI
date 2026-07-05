@@ -13,6 +13,8 @@ import hashlib
 import io
 import ipaddress
 import json
+import logging
+import logging.handlers
 import os
 import platform
 import re
@@ -20,8 +22,6 @@ import shutil
 import time
 import uuid
 import zipfile
-import logging
-import logging.handlers
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, AsyncGenerator, Optional
@@ -29,10 +29,10 @@ from typing import Any, AsyncGenerator, Optional
 import aiofiles
 import httpx
 import yaml
-from fastapi import FastAPI, HTTPException, UploadFile, File, Request
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -2284,9 +2284,10 @@ async def execute_tool(call: dict, config: dict, send_event, mode: str = "approv
     # ── Service tool calls ────────────────────────────────────────────────────
 
     if tool == "clk_research":
-        from services.clients import get_clk_client
-        from services import state as svc_state
         import httpx as _httpx
+
+        from services import state as svc_state
+        from services.clients import get_clk_client
         if not svc_state.is_enabled("clk"):
             return {"error": "CognitiveLoopKernel is disabled. Enable it in Settings > Services."}
         command = args.get("command", "run")
@@ -2316,9 +2317,10 @@ async def execute_tool(call: dict, config: dict, send_event, mode: str = "approv
             return {"error": f"CognitiveLoopKernel is enabled but could not be reached. ({e})"}
 
     if tool == "autogui_task":
-        from services.clients import get_autogui_client
-        from services import state as svc_state
         import httpx as _httpx
+
+        from services import state as svc_state
+        from services.clients import get_autogui_client
         if not svc_state.is_enabled("autogui"):
             return {"error": "AutoGUI is disabled. Enable it in Settings > Services."}
         task_desc = args.get("task") or ""
@@ -2346,9 +2348,10 @@ async def execute_tool(call: dict, config: dict, send_event, mode: str = "approv
             return {"error": f"AutoGUI is enabled but could not be reached. ({e})"}
 
     if tool == "screen_windows":
-        from services.clients import get_osso_client
-        from services import state as svc_state
         import httpx as _httpx
+
+        from services import state as svc_state
+        from services.clients import get_osso_client
         if not svc_state.is_enabled("osso"):
             return {"error": "OSScreenObserver is disabled. Enable it in Settings > Services."}
         try:
@@ -2357,9 +2360,10 @@ async def execute_tool(call: dict, config: dict, send_event, mode: str = "approv
             return {"error": f"OSScreenObserver is enabled but could not be reached. ({e})"}
 
     if tool == "screen_description":
-        from services.clients import get_osso_client
-        from services import state as svc_state
         import httpx as _httpx
+
+        from services import state as svc_state
+        from services.clients import get_osso_client
         if not svc_state.is_enabled("osso"):
             return {"error": "OSScreenObserver is disabled. Enable it in Settings > Services."}
         try:
@@ -2371,9 +2375,10 @@ async def execute_tool(call: dict, config: dict, send_event, mode: str = "approv
             return {"error": f"OSScreenObserver is enabled but could not be reached. ({e})"}
 
     if tool == "screen_screenshot":
-        from services.clients import get_osso_client
-        from services import state as svc_state
         import httpx as _httpx
+
+        from services import state as svc_state
+        from services.clients import get_osso_client
         if not svc_state.is_enabled("osso"):
             return {"error": "OSScreenObserver is disabled. Enable it in Settings > Services."}
         try:
@@ -2382,9 +2387,10 @@ async def execute_tool(call: dict, config: dict, send_event, mode: str = "approv
             return {"error": f"OSScreenObserver is enabled but could not be reached. ({e})"}
 
     if tool == "screen_action":
-        from services.clients import get_osso_client
-        from services import state as svc_state
         import httpx as _httpx
+
+        from services import state as svc_state
+        from services.clients import get_osso_client
         if not svc_state.is_enabled("osso"):
             return {"error": "OSScreenObserver is disabled. Enable it in Settings > Services."}
         action_type = args.get("action", "")
@@ -2754,8 +2760,8 @@ async def recommend_model(use_case: str = "general"):
             if m:
                 return {"recommendation": m, "reason": f"This model handles complex {use_case} tasks well."}
     else:
-        for l in light:
-            m = next((x for x in models if l in x["id"].lower()), None)
+        for lite in light:
+            m = next((x for x in models if lite in x["id"].lower()), None)
             if m:
                 return {"recommendation": m, "reason": f"This efficient model works great for {use_case}."}
     return {"recommendation": models[0], "reason": "Using the first available model."}
@@ -4583,7 +4589,8 @@ async def chat(req: ChatRequest, request: Request):
 
 # ─── Services integration ────────────────────────────────────────────────────
 
-from services.routes import register_routes as _register_service_routes
+# Imported late on purpose: routes need the fully-initialised `app` above.
+from services.routes import register_routes as _register_service_routes  # noqa: E402
 
 _register_service_routes(app)
 

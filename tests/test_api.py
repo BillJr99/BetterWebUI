@@ -25,8 +25,7 @@ import io
 import json
 import zipfile
 
-from tests.conftest import make_skill, make_prompt, make_workspace, seed_conversation
-
+from tests.conftest import make_prompt, make_skill, make_workspace, seed_conversation
 
 # ===========================================================================
 # Config
@@ -843,6 +842,7 @@ class TestDeleteFileTool:
 
     def _run_tool(self, call, mode="trusted"):
         import asyncio
+
         import app as app_module
         events = []
 
@@ -980,7 +980,9 @@ class TestErrorEnvelopes:
         """A crash inside a route handler produces a 500 envelope (catch-all
         Exception handler), not a bare traceback response."""
         from unittest.mock import AsyncMock, patch
+
         from fastapi.testclient import TestClient
+
         import app as app_module
 
         with patch.object(app_module.mcp_manager, "status", side_effect=RuntimeError("boom")):
