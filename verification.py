@@ -481,7 +481,7 @@ async def verify_and_maybe_retry(
             and chat_complete is not None
         )
         jr: Optional[JudgeReport] = None
-        if judge_should_run:
+        if judge_should_run and chat_complete is not None:
             screenshot_b64: Optional[str] = None
             if tool == "autogui_task" and screenshot_provider is not None:
                 try:

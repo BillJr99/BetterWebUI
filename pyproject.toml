@@ -52,3 +52,11 @@ module = "services.*"
 disallow_untyped_defs = true
 disallow_incomplete_defs = true
 check_untyped_defs = true
+
+[[tool.mypy.overrides]]
+# routers/ is held to the same standard as services/: complete annotations
+# on every handler, bodies checked.
+module = "routers.*"
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
