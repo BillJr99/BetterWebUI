@@ -926,3 +926,162 @@ class TestGracefulDegradation:
             r = app_client.get("/api/services/clk/research/task-123")
         assert r.status_code == 503
         assert "could not be reached" in r.json()["detail"]
+
+
+# ===========================================================================
+# SSE proxy — error events + keepalive
+# ===========================================================================
+
+import json
+
+
+class TestProxySSE:
+    def _collect(self, gen):
+        async def _run():
+            return [chunk async for chunk in gen]
+        return run(_run())
+
+    def test_clean_stream_sequences_and_done_sentinel(self):
+        from services.sse_proxy import proxy_sse
+
+        async def upstream():
+            yield '{"a": 1}'
+            yield 'not-json'
+
+        chunks = self._collect(proxy_sse(upstream()))
+        assert json.loads(chunks[0][len("data: "):]) == {"a": 1, "_seq": 0}
+        assert json.loads(chunks[1][len("data: "):]) == {"raw": "not-json", "_seq": 1}
+        assert chunks[-1] == 'data: {"_done": true}\n\n'
+
+    def test_upstream_failure_emits_error_event(self):
+        from services.sse_proxy import proxy_sse
+
+        async def upstream():
+            yield '{"a": 1}'
+            raise RuntimeError("kaboom")
+
+        chunks = self._collect(proxy_sse(upstream(), request_id="rid-42"))
+        # The good chunk still went through…
+        assert json.loads(chunks[0][len("data: "):]) == {"a": 1, "_seq": 0}
+        # …then an explicit error event, not a silent end.
+        error_chunks = [c for c in chunks if c.startswith("event: error\ndata: ")]
+        assert len(error_chunks) == 1
+        payload = json.loads(error_chunks[0].split("\ndata: ", 1)[1])
+        assert payload["error"]["code"] == "upstream_error"
+        assert "kaboom" in payload["error"]["message"]
+        assert payload["error"]["hint"]
+        assert payload["error"]["request_id"] == "rid-42"
+        # No _done sentinel after a failure.
+        assert not any("_done" in c for c in chunks)
+
+    def test_immediate_upstream_failure_emits_error_event(self):
+        from services.sse_proxy import proxy_sse
+
+        async def upstream():
+            raise RuntimeError("dead on arrival")
+            yield  # pragma: no cover — makes this an async generator
+
+        chunks = self._collect(proxy_sse(upstream()))
+        assert len(chunks) == 1
+        assert chunks[0].startswith("event: error\ndata: ")
+        payload = json.loads(chunks[0].split("\ndata: ", 1)[1])
+        assert "dead on arrival" in payload["error"]["message"]
+
+    def test_keepalive_comment_emitted_while_idle(self):
+        from services.sse_proxy import proxy_sse
+
+        async def slow_upstream():
+            await asyncio.sleep(0.3)
+            yield '{"x": 1}'
+
+        chunks = self._collect(proxy_sse(slow_upstream(), keepalive_interval=0.05))
+        keepalives = [c for c in chunks if c == ": keepalive\n\n"]
+        assert keepalives  # at least one comment while the upstream was idle
+        # Keepalives must not consume sequence numbers.
+        assert json.loads(chunks[-2][len("data: "):]) == {"x": 1, "_seq": 0}
+        assert chunks[-1] == 'data: {"_done": true}\n\n'
+
+
+# ===========================================================================
+# /api/chat SSE — structured error events
+# ===========================================================================
+
+class TestChatSSEErrors:
+    def _configure(self, client):
+        r = client.post("/api/config", json={
+            "base_url": "http://localhost:3000",
+            "api_key": "test-key",
+            "default_model": "test-model",
+        })
+        assert r.status_code == 200
+
+    @staticmethod
+    def _parse_sse(text: str) -> list[tuple[str, dict]]:
+        events = []
+        for block in text.split("\n\n"):
+            if not block.strip() or block.startswith(":"):
+                continue
+            name, data = "message", ""
+            for line in block.split("\n"):
+                if line.startswith("event:"):
+                    name = line[len("event:"):].strip()
+                elif line.startswith("data:"):
+                    data += line[len("data:"):].strip()
+            if data:
+                events.append((name, json.loads(data)))
+        return events
+
+    def test_upstream_failure_mid_chat_emits_error_envelope(self, client):
+        self._configure(client)
+        with patch("app.chat_complete", AsyncMock(side_effect=RuntimeError("model exploded"))):
+            r = client.post("/api/chat", json={
+                "messages": [{"role": "user", "content": "hi"}],
+                "mode": "trusted",
+            })
+        assert r.status_code == 200
+        assert r.headers["content-type"].startswith("text/event-stream")
+        events = self._parse_sse(r.text)
+        errors = [d for (name, d) in events if name == "error"]
+        assert len(errors) == 1
+        err = errors[0]
+        # Legacy field kept for older clients…
+        assert "model exploded" in err["message"]
+        # …plus the canonical envelope.
+        assert err["error"]["code"] == "internal_error"
+        assert "model exploded" in err["error"]["message"]
+        assert err["error"]["request_id"] == r.headers["X-Request-ID"]
+
+    def test_http_exception_mid_chat_maps_status_to_code(self, client):
+        from fastapi import HTTPException
+        self._configure(client)
+        with patch("app.chat_complete", AsyncMock(side_effect=HTTPException(502, "upstream said no"))):
+            r = client.post("/api/chat", json={
+                "messages": [{"role": "user", "content": "hi"}],
+                "mode": "trusted",
+            })
+        assert r.status_code == 200
+        events = self._parse_sse(r.text)
+        errors = [d for (name, d) in events if name == "error"]
+        assert len(errors) == 1
+        assert errors[0]["error"]["code"] == "upstream_error"
+        assert errors[0]["message"] == "upstream said no"
+
+    def test_keepalive_comments_while_chat_is_idle(self, client):
+        self._configure(client)
+
+        async def slow_complete(*args, **kwargs):
+            await asyncio.sleep(0.3)
+            return "ok", {}
+
+        with patch("app._sse_keepalive_interval", 0.05), \
+             patch("app.chat_complete", AsyncMock(side_effect=slow_complete)):
+            r = client.post("/api/chat", json={
+                "messages": [{"role": "user", "content": "hi"}],
+                "mode": "trusted",
+            })
+        assert r.status_code == 200
+        # Comment lines were emitted while the model was "thinking"…
+        assert ": keepalive\n\n" in r.text
+        # …and they didn't disturb the normal event flow.
+        events = self._parse_sse(r.text)
+        assert any(name == "done" for name, _ in events)

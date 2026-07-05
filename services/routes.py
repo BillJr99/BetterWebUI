@@ -7,7 +7,7 @@ to mount all /api/services/* endpoints onto the existing FastAPI app.
 from __future__ import annotations
 
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from .clients import get_clk_client, get_autogui_client, get_osso_client
@@ -102,11 +102,11 @@ def register_routes(app: FastAPI) -> None:  # noqa: C901
             raise _unreachable("clk", e) from e
 
     @app.get("/api/services/clk/research/{task_id}/stream")
-    async def clk_stream_task(task_id: str):
+    async def clk_stream_task(task_id: str, request: Request):
         _require_enabled("clk")
         client = get_clk_client()
         return StreamingResponse(
-            proxy_sse(client.stream_task(task_id)),
+            proxy_sse(client.stream_task(task_id), request_id=getattr(request.state, "request_id", None)),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
@@ -160,11 +160,11 @@ def register_routes(app: FastAPI) -> None:  # noqa: C901
             raise _unreachable("autogui", e) from e
 
     @app.get("/api/services/autogui/task/{task_id}/stream")
-    async def autogui_stream_task(task_id: str):
+    async def autogui_stream_task(task_id: str, request: Request):
         _require_enabled("autogui")
         client = get_autogui_client()
         return StreamingResponse(
-            proxy_sse(client.stream_task(task_id)),
+            proxy_sse(client.stream_task(task_id), request_id=getattr(request.state, "request_id", None)),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )

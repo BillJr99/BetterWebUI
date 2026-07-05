@@ -2767,10 +2767,18 @@ async function send() {
         return;
       }
       if (event === "error") {
-        const human = friendlyError({ message: data.message || "" }, "running that step");
-        const sysMsg = { role: "system-event", content: human };
+        // The server sends a structured envelope in data.error
+        // ({code, message, hint, request_id}); data.message is the legacy
+        // plain-text field kept for older servers.
+        const env = data.error || {};
+        const human = friendlyError({ message: env.message || data.message || "" }, "running that step");
+        const parts = [human];
+        if (env.hint) parts.push(env.hint);
+        if (env.request_id) parts.push(`(ref: ${env.request_id})`);
+        const sysMsg = { role: "system-event", content: parts.join(" ") };
         state.messages.push(sysMsg);
         appendMessage(sysMsg);
+        flash(human, "warn");
         return;
       }
     });

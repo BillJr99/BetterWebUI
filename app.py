@@ -39,6 +39,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 import verification as _verification
 from services.errors import code_for_status, error_envelope
+from services.sse_proxy import KEEPALIVE_INTERVAL as _sse_keepalive_interval
 
 ROOT = Path(__file__).parent.resolve()
 DATA_DIR = ROOT / "data"
@@ -4323,6 +4324,7 @@ async def chat(req: ChatRequest, request: Request):
     effective_mode = req.mode or (workspace or {}).get("mode") or cfg.get("chat_mode", "approve-each")
 
     queue: asyncio.Queue = asyncio.Queue()
+    request_id = _request_id_of(request)
     # Preserve the existing plan when resuming a conversation
     _existing_conv = load_conversations().get("conversations", {}).get(cid, {})
     current_task_plan: list = _existing_conv.get("task_plan", [])
@@ -4534,9 +4536,26 @@ async def chat(req: ChatRequest, request: Request):
                 "task_plan": current_task_plan,
             })
         except HTTPException as exc:
-            await send_event("error", {"message": str(exc.detail)})
+            detail = exc.detail if isinstance(exc.detail, str) else json.dumps(jsonable_encoder(exc.detail))
+            logger.warning("Chat turn failed (%s): %s", exc.status_code, detail)
+            # "message" is the legacy field the frontend/e2e helpers read;
+            # "error" carries the canonical envelope (see services/errors.py).
+            await send_event("error", {
+                "message": detail,
+                **error_envelope(code_for_status(exc.status_code), detail, request_id=request_id),
+            })
         except Exception as exc:
-            await send_event("error", {"message": f"{type(exc).__name__}: {exc}"})
+            logger.exception("Chat turn crashed")
+            message = f"{type(exc).__name__}: {exc}"
+            await send_event("error", {
+                "message": message,
+                **error_envelope(
+                    "internal_error",
+                    message,
+                    hint="Try again; if this keeps happening check the server logs.",
+                    request_id=request_id,
+                ),
+            })
         finally:
             await queue.put(None)
 
@@ -4545,7 +4564,14 @@ async def chat(req: ChatRequest, request: Request):
     async def event_stream() -> AsyncGenerator[bytes, None]:
         try:
             while True:
-                item = await queue.get()
+                try:
+                    item = await asyncio.wait_for(queue.get(), timeout=_sse_keepalive_interval)
+                except asyncio.TimeoutError:
+                    # Nothing to say yet (model thinking, tool running, or an
+                    # approval dialog waiting on the user) — emit an SSE
+                    # comment so proxies/browsers don't drop the connection.
+                    yield b": keepalive\n\n"
+                    continue
                 if item is None:
                     break
                 yield f"event: {item['event']}\ndata: {json.dumps(item['data'])}\n\n".encode("utf-8")
