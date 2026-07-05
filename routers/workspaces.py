@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import io
 import json
+import re
 import time
 import uuid
 import zipfile
@@ -22,6 +23,13 @@ from pydantic import BaseModel
 from services import session, skills, storage, tools
 
 router = APIRouter()
+
+# Workspace IDs end up in URLs and are embedded into HTML attributes on the
+# frontend, so a client-supplied id must be constrained to a conservative
+# allowlist to prevent HTML/attribute injection or malformed URLs. This pattern
+# is a superset of everything the server itself generates: the name-derived slug
+# keeps alnum + "-"/"_", and the uuid fallback is uuid4().hex[:8] (lowercase hex).
+_WORKSPACE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 # --- Workspaces ---
 
@@ -59,6 +67,17 @@ async def get_workspace(request: Request, wid: str) -> dict:
 @router.post("/api/workspaces")
 async def upsert_workspace(w: WorkspaceIn, request: Request) -> dict:
     session._require_local_caller(request)
+    # Workspace IDs are client-supplied and flow into URLs and HTML attributes
+    # on the frontend, so validate any explicitly-supplied id against a
+    # conservative allowlist to block HTML/attribute injection and malformed
+    # URLs. Server-generated slugs/uuids (the `w.id or ...` fallback below)
+    # already stay within this character set, so legitimate creates/updates are
+    # unaffected; only a client-provided id can trip this check.
+    if w.id is not None and not _WORKSPACE_ID_RE.match(w.id):
+        raise HTTPException(
+            400,
+            "Workspace id must be 1-64 characters of letters, digits, '-' or '_'.",
+        )
     # Reject project_root values that escape storage.WORKSPACE_DIR up front so the user
     # gets actionable feedback. Relative paths are resolved against
     # storage.WORKSPACE_DIR (e.g., "my-project" → "<workspace_dir>/my-project") rather

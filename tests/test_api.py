@@ -235,6 +235,33 @@ class TestWorkspaces:
         assert r.status_code == 200
         assert client.get(f"/api/workspaces/{wid}").json()["name"] == "New"
 
+    def test_create_with_valid_client_supplied_id(self, client):
+        r = client.post("/api/workspaces", json={"id": "my_ws-01", "name": "Explicit ID"})
+        assert r.status_code == 200
+        assert r.json()["id"] == "my_ws-01"
+
+    def test_name_derived_slug_id_is_accepted(self, client):
+        # No id supplied → server slugs the name; result must be usable.
+        wid = client.post("/api/workspaces", json={"name": "Research Tasks"}).json()["id"]
+        assert wid == "research-tasks"
+        assert client.get(f"/api/workspaces/{wid}").status_code == 200
+
+    def test_reject_id_with_double_quote(self, client):
+        r = client.post("/api/workspaces", json={"id": 'ab"cd', "name": "Injection"})
+        assert r.status_code == 400
+
+    def test_reject_id_with_angle_brackets(self, client):
+        r = client.post("/api/workspaces", json={"id": "a<script>b", "name": "Injection"})
+        assert r.status_code == 400
+
+    def test_reject_id_with_space(self, client):
+        r = client.post("/api/workspaces", json={"id": "has space", "name": "Injection"})
+        assert r.status_code == 400
+
+    def test_reject_overlong_id(self, client):
+        r = client.post("/api/workspaces", json={"id": "a" * 65, "name": "Too Long"})
+        assert r.status_code == 400
+
     def test_delete_workspace(self, client):
         wid = make_workspace(client)["id"]
         r = client.delete(f"/api/workspaces/{wid}")
@@ -677,6 +704,33 @@ class TestApprove:
         })
         assert r.status_code == 200
         assert "echo hello" in app_module._session_trusted_commands
+
+
+# ===========================================================================
+# File-picker responses
+# ===========================================================================
+
+class TestFileResponse:
+    def test_unknown_request_id_returns_404(self, client):
+        r = client.post("/api/file-response", json={"request_id": "ghost", "files": []})
+        assert r.status_code == 404
+
+    def test_non_local_caller_rejected(self, client):
+        """A remote host must not be able to resolve in-flight file-picker
+        requests (mirrors the local-caller guard on /api/approve and
+        /api/session/trust). We simulate a non-local caller by making the
+        shared guard raise, then confirm the endpoint enforces it (403)
+        before touching file_responses."""
+        from unittest.mock import patch
+
+        from fastapi import HTTPException
+
+        def _deny(_request):
+            raise HTTPException(403, "This endpoint is limited to local callers.")
+
+        with patch("services.session._require_local_caller", side_effect=_deny):
+            r = client.post("/api/file-response", json={"request_id": "x", "files": []})
+        assert r.status_code == 403
 
 
 # ===========================================================================

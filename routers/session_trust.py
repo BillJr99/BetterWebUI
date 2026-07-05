@@ -69,7 +69,12 @@ class FileResponseIn(BaseModel):
 
 
 @router.post("/api/file-response")
-async def post_file_response(r: FileResponseIn) -> dict:
+async def post_file_response(r: FileResponseIn, request: Request) -> dict:
+    # Resolving an in-flight file-picker request can influence the tool gate,
+    # so restrict this endpoint to local callers (matching /api/approve and
+    # /api/session/trust). A remote host must not be able to answer file
+    # requests destined for the operator's local browser.
+    session._require_local_caller(request)
     ok = session.file_responses.resolve(r.request_id, r.files or [])
     if not ok:
         raise HTTPException(404, "Unknown file request id")

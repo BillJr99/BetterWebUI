@@ -9,6 +9,7 @@ COPY app.py .
 COPY verification.py .
 COPY scheduler.py .
 COPY services/ services/
+COPY routers/ routers/
 COPY static/ static/
 COPY skills/ skills/
 
