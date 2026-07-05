@@ -91,22 +91,43 @@ class _RequestIdFilter(logging.Filter):
 
 
 _LOG_DIR = ROOT / "logs"
-_LOG_DIR.mkdir(parents=True, exist_ok=True)
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s [rid=%(request_id)s]: %(message)s",
-    handlers=[
-        logging.handlers.RotatingFileHandler(
-            _LOG_DIR / "betterwebui.log",
-            maxBytes=10 * 1024 * 1024,
-            backupCount=3,
-            encoding="utf-8",
-        ),
-        logging.StreamHandler(),
-    ],
-)
-for _handler in logging.getLogger().handlers:
-    _handler.addFilter(_RequestIdFilter())
+
+
+def _configure_logging() -> None:
+    """Configure process-wide logging exactly once, at import time.
+
+    - Level comes from BWUI_LOG_LEVEL (default INFO) so operators can turn on
+      DEBUG without code changes.
+    - Two handlers: a rotating file under logs/ and stderr.
+    - The request-id filter is attached to every root handler, so the rid=
+      field is stamped consistently on all records — request-path records get
+      the middleware-assigned id (background tasks log rid=- since they run
+      outside any request context).
+    All betterwebui.* loggers propagate to root; none add their own handlers.
+    """
+    _LOG_DIR.mkdir(parents=True, exist_ok=True)
+    level_name = os.environ.get("BWUI_LOG_LEVEL", "INFO").upper()
+    level = getattr(logging, level_name, None)
+    if not isinstance(level, int):
+        level = logging.INFO
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s [%(levelname)s] %(name)s [rid=%(request_id)s]: %(message)s",
+        handlers=[
+            logging.handlers.RotatingFileHandler(
+                _LOG_DIR / "betterwebui.log",
+                maxBytes=10 * 1024 * 1024,
+                backupCount=3,
+                encoding="utf-8",
+            ),
+            logging.StreamHandler(),
+        ],
+    )
+    for handler in logging.getLogger().handlers:
+        handler.addFilter(_RequestIdFilter())
+
+
+_configure_logging()
 logger = logging.getLogger("betterwebui")
 
 
@@ -2534,13 +2555,15 @@ async def lifespan(app: FastAPI):
     # ── startup ────────────────────────────────────────────────────────────
     try:
         await mcp_manager.reconcile()
-    except Exception as exc:
-        print(f"[BetterWebUI] MCP startup error: {exc}")
+    except Exception:
+        # Startup continues without MCP servers; each server can still be
+        # (re)started later from the UI.
+        logging.getLogger("betterwebui.mcp").exception("MCP startup reconcile failed")
     # One sweep at boot so test fixtures get a clean state.
     try:
         _sweep_transient_uploads()
-    except Exception:
-        pass
+    except Exception as exc:
+        logging.getLogger("betterwebui.uploads").warning("Boot-time upload sweep failed: %s", exc)
     _transient_sweep_task = asyncio.create_task(_transient_sweep_loop())
     try:
         from scheduler import start_scheduler
@@ -2557,11 +2580,11 @@ async def lifespan(app: FastAPI):
         _transient_sweep_task.cancel()
     if _scheduler_task is not None:
         _scheduler_task.cancel()
-    for client in list(mcp_manager.clients.values()):
+    for name, client in list(mcp_manager.clients.items()):
         try:
             await client.stop()
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger("betterwebui.mcp").warning("Shutdown of MCP server '%s' failed: %s", name, exc)
 
 
 app = FastAPI(title="BetterWebUI", lifespan=lifespan)

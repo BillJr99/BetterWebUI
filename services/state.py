@@ -1,4 +1,21 @@
-"""Persist enabled/disabled state for each integrated service."""
+"""Persist enabled/disabled state for each integrated service.
+
+Concurrency invariants (audited, no lock required today):
+
+- Every helper here is synchronous and await-free, and all callers — the
+  /api/services/* route handlers in services/routes.py + app.py's chat tool
+  paths, and the background health probes spawned via asyncio.gather in
+  services/health.py — are coroutines on the single event loop. Each
+  load -> mutate -> save cycle therefore runs to completion without another
+  coroutine interleaving, which is what makes the read-modify-write in
+  set_enabled() safe without a lock.
+- If any helper ever awaits between _load() and _save() (or the file I/O is
+  moved to a thread/executor), wrap the read-modify-write in an
+  asyncio.Lock — see scheduler._TASKS_LOCK for the pattern.
+- The state file is only written through _save(); background tasks only
+  *read* (services/health.py checks is_enabled), so readers can at worst see
+  a value that is one write stale, never a torn in-memory structure.
+"""
 from __future__ import annotations
 
 import json

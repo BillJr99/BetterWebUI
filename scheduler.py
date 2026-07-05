@@ -128,6 +128,25 @@ def _append_history(task: dict, entry: dict, cap: int = 10) -> None:
     task["history"] = h[-cap:]
 
 
+# Serialises read-modify-write cycles on the tasks file. Invariants:
+#
+#   1. The CRUD helpers at the bottom of this module (list_tasks / upsert_task
+#      / delete_task / get_task) are synchronous and await-free, and every
+#      route handler in app.py is async — so the event loop already runs each
+#      helper atomically with respect to every other coroutine. They therefore
+#      do not need this lock WHILE THAT STAYS TRUE. If one of them ever awaits
+#      between its _read_tasks() and _write_tasks() (e.g. aiofiles), it must
+#      take _TASKS_LOCK around the whole read-modify-write.
+#
+#   2. The scheduler tick DOES await (run_callback can run for minutes)
+#      between reading the task list and persisting a task's outcome. Request
+#      handlers can add/edit/delete tasks during that window, so the tick must
+#      never write back its pre-await snapshot — it re-reads the file and
+#      merges the outcome into the live task by id, under this lock (see
+#      _scheduler_tick).
+_TASKS_LOCK = asyncio.Lock()
+
+
 async def start_scheduler(
     tasks_path: Path,
     run_callback: Callable[[dict], Awaitable[dict]],
@@ -143,8 +162,8 @@ async def start_scheduler(
         except asyncio.CancelledError:
             log.info("Scheduler stopping.")
             raise
-        except Exception as exc:
-            log.warning("Scheduler tick failed: %s", exc)
+        except Exception:
+            log.exception("Scheduler tick failed")
         await asyncio.sleep(poll_seconds)
 
 
@@ -153,24 +172,38 @@ async def _scheduler_tick(
     run_callback: Callable[[dict], Awaitable[dict]],
     send_notification: Callable[[dict, dict], Awaitable[None]],
 ) -> None:
-    tasks = _read_tasks(tasks_path)
-    if not tasks:
-        return
-    now = _now()
-    dirty = False
-    for task in tasks:
-        if not task.get("enabled", True):
-            continue
-        nxt = task.get("next_run_at")
-        if nxt is None:
-            _refresh_next_run(task)
-            nxt = task.get("next_run_at")
-            dirty = True
-            if nxt is None:
+    # Phase 1 — decide what is due. Read, backfill missing next_run_at, and
+    # persist the backfill in one locked section with no awaits inside, so
+    # concurrent CRUD from request handlers cannot interleave with it.
+    async with _TASKS_LOCK:
+        tasks = _read_tasks(tasks_path)
+        if not tasks:
+            return
+        now = _now()
+        due: list[dict] = []
+        dirty = False
+        for task in tasks:
+            if not task.get("enabled", True):
                 continue
-        if float(nxt) > now:
-            continue
-        # Fire it.
+            nxt = task.get("next_run_at")
+            if nxt is None:
+                _refresh_next_run(task)
+                nxt = task.get("next_run_at")
+                dirty = True
+                if nxt is None:
+                    continue
+            if float(nxt) > now:
+                continue
+            due.append(task)
+        if dirty:
+            _write_tasks(tasks_path, tasks)
+
+    # Phase 2 — fire each due task, then persist its outcome. run_callback can
+    # take minutes, and /api/scheduled-tasks handlers may have added, edited,
+    # or deleted tasks in the meantime; writing back the pre-run snapshot
+    # would silently revert those changes. So after each run we RE-READ the
+    # file and merge the outcome into the live version of the task by id.
+    for task in due:
         log.info("Firing scheduled task %s (%s).", task.get("id"), task.get("name"))
         try:
             result = await run_callback(task)
@@ -180,21 +213,28 @@ async def _scheduler_tick(
             ok = False
             summary = f"Run failed: {exc}"
             result = {"ok": False, "summary": summary}
-        task["last_run_at"] = now
-        _append_history(task, {"ts": now, "ok": ok, "summary": summary})
-        sched = task.get("schedule") or {}
-        if sched.get("kind") == "once":
-            task["enabled"] = False
-            task["next_run_at"] = None
-        else:
-            _refresh_next_run(task)
-        dirty = True
+
+        async with _TASKS_LOCK:
+            current = _read_tasks(tasks_path)
+            live = next((t for t in current if t.get("id") == task.get("id")), None)
+            if live is None:
+                # Deleted while it ran — do not resurrect it.
+                log.info("Scheduled task %s was deleted mid-run; outcome not persisted.", task.get("id"))
+            else:
+                live["last_run_at"] = now
+                _append_history(live, {"ts": now, "ok": ok, "summary": summary})
+                sched = live.get("schedule") or {}
+                if sched.get("kind") == "once":
+                    live["enabled"] = False
+                    live["next_run_at"] = None
+                else:
+                    _refresh_next_run(live)
+                _write_tasks(tasks_path, current)
+
         try:
             await send_notification(task, result)
         except Exception as exc:
             log.warning("Notification for %s failed: %s", task.get("id"), exc)
-    if dirty:
-        _write_tasks(tasks_path, tasks)
 
 
 # CRUD helpers used by app.py endpoints
