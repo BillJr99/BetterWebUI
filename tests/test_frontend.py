@@ -14,7 +14,10 @@ from pathlib import Path
 
 STATIC = Path(__file__).resolve().parent.parent / "static"
 INDEX_HTML = (STATIC / "index.html").read_text(encoding="utf-8")
-STYLE_CSS = (STATIC / "style.css").read_text(encoding="utf-8")
+# style.css was split into ordered files under static/css/ (Phase 3); the
+# structural assertions below apply to the concatenation in cascade order.
+CSS_FILES = ["base.css", "layout.css", "chat.css", "components.css", "overlays.css"]
+STYLE_CSS = "\n".join((STATIC / "css" / f).read_text(encoding="utf-8") for f in CSS_FILES)
 # app.js was split into native ES modules under static/js/ (Phase 3); the
 # structural assertions below apply to the concatenated module graph.
 APP_JS_FILES = sorted((STATIC / "js").glob("*.js"))
@@ -134,7 +137,9 @@ class TestIndexHtml:
         assert INDEX_HTML.index("/static/lib.js") < INDEX_HTML.index("/static/js/main.js")
 
     def test_style_css_linked(self):
-        assert "/static/style.css" in INDEX_HTML
+        # The split stylesheets must be linked in cascade order.
+        positions = [INDEX_HTML.index(f"/static/css/{f}") for f in CSS_FILES]
+        assert positions == sorted(positions)
 
 
 # ===========================================================================
